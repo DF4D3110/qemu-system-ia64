@@ -191,8 +191,8 @@ PAL_VERSION_VALUE = ((2 << 40) | (0x23 << 32) | (1 << 24) |
 PAL_INSERTABLE_PAGE_SIZE_MASK = ((1 << 12) | (1 << 13) | (1 << 14) |
                                  (1 << 16) | (1 << 18) | (1 << 20) |
                                  (1 << 22) | (1 << 24) | (1 << 26) |
-                                 (1 << 28) | (1 << 30))
-PAL_PURGE_PAGE_SIZE_MASK = PAL_INSERTABLE_PAGE_SIZE_MASK | (1 << 32)
+                                 (1 << 28) | (1 << 30) | (1 << 32))
+PAL_PURGE_PAGE_SIZE_MASK = PAL_INSERTABLE_PAGE_SIZE_MASK
 PAL_VM_SUMMARY_INFO_1 = (1 | (IA64_IMPL_PA_BITS << 1) | (24 << 8) |
                          ((IA64_PKR_COUNT - 1) << 16) |
                          (8 << 24) | ((IA64_TR_COUNT - 1) << 32) |

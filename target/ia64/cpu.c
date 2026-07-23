@@ -914,9 +914,11 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
     cc->gdb_num_core_regs = IA64_GDB_NUM_CORE_REGS;
     cc->tcg_ops = &ia64_tcg_ops;
 
-    /* Keep direct instantiation of the base type backward compatible. */
+    /*
+     * Keep direct instantiation of the base type aligned with the legacy model.
+     */
     icc->cpuid_version = 0x000000001f010504ULL;
-    icc->cpuid_features = IA64_CPUID4_LB;
+    icc->cpuid_features = IA64_CPUID4_LB | IA64_CPUID4_SD;
     icc->tr_count = 64;
     icc->has_native_ia32 = true;
     icc->has_virtualization = false;
@@ -947,15 +949,14 @@ static void ia64_cpu_model_class_init(ObjectClass *oc, const void *data)
 
 /*
  * Translation-register file size is implementation-specific; the SDM only
- * guarantees eight of each bank.  Madison implements 64 ITRs and 64 DTRs,
- * and so does Tukwila.  No published figure for Montecito was found, so
- * take the value shared by the generations on either side of it.
+ * guarantees eight of each bank.  Model both supported CPU generations
+ * with 64 ITRs and 64 DTRs.
  */
 static const IA64CPUModelDef ia64_cpu_model_madison = {
     /* Family 0x1f, model 1, revision 5, CPUID[4] is the last register. */
     .cpuid_version = 0x000000001f010504ULL,
     /* No 16-byte atomics and no virtualization: both post-date Madison. */
-    .cpuid_features = IA64_CPUID4_LB,
+    .cpuid_features = IA64_CPUID4_LB | IA64_CPUID4_SD,
     .tr_count = 64,
     .has_native_ia32 = true,
     .has_virtualization = false,
@@ -964,7 +965,7 @@ static const IA64CPUModelDef ia64_cpu_model_madison = {
 static const IA64CPUModelDef ia64_cpu_model_montecito = {
     /* Family 0x20, model 0, C2 revision 7, CPUID[4] is the last register. */
     .cpuid_version = 0x0000000020000704ULL,
-    .cpuid_features = IA64_CPUID4_LB | IA64_CPUID4_AO,
+    .cpuid_features = IA64_CPUID4_LB | IA64_CPUID4_SD | IA64_CPUID4_AO,
     .tr_count = 64,
     /*
      * Montecito implements the virtualization extensions, but this model

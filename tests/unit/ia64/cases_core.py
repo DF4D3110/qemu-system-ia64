@@ -1109,7 +1109,7 @@ test_mov_cpuid_indexed_decode = require_registers("mov_cpuid_indexed_decode", [
      br_cond(0x60, 0x60)),
 ], {
     "ip": 0x60,
-    "r28": 0x0000000000000005,
+    "r28": 0x0000000000000007,
     "r29": 0x0000000020000704,
     "r30": 0x49656e69756e6547,
 }, entry=0x10)
@@ -1122,7 +1122,7 @@ test_mov_cpuid_madison_model = require_registers(
         (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x40)),
     ], {
         "ip": 0x40,
-        "r28": 0x0000000000000001,
+        "r28": 0x0000000000000003,
         "r29": 0x000000001f010504,
     }, entry=0x10, cpu="madison")
 
