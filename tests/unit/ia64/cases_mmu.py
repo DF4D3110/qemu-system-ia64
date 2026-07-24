@@ -2150,27 +2150,30 @@ test_itc_d_preserves_24bit_key = require_registers(
         "r31": 0x12345,
     }, entry=0x10)
 
-test_itc_d_4g_page_size_reserved_field_fault = \
-    require_uncollected_reserved_field(
-    "itc_d_4g_page_size_reserved_field_fault", [
+# A 4 GiB (2**32) page is an architected insertable page size, so itc.d/itr.d
+# with ITIR.ps == 32 completes without a Reserved Register/Field fault and
+# execution falls through to the terminal spin loop.
+test_itc_d_4g_page_size_is_insertable = require_registers(
+    "itc_d_4g_page_size_is_insertable", [
         (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
         (0x20, *movl_mlx(19, HIGH_TR_BASE + 0x20000)),
         (0x30, 0x00, adds(7, 32 << 2, 0), nop_i(), nop_i()),
         (0x40, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
         (0x50, 0x00, mov_m_gr_cr(19, 20), nop_i(), nop_i()),
         (0x60, 0x00, itc_d(18), nop_i(), nop_i()),
-    ], fault_ip=0x60, fault_imm=itc_d(18), entry=0x10)
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+    ], {"ip": 0x70}, entry=0x10)
 
-test_itr_d_4g_page_size_reserved_field_fault = \
-    require_uncollected_reserved_field(
-    "itr_d_4g_page_size_reserved_field_fault", [
+test_itr_d_4g_page_size_is_insertable = require_registers(
+    "itr_d_4g_page_size_is_insertable", [
         (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
         (0x20, *movl_mlx(19, HIGH_TR_BASE + 0x20000)),
         (0x30, 0x00, adds(7, 32 << 2, 0), nop_i(), nop_i()),
         (0x40, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
         (0x50, 0x00, mov_m_gr_cr(19, 20), adds(5, 5, 0), nop_i()),
         (0x60, 0x00, itr_d(5, 18), nop_i(), nop_i()),
-    ], fault_ip=0x60, fault_imm=itr_d(5, 18), entry=0x10)
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+    ], {"ip": 0x70}, entry=0x10)
 
 test_itc_d_present_reserved_pte_field_fault = \
     require_uncollected_reserved_field(
@@ -6128,7 +6131,7 @@ CASE_NAMES = (
     'ifetch_page_not_present_fallthrough_records_faulting_iip',
     'interruption_serializes_pending_ptr_d',
     'it_only_keeps_data_physical',
-    'itc_d_4g_page_size_reserved_field_fault',
+    'itc_d_4g_page_size_is_insertable',
     'itc_d_clean_page_read_fill_store_raises_dirty_bit',
     'itc_d_clear_accessed_raises_data_access_bit',
     'itc_d_clear_accessed_store_precedes_access_bit',
@@ -6154,7 +6157,7 @@ CASE_NAMES = (
     'itc_i_present_reserved_pte_field_fault',
     'itc_i_resumes_next_slot_after_tb_exit',
     'itlb_mapping_change_keeps_reusable_tb_cache',
-    'itr_d_4g_page_size_reserved_field_fault',
+    'itr_d_4g_page_size_is_insertable',
     'itr_d_8k_odd_subpage_store_visible_across_call',
     'itr_d_8k_translation_uses_unrounded_paddr',
     'itr_d_all_tr_slots_survive_tc_churn',
@@ -6303,13 +6306,11 @@ CASE_NAMES = (
 
 CASE_METADATA = {
     'interruption_serializes_pending_ptr_d': CaseMetadata(nonterminal_effect_loop=True),
-    'itc_d_4g_page_size_reserved_field_fault': CaseMetadata(terminal_is_fault_ip=True),
     'itc_d_not_present_rejects_low_itir_reserved_field': CaseMetadata(terminal_is_fault_ip=True),
     'itc_d_present_reserved_itir_field_fault': CaseMetadata(terminal_is_fault_ip=True),
     'itc_d_present_reserved_ma_field_fault': CaseMetadata(terminal_is_fault_ip=True),
     'itc_d_present_reserved_pte_field_fault': CaseMetadata(terminal_is_fault_ip=True),
     'itc_i_present_reserved_pte_field_fault': CaseMetadata(terminal_is_fault_ip=True),
-    'itr_d_4g_page_size_reserved_field_fault': CaseMetadata(terminal_is_fault_ip=True),
     'itr_i_8k_translation_uses_unrounded_paddr': CaseMetadata(nonterminal_effect_loop=True),
     'itr_i_clear_accessed_raises_inst_access_bit': CaseMetadata(nonterminal_effect_loop=True),
     'ptr_i_purges_matching_itr_by_address': CaseMetadata(nonterminal_effect_loop=True),

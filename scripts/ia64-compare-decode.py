@@ -51,15 +51,25 @@ def repo_root():
 
 
 def parse_opcode_enum():
-    cpu_c = repo_root() / "target" / "ia64" / "cpu.c"
-    text = cpu_c.read_text(encoding="utf-8")
-    match = re.search(
-        r"typedef enum Ia64Opcode \{(?P<body>.*?)\} Ia64Opcode;",
-        text,
-        re.S,
-    )
+    candidates = [
+        repo_root() / "target" / "ia64" / "decode" / "opcode.h",
+        repo_root() / "target" / "ia64" / "cpu.c",
+    ]
+    match = None
+    for cand in candidates:
+        if not cand.exists():
+            continue
+        match = re.search(
+            r"typedef enum Ia64Opcode \{(?P<body>.*?)\} Ia64Opcode;",
+            cand.read_text(encoding="utf-8"),
+            re.S,
+        )
+        if match:
+            break
     if not match:
-        raise RuntimeError("could not find Ia64Opcode enum in target/ia64/cpu.c")
+        raise RuntimeError(
+            "could not find Ia64Opcode enum in target/ia64/decode/opcode.h "
+            "or target/ia64/cpu.c")
     names = []
     for line in match.group("body").splitlines():
         line = line.split("/*", 1)[0].split("//", 1)[0]

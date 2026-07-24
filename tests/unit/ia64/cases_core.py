@@ -583,7 +583,7 @@ test_tf_upper_cpuid_feature_bits = require_registers(
         "r5": 0,
         "r6": 1,
         "r7": 0,
-        "r29": 0x0000000000000005,
+        "r29": 0x0000000000000007,
     }, entry=0x10)
 
 test_tf_same_pred_illegal = require_exception(
