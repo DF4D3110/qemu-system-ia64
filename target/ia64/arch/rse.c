@@ -715,6 +715,15 @@ static void ia64_rse_invalidate_non_current(CPUIA64State *env)
     env->rse.rse_clean = 0;
     env->rse.rse_clean_nat = 0;
     env->rse.rse_invalid = IA64_STACKED_GR_COUNT - env->cfm_sof;
+    /*
+     * Dropping the dirty partition empties the backing store's dirty
+     * region, so AR.BSPSTORE meets AR.BSP.  br.ia rejects a non-empty
+     * store beforehand, but an rfi to an IA-32 target arrives here with
+     * whatever the interrupted context left, and leaving BSPSTORE
+     * behind would both break BSPSTORE == BSP - 8*ndirty and leave
+     * AR.RNAT collecting for a group it no longer addresses.
+     */
+    ia64_rse_rnat_move_bspstore(env, env->ar_bsp);
 }
 
 /*
