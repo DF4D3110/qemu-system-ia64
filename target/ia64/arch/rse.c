@@ -24,6 +24,11 @@
                          (env)->rse.rse_clean, (env)->rse.rse_clean_nat, \
                          (env)->rse.rse_invalid, (env)->cfm_sof)
 
+static bool ia64_rse_has_clean_partition(CPUIA64State *env)
+{
+    return ia64_env_cpu_class(env)->rse_has_clean_partition;
+}
+
 static int ia64_rse_mmu_index(CPUIA64State *env)
 {
     return env->psr & IA64_PSR_RT ? MMU_IDX_RSE : MMU_PHYS_IDX;
@@ -105,45 +110,112 @@ static inline uint64_t ia64_rse_collect_word(uint64_t addr)
     return (addr & ~0x1ffULL) | (63ULL << 3);
 }
 
-/*
- * AR.RNAT only ever holds the NaT collection of the group that
- * contains AR.BSPSTORE: RNAT{x} belongs to the register spilled at
- * BSPSTORE{63:9}:x:0{2:0} (SDM Vol.2 6.5.2).  RSE stores fill it in
- * from BSPSTORE{8:3} upwards, so a run of stores only defines the bits
- * at or above the index the run started from; the bits below it belong
- * to registers spilled earlier and are only in the backing store.
- * Repositioning BSPSTORE into a different group discards every bit the
- * previous group defined; moving it down within the group only extends
- * the run, because everything from the new index upwards is spilled
- * again before the collection word is written.
- */
-/* AR.RNAT no longer describes anything below AR.BSPSTORE{8:3}. */
-static void ia64_rse_rnat_discarded(CPUIA64State *env)
+static inline uint64_t ia64_rse_rnat_range_mask(uint32_t first,
+                                                uint32_t last)
 {
-    env->rse.rse_rnat_first = ia64_rse_collect_bit(env->ar_bspstore);
-}
+    uint64_t below_last;
 
-void ia64_rse_rnat_bspstore_moved(CPUIA64State *env, uint64_t old_bspstore)
-{
-    if (ia64_rse_collect_bit(env->ar_bspstore) < env->rse.rse_rnat_first ||
-        ia64_rse_collect_word(env->ar_bspstore) !=
-        ia64_rse_collect_word(old_bspstore)) {
-        ia64_rse_rnat_discarded(env);
+    if (first >= last || first >= 63) {
+        return 0;
     }
+    below_last = last >= 63 ? INT64_MAX : (1ULL << last) - 1;
+    return below_last & (~0ULL << first);
 }
 
-/* AR.RNAT now holds the whole collection of AR.BSPSTORE's group. */
+/*
+ * Return the architected RNAT collection associated with AR.BSPSTORE.
+ *
+ * Mandatory fills can move the internal store pointer into a collection
+ * already held by the fill-side latch while AR.RNAT still preserves an
+ * unsaved partial spill collection elsewhere.  Compose the current
+ * collection on read, overlaying only the spill bits known to belong to it.
+ * This keeps the implementation latches separate without exposing an RNAT
+ * collection for a stale BSPSTORE value to software.
+ */
+uint64_t ia64_rse_read_rnat(const CPUIA64State *env)
+{
+    uint64_t collection_addr = ia64_rse_collect_word(env->ar_bspstore);
+    uint64_t value = env->ar_rnat;
+
+    if (env->rse.rse_load_rnat_valid &&
+        env->rse.rse_load_rnat_addr == collection_addr) {
+        value = env->rse.rse_load_rnat;
+        if (env->rse.rse_rnat_addr == collection_addr) {
+            uint64_t defined = ia64_rse_rnat_range_mask(
+                env->rse.rse_rnat_first, env->rse.rse_rnat_last);
+
+            value = (value & ~defined) | (env->ar_rnat & defined);
+        }
+    }
+    return value & INT64_MAX;
+}
+
+/*
+ * Software has supplied AR.RNAT for the partial spill collection containing
+ * AR.BSPSTORE.  Track the full collection address as well as RNATBitIndex:
+ * the six-bit index repeats every 512 bytes and cannot identify a collection
+ * by itself.
+ */
 void ia64_rse_rnat_reloaded(CPUIA64State *env)
 {
+    uint32_t bit = ia64_rse_collect_bit(env->ar_bspstore);
+
+    env->rse.rse_rnat_addr = ia64_rse_collect_word(env->ar_bspstore);
     env->rse.rse_rnat_first = 0;
+    env->rse.rse_rnat_last = bit < 63 ? bit + 1 : 63;
+}
+
+/*
+ * mov-to-BSPSTORE and loadrs make AR.RNAT undefined (SDM Vol.2 6.5.2).
+ * QEMU nevertheless needs deterministic behavior if guest software observes
+ * RNAT or spills before restoring it.  Preserve the visible readback until a
+ * spill, matching this target's established behavior, but detach it from all
+ * backing-store collections.  The first later spill starts a zero collection
+ * rather than recovering lower bits from its old backing word: those words
+ * may belong to a previously reused frame, and an early IA-64 setup path
+ * otherwise consumes their stale NaT bits after switching BSPSTORE within
+ * the same collection.
+ *
+ * This zero value is deliberately non-architectural compatibility behavior;
+ * the SDM does not define what software reads or what a later spill records
+ * until software restores RNAT.  UINT64_MAX marks the detached state so
+ * ia64_rse_store_one() can make the spill-side zero choice without changing
+ * the immediate readback.  The fill latch is derived from the old
+ * backing-store context and is also invalidated.
+ */
+void ia64_rse_rnat_undefined(CPUIA64State *env)
+{
+    env->rse.rse_rnat_addr = UINT64_MAX;
+    env->rse.rse_rnat_first = 0;
+    env->rse.rse_rnat_last = 0;
+    env->rse.rse_load_rnat = 0;
+    env->rse.rse_load_rnat_addr = 0;
+    env->rse.rse_load_rnat_valid = false;
 }
 
 static void ia64_rse_rnat_move_bspstore(CPUIA64State *env, uint64_t bspstore)
 {
-    uint64_t old_bspstore = env->ar_bspstore;
+    uint64_t collection_addr = ia64_rse_collect_word(bspstore);
 
+    /*
+     * This is internal br.ret/rfi partition movement, not architected
+     * mov-to-BSPSTORE.  It must not make RNAT undefined or discard the
+     * partial spill collection while mandatory fills walk below it.  It
+     * also must not make formerly undefined high bits valid when an
+     * incomplete frame temporarily moves BSPSTORE upward.
+     */
+    if (env->rse.rse_rnat_addr == collection_addr) {
+        uint32_t bit = ia64_rse_collect_bit(bspstore);
+        uint32_t last = bit < 63 ? bit + 1 : 63;
+
+        if (env->rse.rse_rnat_last > last) {
+            env->rse.rse_rnat_last = last;
+            if (env->rse.rse_rnat_first > last) {
+                env->rse.rse_rnat_first = last;
+            }
+        }
+    }
     env->ar_bspstore = bspstore;
-    ia64_rse_rnat_bspstore_moved(env, old_bspstore);
 }
 
 /*
@@ -409,41 +481,89 @@ static void ia64_rse_sync_frame_in(CPUIA64State *env)
 static int ia64_rse_store_one(CPUIA64State *env, uintptr_t ra)
 {
     uint64_t bspstore = env->ar_bspstore;
+    uint64_t collection_addr = ia64_rse_collect_word(bspstore);
     uint32_t ncb = ia64_rse_collect_bit(bspstore);
 
+    /*
+     * Bind RNAT before consuming it.  A prior mandatory fill may have left
+     * the same bit index from a different 512-byte collection in AR.RNAT.
+     * The tracked range records exactly which bits AR.RNAT can contribute
+     * if a fill or collection spill occurs before the range is complete.
+     */
+    if (env->rse.rse_rnat_addr == UINT64_MAX) {
+        /*
+         * The preceding mov-to-BSPSTORE or loadrs made every RNAT bit
+         * undefined.  Zero is the target's documented spill-side choice;
+         * merging bits below ncb from memory would resurrect NaT state from
+         * an older frame that happened to reuse the collection.
+         */
+        env->ar_rnat = 0;
+        env->rse.rse_rnat_addr = collection_addr;
+        env->rse.rse_rnat_first = 0;
+        env->rse.rse_rnat_last = ncb;
+    } else if (env->rse.rse_rnat_addr != collection_addr) {
+        env->ar_rnat = 0;
+        env->rse.rse_rnat_addr = collection_addr;
+        env->rse.rse_rnat_first = ncb;
+        env->rse.rse_rnat_last = ncb;
+    }
+
     if (ncb == 63) {
-        uint64_t collection = env->ar_rnat & INT64_MAX;
+        uint64_t defined = ia64_rse_rnat_range_mask(
+            env->rse.rse_rnat_first, env->rse.rse_rnat_last);
+        uint64_t collection = env->ar_rnat & defined;
 
         /*
          * SDM Vol.2 6.5: whenever BSPSTORE{8:3} are all ones the RSE
          * stores RNAT; bit 63 is always written as zero, and the spill
          * leaves RNAT undefined (cleared here).
          *
-         * The registers spilled below the point where this run of
-         * stores entered the group are still held by the collection
-         * word in memory and AR.RNAT never described them, so carry
-         * their bits over instead of overwriting them.  The read
-         * touches the very word the store is about to write, so it
-         * reaches no translation the store would not have needed.
+         * Internal pointer movement can leave only a subrange represented
+         * in AR.RNAT.  Retain all other bits from the completed backing
+         * word.  The architecturally undefined mov-to-BSPSTORE/loadrs case
+         * is bound above to the target's documented zero prefix.
          */
-        if (env->rse.rse_rnat_first != 0) {
-            uint64_t defined = (~0ULL << env->rse.rse_rnat_first) & INT64_MAX;
+        uint64_t from_memory = 0;
 
-            collection = ((collection & defined) |
-                          (ia64_rse_read_u64(env, bspstore, ra) & ~defined)) &
-                         INT64_MAX;
+        if (defined != INT64_MAX) {
+            from_memory =
+                ia64_rse_read_u64(env, bspstore, ra) & ~defined & INT64_MAX;
+            collection |= from_memory;
         }
         ia64_rse_write_u64(env, bspstore, collection, ra);
+        env->rse.rse_load_rnat = collection;
+        env->rse.rse_load_rnat_addr = collection_addr;
+        env->rse.rse_load_rnat_valid = true;
         env->ar_rnat = 0;
-        ia64_rse_rnat_reloaded(env);
         env->ar_bspstore = bspstore + 8;
+        env->rse.rse_rnat_addr = UINT64_MAX;
+        env->rse.rse_rnat_first = 0;
+        env->rse.rse_rnat_last = 0;
         env->rse.rse_dirty_nat--;
-        env->rse.rse_clean_nat++;
+        if (ia64_rse_has_clean_partition(env)) {
+            env->rse.rse_clean_nat++;
+        }
         env->psr &= ~(IA64_PSR_DA | IA64_PSR_DD);
         return 0;
     } else {
         uint32_t p = ia64_rse_wrap_phys((int32_t)env->rse.rse_bol -
                                         env->rse.rse_dirty);
+
+        if (env->rse.rse_rnat_first == env->rse.rse_rnat_last) {
+            env->rse.rse_rnat_first = ncb;
+            env->rse.rse_rnat_last = ncb;
+        } else if (ncb + 1 < env->rse.rse_rnat_first ||
+                   ncb > env->rse.rse_rnat_last) {
+            /*
+             * A non-contiguous internal pointer jump cannot be represented
+             * by one range.  Keep the bit being stored; other bits remain
+             * available from the backing collection.
+             */
+            env->rse.rse_rnat_first = ncb;
+            env->rse.rse_rnat_last = ncb;
+        } else if (ncb < env->rse.rse_rnat_first) {
+            env->rse.rse_rnat_first = ncb;
+        }
 
         ia64_rse_write_u64(env, bspstore, env->rse.rse_pgr[p], ra);
         if (ia64_rse_pgr_nat_get(env, p)) {
@@ -451,12 +571,88 @@ static int ia64_rse_store_one(CPUIA64State *env, uintptr_t ra)
         } else {
             env->ar_rnat &= ~(1ULL << ncb);
         }
+        if (env->rse.rse_rnat_last <= ncb) {
+            env->rse.rse_rnat_last = ncb + 1;
+        }
         env->ar_bspstore = bspstore + 8;
         env->rse.rse_dirty--;
-        env->rse.rse_clean++;
+        if (ia64_rse_has_clean_partition(env)) {
+            env->rse.rse_clean++;
+        } else {
+            env->rse.rse_invalid++;
+        }
         env->psr &= ~(IA64_PSR_DA | IA64_PSR_DD);
         return 1;
     }
+}
+
+/*
+ * Obtain the NaT collection for a mandatory fill without replacing the
+ * architected partial spill collection in AR.RNAT.  RSE.BspLoad can be in a
+ * different 512-byte collection from AR.BSPSTORE; conflating the two loses
+ * unsaved NaT bits and later attaches them to unrelated stacked registers.
+ *
+ * The SDM defines this externally through the resulting physical NaT state
+ * and the RNAT collection selected by AR.BSPSTORE.  rse_load_rnat is an
+ * implementation latch rather than a separate guest-visible register;
+ * ia64_rse_read_rnat() composes it into the architectural RNAT view when its
+ * collection becomes current.
+ */
+static uint64_t ia64_rse_fill_collection(CPUIA64State *env, uint64_t addr,
+                                         uintptr_t ra)
+{
+    uint64_t collection_addr = ia64_rse_collect_word(addr);
+    uint64_t replaced = 0;
+    uint64_t collection;
+
+    if (env->rse.rse_rnat_addr == collection_addr) {
+        replaced = ia64_rse_rnat_range_mask(
+            env->rse.rse_rnat_first, env->rse.rse_rnat_last);
+    }
+
+    if (env->rse.rse_load_rnat_valid &&
+        env->rse.rse_load_rnat_addr == collection_addr) {
+        collection = env->rse.rse_load_rnat;
+    } else if (env->ar_bspstore > collection_addr) {
+        /*
+         * AR.BSPSTORE has advanced past the collection word, so the RSE
+         * stored it when BSPSTORE{8:3} was all ones and the backing store
+         * holds the architected collection for this group.
+         */
+        collection = ia64_rse_read_u64(env, collection_addr, ra);
+    } else {
+        /*
+         * SDM Vol.2 6.5.2: "The RSE never saves partial NaT collections to
+         * the backing store."  Until BSPSTORE reaches this word the RSE has
+         * not written it, so the NaT bits of the registers spilled into the
+         * group are still held in AR.RNAT and the backing-store word holds
+         * whatever occupied that memory beforehand.  Reading it turns
+         * unrelated data into NaT on live stacked registers.
+         *
+         * Bits outside the tracked range are the architecturally undefined
+         * RNAT{62:RNATBitIndex+1}; resolve them to zero, matching the
+         * spill-side choice, because manufacturing a NaT is never safe.
+         */
+        collection = env->ar_rnat & replaced;
+    }
+
+    if (replaced != 0) {
+        /*
+         * SDM Vol.2 6.5.2 defines RNAT{RSE.RNATBitIndex:0} and leaves
+         * every higher bit undefined.  Internal RSE pointer movement can
+         * also leave only a suffix represented in AR.RNAT.  Overlay exactly
+         * the tracked defined range: an undefined high bit must never turn
+         * a valid stacked return register into a NaT during a mandatory
+         * fill.
+         */
+        collection = (collection & ~replaced) |
+                     (env->ar_rnat & replaced);
+    }
+    collection &= INT64_MAX;
+    env->rse.rse_load_rnat = collection;
+    env->rse.rse_load_rnat_addr = collection_addr;
+    env->rse.rse_load_rnat_valid = true;
+    return collection;
 }
 
 /*
@@ -477,39 +673,29 @@ static int ia64_rse_load_one(CPUIA64State *env, uintptr_t ra)
     uint32_t ncb = ia64_rse_collect_bit(bspload);
 
     if (ncb == 63) {
-        /* The whole collection of the group below is now in AR.RNAT. */
-        env->ar_rnat = ia64_rse_read_u64(env, bspload, ra) & INT64_MAX;
-        ia64_rse_rnat_reloaded(env);
+        env->rse.rse_load_rnat =
+            ia64_rse_read_u64(env, bspload, ra) & INT64_MAX;
+        env->rse.rse_load_rnat_addr = ia64_rse_collect_word(bspload);
+        env->rse.rse_load_rnat_valid = true;
         env->rse.rse_clean_nat++;
         env->psr &= ~(IA64_PSR_DA | IA64_PSR_DD);
         return 0;
     } else {
         uint64_t value;
+        uint64_t collection;
+        bool nat;
         uint32_t p;
         uint32_t v;
-
-        /*
-         * The register's NaT bit predates the run of stores that last
-         * filled AR.RNAT, so it only exists in the group's collection
-         * word.  Fetching it makes AR.RNAT the collection again; the
-         * bits it displaces belong to registers at or above BSPSTORE,
-         * which are re-spilled before the collection word is written.
-         * A collection covers 512 bytes, so the word shares a page
-         * with the fill and needs no translation of its own.
-         */
-        if (ncb < env->rse.rse_rnat_first) {
-            env->ar_rnat = ia64_rse_read_u64(
-                env, ia64_rse_collect_word(bspload), ra) & INT64_MAX;
-            ia64_rse_rnat_reloaded(env);
-        }
 
         value = ia64_rse_read_u64(env, bspload, ra);
         p = ia64_rse_wrap_phys(
             (int32_t)env->rse.rse_bol -
             (env->rse.rse_clean + env->rse.rse_dirty + 1));
 
+        collection = ia64_rse_fill_collection(env, bspload, ra);
+        nat = (collection >> ncb) & 1;
         env->rse.rse_pgr[p] = value;
-        ia64_rse_pgr_nat_set(env, p, (env->ar_rnat >> ncb) & 1);
+        ia64_rse_pgr_nat_set(env, p, nat);
         env->rse.rse_clean++;
         env->rse.rse_invalid--;
 
@@ -554,7 +740,7 @@ static void ia64_rse_complete_frame_loads(CPUIA64State *env, uintptr_t ra)
             env->rse.rse_clean_nat--;
             env->rse.rse_dirty_nat++;
         }
-        env->ar_bspstore -= 8;
+        ia64_rse_rnat_move_bspstore(env, env->ar_bspstore - 8);
     }
     env->rse.rse_cfle = false;
 }
@@ -790,6 +976,10 @@ void ia64_rse_check(CPUIA64State *env, const char *site)
                env->rse.rse_clean < 0 || env->rse.rse_invalid < 0 ||
                env->rse.rse_bol >= IA64_STACKED_GR_COUNT;
 
+    if (!bad && !ia64_rse_has_clean_partition(env)) {
+        bad |= env->rse.rse_clean != 0 || env->rse.rse_clean_nat != 0;
+    }
+
     if (!bad && env->rse.rse_dirty >= 0) {
         /* NaT collection words live at addresses 0x1f8 mod 0x200. */
         bad |= env->rse.rse_dirty_nat !=
@@ -826,6 +1016,16 @@ void ia64_rse_check(CPUIA64State *env, const char *site)
 #endif
 }
 
+void ia64_rse_resume_incomplete_frame(CPUIA64State *env)
+{
+    /*
+     * An rfi with IFS.v clear resumes the mandatory loads of the frame
+     * interrupted after br.ret or rfi (SDM Vol.2 section 6.8).
+     */
+    ia64_rse_complete_frame_loads(env, 0);
+    ia64_rse_check(env, "rfi-resume");
+}
+
 void ia64_rfi(CPUIA64State *env, uint64_t fault_ip, uint32_t fault_slot)
 {
     uint64_t old_psr = env->psr;
@@ -837,8 +1037,8 @@ void ia64_rfi(CPUIA64State *env, uint64_t fault_ip, uint32_t fault_slot)
     uint64_t ifs = env->cr_ifs;
     bool unimplemented_ia32_target =
         (ipsr & IA64_PSR_IS) &&
-        ((ipsr & IA64_PSR_IT) ? !ia64_va_is_implemented(raw_iip) :
-                                !ia64_pa_is_implemented(raw_iip));
+        ((ipsr & IA64_PSR_IT) ? !ia64_va_is_implemented(env, raw_iip) :
+                                !ia64_pa_is_implemented(env, raw_iip));
 
     /*
      * Montecito has no native IA-32 execution engine.  An OS must use its
@@ -907,8 +1107,7 @@ void ia64_rfi(CPUIA64State *env, uint64_t fault_ip, uint32_t fault_slot)
          * Returning with IFS.v = 0 resumes the original sequence of
          * mandatory loads for the still-incomplete frame.
          */
-        ia64_rse_complete_frame_loads(env, 0);
-        ia64_rse_check(env, "rfi-resume");
+        ia64_rse_resume_incomplete_frame(env);
     }
 }
 
@@ -1065,8 +1264,9 @@ void ia64_rse_br_ia(CPUIA64State *env, uint32_t b_reg,
     /*
      * Perform the architectural IA-64 to IA-32 transition: IP takes
      * BR[b1]{31:0} with byte granularity, PSR.is is set, and only the
-     * current (zero-size) frame stays valid.  Madison then imports the
-     * architected IA-32 register image before dispatching an IA-32 TB.
+     * current (zero-size) frame stays valid.  The native IA-32 execution
+     * engine then imports the architected register image before dispatching
+     * an IA-32 TB.
      */
     env->ip = target & UINT32_MAX;
     env->psr |= IA64_PSR_IS;
@@ -1084,8 +1284,9 @@ void ia64_rse_br_ia(CPUIA64State *env, uint32_t b_reg,
     ia64_ia32_enter(env);
 
     trap_code = ((env->psr & IA64_PSR_IT) ?
-                 !ia64_va_is_implemented(target) :
-                 !ia64_pa_is_implemented(target)) ? IA64_ISR_CODE_UI : 0;
+                 !ia64_va_is_implemented(env, target) :
+                 !ia64_pa_is_implemented(env, target)) ?
+                 IA64_ISR_CODE_UI : 0;
     trap_code |= (env->psr & IA64_PSR_TB) ? IA64_ISR_CODE_TB : 0;
     trap_code |= (env->psr & IA64_PSR_SS) ? IA64_ISR_CODE_SS : 0;
     if (!trap_code) {
@@ -1273,15 +1474,9 @@ void ia64_rse_load(CPUIA64State *env, uint64_t fault_ip, uint64_t raw,
         env->rse.rse_invalid = IA64_STACKED_GR_COUNT -
                            (env->cfm_sof + env->rse.rse_dirty);
     }
-    /*
-     * SDM Vol.2 6.5.4: loadrs causes the contents of the RNAT register
-     * to become undefined; invalidate it so stale collection bits are
-     * not applied to later mandatory loads, and leave the collection of
-     * the group BSPSTORE now points into to the backing store until
-     * software reloads RNAT.
-     */
+    /* SDM Vol.2 6.5.4 leaves AR.RNAT undefined. */
     env->ar_rnat = 0;
-    ia64_rse_rnat_discarded(env);
+    ia64_rse_rnat_undefined(env);
     ia64_rse_check(env, "loadrs");
     IA64_TRACE_RSE_STATE(env, "loadrs");
 }

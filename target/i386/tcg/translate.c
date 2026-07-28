@@ -30,6 +30,9 @@
 
 #include "exec/helper-proto.h"
 #include "exec/helper-gen.h"
+#ifdef TARGET_IA64
+#include "target/ia64/ia32/translate-adapter.h"
+#endif
 #include "helper-tcg.h"
 #include "decode-new.h"
 

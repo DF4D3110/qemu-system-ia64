@@ -7,7 +7,28 @@ from .encoding import (
     IA64_CR_ITM,
     IA64_CR_ITV,
     IA64_EXCP_NONE,
-    IA64_TR_COUNT,
+    IA64_PHYS_UC_BIT,
+    MADISON_PAL_VERSION_VALUE,
+    MADISON_PAL_VM_SUMMARY_INFO_1,
+    MADISON_TR_COUNT,
+    MERCED_INSERTABLE_PAGE_SIZE_MASK,
+    MERCED_IMPL_PA_BITS,
+    MERCED_PAL_PERF_MON_INFO_VALUE,
+    MERCED_PAL_VERSION_VALUE,
+    MERCED_PAL_CACHE_INFO_L0_2,
+    MERCED_PAL_CACHE_INFO_L0_D_1,
+    MERCED_PAL_CACHE_INFO_L0_I_1,
+    MERCED_PAL_CACHE_INFO_L1_U_1,
+    MERCED_PAL_CACHE_INFO_L1_U_2,
+    MERCED_PAL_CACHE_INFO_L2_U_1,
+    MERCED_PAL_CACHE_INFO_L2_U_2,
+    MERCED_PAL_VM_INFO_L0_D,
+    MERCED_PAL_VM_INFO_L0_I,
+    MERCED_PAL_VM_INFO_L1_D,
+    MERCED_PAL_VM_SUMMARY_INFO_1,
+    MERCED_PAL_VM_SUMMARY_INFO_2,
+    MERCED_PURGEABLE_PAGE_SIZE_MASK,
+    MONTECITO_TR_COUNT,
     PAL_AR_IMPLEMENTED_HIGH,
     PAL_AR_IMPLEMENTED_LOW,
     PAL_BRAND_BUFFER,
@@ -62,7 +83,9 @@ from .encoding import (
     PAL_MC_REGISTER_MEM,
     PAL_MC_RESUME,
     PAL_MEM_ATTRIB,
-    PAL_MEM_ATTRIB_WB_UC,
+    PAL_MEM_ATTRIB_ITANIUM2,
+    MERCED_PAL_MEM_ATTRIB,
+    MERCED_PAL_IO_BLOCK_DEFAULT,
     PAL_MEM_FOR_TEST,
     PAL_PERF_BUFFER,
     PAL_PERF_MON_INFO,
@@ -78,8 +101,9 @@ from .encoding import (
     PAL_PURGE_PAGE_SIZE_MASK,
     PAL_RATIO_16_1,
     PAL_RATIO_16_3,
-    PAL_RATIO_2_1,
+    PAL_RATIO_4_3,
     PAL_RATIO_4_1,
+    PAL_RATIO_8_1,
     PAL_REGISTER_INFO,
     PAL_RSE_INFO,
     PAL_SELF_TEST_STATE_TESTED,
@@ -119,6 +143,7 @@ from .encoding import (
     itr_d,
     itr_i,
     ld8,
+    ld8_s,
     mov_b_gr,
     mov_gr_psr_full,
     mov_m_gr_cr,
@@ -133,6 +158,7 @@ from .encoding import (
     rfi_to_gr,
     srlz_i,
     st8,
+    sum_um,
 )
 
 
@@ -186,6 +212,14 @@ test_pal_halt_light_stops_at_pal_continuation = require_registers(
         "r8": 0,
         "r31": 0,
     }, entry=0x10)
+
+test_pal_halt_light_reserved_arg = require_registers(
+    "pal_halt_light_reserved_arg",
+    pal_call_program(PAL_HALT_LIGHT, [(29, 1), (30, 0), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_HALT_LIGHT,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0,
+     "halted": 0},
+    entry=0x10)
 
 test_pal_halt_wakes_on_due_itm = require_registers(
     "pal_halt_wakes_on_due_itm", [
@@ -262,6 +296,42 @@ test_pal_version = require_registers("pal_version",
     pal_call_program(PAL_VERSION), {"ip": 0x30, "r28": PAL_VERSION, "r8": 0,
     "r9": PAL_VERSION_VALUE, "r10": PAL_VERSION_VALUE}, entry=0x10)
 
+test_pal_version_merced = require_registers("pal_version_merced",
+    pal_call_program(PAL_VERSION), {"ip": 0x30, "r28": PAL_VERSION, "r8": 0,
+    "r9": MERCED_PAL_VERSION_VALUE, "r10": MERCED_PAL_VERSION_VALUE},
+    entry=0x10, cpu="merced")
+
+test_pal_version_madison = require_registers("pal_version_madison",
+    pal_call_program(PAL_VERSION), {"ip": 0x30, "r28": PAL_VERSION, "r8": 0,
+    "r9": MADISON_PAL_VERSION_VALUE, "r10": MADISON_PAL_VERSION_VALUE},
+    entry=0x10, cpu="madison")
+
+test_pal_return_values_clear_nat = require_registers(
+    "pal_return_values_clear_nat", [
+        (0x10, 0x00, sum_um(0x8), adds(3, 0x104, 0), nop_i()),
+        (0x20, 0x00, ld8_s(8, 3), nop_i(), nop_i()),
+        (0x30, 0x00, ld8_s(9, 3), nop_i(), nop_i()),
+        (0x40, 0x00, ld8_s(10, 3), nop_i(), nop_i()),
+        (0x50, 0x00, ld8_s(11, 3), nop_i(), nop_i()),
+        (0x60, *movl_mlx(28, PAL_VERSION)),
+        (0x70, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x70, PAL_PROC_ENTRY)),
+        (0x80, 0x10, nop_m(), nop_i(),
+         br_cond(0x80, 0x80)),
+        (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+        (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+    ], {
+        "ip": 0x80,
+        "r8": 0,
+        "r9": MERCED_PAL_VERSION_VALUE,
+        "r10": MERCED_PAL_VERSION_VALUE,
+        "r11": 0,
+        "r8_nat": 0,
+        "r9_nat": 0,
+        "r10_nat": 0,
+        "r11_nat": 0,
+    }, entry=0x10, cpu="merced")
+
 test_pal_version_reserved_arg = require_registers("pal_version_reserved_arg",
     pal_call_program(PAL_VERSION, [(29, 1), (30, 0), (31, 0)]),
     {"ip": 0x60, "r28": PAL_VERSION,
@@ -270,8 +340,18 @@ test_pal_version_reserved_arg = require_registers("pal_version_reserved_arg",
 
 test_pal_rse_info = require_registers("pal_rse_info",
     pal_call_program(PAL_RSE_INFO),
-    {"ip": 0x30, "r28": PAL_RSE_INFO, "r8": 0, "r9": 96, "r10": 16},
+    {"ip": 0x30, "r28": PAL_RSE_INFO, "r8": 0, "r9": 96, "r10": 0},
     entry=0x10)
+
+test_pal_rse_info_madison = require_registers("pal_rse_info_madison",
+    pal_call_program(PAL_RSE_INFO),
+    {"ip": 0x30, "r28": PAL_RSE_INFO, "r8": 0, "r9": 96, "r10": 0},
+    entry=0x10, cpu="madison")
+
+test_pal_rse_info_merced = require_registers("pal_rse_info_merced",
+    pal_call_program(PAL_RSE_INFO),
+    {"ip": 0x30, "r28": PAL_RSE_INFO, "r8": 0, "r9": 96, "r10": 0},
+    entry=0x10, cpu="merced")
 
 test_pal_rse_info_reserved_arg = require_registers("pal_rse_info_reserved_arg",
     pal_call_program(PAL_RSE_INFO, [(29, 0), (30, 1), (31, 0)]),
@@ -283,6 +363,20 @@ test_pal_vm_summary = require_registers("pal_vm_summary",
     pal_call_program(PAL_VM_SUMMARY),
     {"ip": 0x30, "r28": PAL_VM_SUMMARY, "r8": 0,
     "r9": PAL_VM_SUMMARY_INFO_1, "r10": PAL_VM_SUMMARY_INFO_2}, entry=0x10)
+
+test_pal_vm_summary_merced = require_registers("pal_vm_summary_merced",
+    pal_call_program(PAL_VM_SUMMARY),
+    {"ip": 0x30, "r28": PAL_VM_SUMMARY, "r8": 0,
+     "r9": MERCED_PAL_VM_SUMMARY_INFO_1,
+     "r10": MERCED_PAL_VM_SUMMARY_INFO_2},
+    entry=0x10, cpu="merced")
+
+test_pal_vm_summary_madison = require_registers("pal_vm_summary_madison",
+    pal_call_program(PAL_VM_SUMMARY),
+    {"ip": 0x30, "r28": PAL_VM_SUMMARY, "r8": 0,
+     "r9": MADISON_PAL_VM_SUMMARY_INFO_1,
+     "r10": PAL_VM_SUMMARY_INFO_2},
+    entry=0x10, cpu="madison")
 
 test_pal_vm_summary_reserved_arg = require_registers(
     "pal_vm_summary_reserved_arg",
@@ -301,6 +395,12 @@ test_pal_cache_summary_madison = require_registers(
     pal_call_program(PAL_CACHE_SUMMARY),
     {"ip": 0x30, "r28": PAL_CACHE_SUMMARY, "r8": 0,
      "r9": 3, "r10": 4}, entry=0x10, cpu="madison")
+
+test_pal_cache_summary_merced = require_registers(
+    "pal_cache_summary_merced",
+    pal_call_program(PAL_CACHE_SUMMARY),
+    {"ip": 0x30, "r28": PAL_CACHE_SUMMARY, "r8": 0,
+     "r9": 3, "r10": 4}, entry=0x10, cpu="merced")
 
 test_pal_cache_summary_reserved_arg = require_registers(
     "pal_cache_summary_reserved_arg",
@@ -355,6 +455,45 @@ test_pal_cache_info_l2_unified_bad_type = require_registers(
      "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
 
+test_pal_cache_info_merced_l0_instruction = require_registers(
+    "pal_cache_info_merced_l0_instruction",
+    pal_call_program(PAL_CACHE_INFO, [(29, 0), (30, 1), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_CACHE_INFO, "r8": 0,
+     "r9": MERCED_PAL_CACHE_INFO_L0_I_1,
+     "r10": MERCED_PAL_CACHE_INFO_L0_2, "r11": 0},
+    entry=0x10, cpu="merced")
+
+test_pal_cache_info_merced_l0_data = require_registers(
+    "pal_cache_info_merced_l0_data",
+    pal_call_program(PAL_CACHE_INFO, [(29, 0), (30, 2), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_CACHE_INFO, "r8": 0,
+     "r9": MERCED_PAL_CACHE_INFO_L0_D_1,
+     "r10": MERCED_PAL_CACHE_INFO_L0_2, "r11": 0},
+    entry=0x10, cpu="merced")
+
+test_pal_cache_info_merced_l1_unified = require_registers(
+    "pal_cache_info_merced_l1_unified",
+    pal_call_program(PAL_CACHE_INFO, [(29, 1), (30, 2), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_CACHE_INFO, "r8": 0,
+     "r9": MERCED_PAL_CACHE_INFO_L1_U_1,
+     "r10": MERCED_PAL_CACHE_INFO_L1_U_2, "r11": 0},
+    entry=0x10, cpu="merced")
+
+test_pal_cache_info_merced_l1_instruction_invalid = require_registers(
+    "pal_cache_info_merced_l1_instruction_invalid",
+    pal_call_program(PAL_CACHE_INFO, [(29, 1), (30, 1), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_CACHE_INFO,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
+test_pal_cache_info_merced_l2_unified = require_registers(
+    "pal_cache_info_merced_l2_unified",
+    pal_call_program(PAL_CACHE_INFO, [(29, 2), (30, 2), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_CACHE_INFO, "r8": 0,
+     "r9": MERCED_PAL_CACHE_INFO_L2_U_1,
+     "r10": MERCED_PAL_CACHE_INFO_L2_U_2, "r11": 0},
+    entry=0x10, cpu="merced")
+
 test_pal_freq_base = require_registers("pal_freq_base",
     pal_call_program(PAL_FREQ_BASE),
     {"ip": 0x30, "r28": PAL_FREQ_BASE, "r8": 0,
@@ -371,13 +510,19 @@ test_pal_freq_ratios = require_registers("pal_freq_ratios",
     pal_call_program(PAL_FREQ_RATIOS),
     {"ip": 0x30, "r28": PAL_FREQ_RATIOS, "r8": 0,
     "r9": PAL_RATIO_16_1, "r10": PAL_RATIO_16_3,
-    "r11": PAL_RATIO_2_1}, entry=0x10)
+    "r11": PAL_RATIO_4_1}, entry=0x10)
 
 test_pal_freq_ratios_madison = require_registers(
     "pal_freq_ratios_madison", pal_call_program(PAL_FREQ_RATIOS),
     {"ip": 0x30, "r28": PAL_FREQ_RATIOS, "r8": 0,
      "r9": PAL_RATIO_16_1, "r10": PAL_RATIO_4_1,
-     "r11": PAL_RATIO_2_1}, entry=0x10, cpu="madison")
+     "r11": PAL_RATIO_16_1}, entry=0x10, cpu="madison")
+
+test_pal_freq_ratios_merced = require_registers(
+    "pal_freq_ratios_merced", pal_call_program(PAL_FREQ_RATIOS),
+    {"ip": 0x30, "r28": PAL_FREQ_RATIOS, "r8": 0,
+     "r9": PAL_RATIO_8_1, "r10": PAL_RATIO_4_3,
+     "r11": PAL_RATIO_8_1}, entry=0x10, cpu="merced")
 
 test_pal_freq_ratios_reserved_arg = require_registers(
     "pal_freq_ratios_reserved_arg",
@@ -392,6 +537,14 @@ test_pal_vm_page_size = require_registers("pal_vm_page_size",
     "r9": PAL_INSERTABLE_PAGE_SIZE_MASK, "r10": PAL_PURGE_PAGE_SIZE_MASK},
     entry=0x10)
 
+test_pal_vm_page_size_merced = require_registers(
+    "pal_vm_page_size_merced",
+    pal_call_program(PAL_VM_PAGE_SIZE),
+    {"ip": 0x30, "r28": PAL_VM_PAGE_SIZE, "r8": 0,
+     "r9": MERCED_INSERTABLE_PAGE_SIZE_MASK,
+     "r10": MERCED_PURGEABLE_PAGE_SIZE_MASK},
+    entry=0x10, cpu="merced")
+
 test_pal_vm_page_size_reserved_arg = require_registers(
     "pal_vm_page_size_reserved_arg",
     pal_call_program(PAL_VM_PAGE_SIZE, [(29, 0), (30, 0), (31, 1)]),
@@ -404,6 +557,18 @@ test_pal_ptce_info = require_registers("pal_ptce_info",
     {"ip": 0x30, "r28": PAL_PTCE_INFO, "r8": 0,
      "r9": 0, "r10": (1 << 32) | 1,
      "r11": 0}, entry=0x10)
+
+test_pal_ptce_info_madison = require_registers("pal_ptce_info_madison",
+    pal_call_program(PAL_PTCE_INFO),
+    {"ip": 0x30, "r28": PAL_PTCE_INFO, "r8": 0,
+     "r9": 0, "r10": (1 << 32) | 1,
+     "r11": 0}, entry=0x10, cpu="madison")
+
+test_pal_ptce_info_merced = require_registers("pal_ptce_info_merced",
+    pal_call_program(PAL_PTCE_INFO),
+    {"ip": 0x30, "r28": PAL_PTCE_INFO, "r8": 0,
+     "r9": 0, "r10": (1 << 32) | 1,
+     "r11": 0}, entry=0x10, cpu="merced")
 
 test_pal_ptce_info_reserved_arg = require_registers(
     "pal_ptce_info_reserved_arg",
@@ -449,6 +614,37 @@ test_pal_vm_info_invalid = require_registers("pal_vm_info_invalid",
      "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
 
+test_pal_vm_info_merced_l0_instruction = require_registers(
+    "pal_vm_info_merced_l0_instruction",
+    pal_call_program(PAL_VM_INFO, [(29, 0), (30, 1), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_VM_INFO, "r8": 0,
+     "r9": MERCED_PAL_VM_INFO_L0_I,
+     "r10": MERCED_INSERTABLE_PAGE_SIZE_MASK, "r11": 0},
+    entry=0x10, cpu="merced")
+
+test_pal_vm_info_merced_l0_data = require_registers(
+    "pal_vm_info_merced_l0_data",
+    pal_call_program(PAL_VM_INFO, [(29, 0), (30, 2), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_VM_INFO, "r8": 0,
+     "r9": MERCED_PAL_VM_INFO_L0_D,
+     "r10": MERCED_INSERTABLE_PAGE_SIZE_MASK, "r11": 0},
+    entry=0x10, cpu="merced")
+
+test_pal_vm_info_merced_l1_data = require_registers(
+    "pal_vm_info_merced_l1_data",
+    pal_call_program(PAL_VM_INFO, [(29, 1), (30, 2), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_VM_INFO, "r8": 0,
+     "r9": MERCED_PAL_VM_INFO_L1_D,
+     "r10": MERCED_INSERTABLE_PAGE_SIZE_MASK, "r11": 0},
+    entry=0x10, cpu="merced")
+
+test_pal_vm_info_merced_l1_instruction_invalid = require_registers(
+    "pal_vm_info_merced_l1_instruction_invalid",
+    pal_call_program(PAL_VM_INFO, [(29, 1), (30, 1), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_VM_INFO,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
 test_pal_vm_tr_read_dtr = require_registers("pal_vm_tr_read_dtr", [
     (0x10, *movl_mlx(18, PAL_TR_TEST_PTE)),
     (0x20, 0x00, nop_m(), addl(19, PAL_TR_TEST_IFA & ~0xfff, 0),
@@ -481,14 +677,15 @@ test_pal_vm_tr_read_max_dtr = require_registers("pal_vm_tr_read_max_dtr", [
         (0x20, 0x00, nop_m(), addl(19, PAL_TR_TEST_IFA & ~0xfff, 0),
          nop_i()),
         (0x30, 0x00, mov_m_gr_cr(19, 20),
-         addl(5, IA64_TR_COUNT - 1, 0), addl(7, PAL_TR_TEST_ITIR, 0)),
+         addl(5, MONTECITO_TR_COUNT - 1, 0),
+         addl(7, PAL_TR_TEST_ITIR, 0)),
         (0x40, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
         (0x50, 0x00, itr_d(5, 18), nop_i(), nop_i()),
         (0x60, 0x00, nop_m(), alloc(2, 4, 0, 0, 0), nop_i()),
         (0x70, *movl_mlx(28, PAL_VM_TR_READ)),
         (0x80, *movl_mlx(32, PAL_VM_TR_READ)),
         (0x90, 0x00, nop_m(),
-         addl(33, IA64_TR_COUNT - 1, 0), addl(34, 1, 0)),
+         addl(33, MONTECITO_TR_COUNT - 1, 0), addl(34, 1, 0)),
         (0xa0, 0x00, nop_m(), addl(35, 0x2000, 0), nop_i()),
         (0xb0, 0x10, nop_m(), nop_i(), br_call(0, 0xb0, PAL_PROC_ENTRY)),
         (0xc0, 0x00, nop_m(), addl(2, 0x2000, 0), nop_i()),
@@ -511,10 +708,55 @@ test_pal_vm_tr_read_empty = require_registers("pal_vm_tr_read_empty",
 
 test_pal_vm_tr_read_rejects_first_non_tr = require_registers(
     "pal_vm_tr_read_rejects_first_non_tr",
-    pal_stacked_call_program(PAL_VM_TR_READ, [IA64_TR_COUNT, 1, 0x2000]),
+    pal_stacked_call_program(PAL_VM_TR_READ,
+                             [MONTECITO_TR_COUNT, 1, 0x2000]),
     {"ip": 0x80, "r28": PAL_VM_TR_READ,
      "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
+
+test_pal_vm_tr_read_madison_last_dtr = require_registers(
+    "pal_vm_tr_read_madison_last_dtr",
+    pal_stacked_call_program(
+        PAL_VM_TR_READ, [MADISON_TR_COUNT - 1, 1, 0x2000]),
+    {"ip": 0x80, "r28": PAL_VM_TR_READ,
+     "r8": 0, "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="madison")
+
+test_pal_vm_tr_read_madison_first_invalid_dtr = require_registers(
+    "pal_vm_tr_read_madison_first_invalid_dtr",
+    pal_stacked_call_program(
+        PAL_VM_TR_READ, [MADISON_TR_COUNT, 1, 0x2000]),
+    {"ip": 0x80, "r28": PAL_VM_TR_READ,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="madison")
+
+test_pal_vm_tr_read_merced_last_dtr = require_registers(
+    "pal_vm_tr_read_merced_last_dtr",
+    pal_stacked_call_program(PAL_VM_TR_READ, [47, 1, 0x2000]),
+    {"ip": 0x80, "r28": PAL_VM_TR_READ,
+     "r8": 0, "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
+test_pal_vm_tr_read_merced_first_invalid_dtr = require_registers(
+    "pal_vm_tr_read_merced_first_invalid_dtr",
+    pal_stacked_call_program(PAL_VM_TR_READ, [48, 1, 0x2000]),
+    {"ip": 0x80, "r28": PAL_VM_TR_READ,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
+test_pal_vm_tr_read_merced_last_itr = require_registers(
+    "pal_vm_tr_read_merced_last_itr",
+    pal_stacked_call_program(PAL_VM_TR_READ, [7, 0, 0x2000]),
+    {"ip": 0x80, "r28": PAL_VM_TR_READ,
+     "r8": 0, "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
+test_pal_vm_tr_read_merced_first_invalid_itr = require_registers(
+    "pal_vm_tr_read_merced_first_invalid_itr",
+    pal_stacked_call_program(PAL_VM_TR_READ, [8, 0, 0x2000]),
+    {"ip": 0x80, "r28": PAL_VM_TR_READ,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
 
 test_pal_vm_tr_read_invalid = require_registers("pal_vm_tr_read_invalid",
     pal_stacked_call_program(PAL_VM_TR_READ, [0, 2, 0x2000]),
@@ -570,8 +812,29 @@ test_pal_proc_entry_virtual_itr = require_registers(
 
 test_pal_prefetch_vis = require_registers("pal_prefetch_vis",
     pal_call_program(PAL_PREFETCH_VIS),
-    {"ip": 0x30, "r28": PAL_PREFETCH_VIS, "r8": 0,
-     "r9": ((1 << 0) | (1 << 1)), "r10": 0}, entry=0x10)
+    {"ip": 0x30, "r28": PAL_PREFETCH_VIS, "r8": 1,
+     "r9": 0, "r10": 0, "r11": 0}, entry=0x10)
+
+test_pal_prefetch_vis_merced = require_registers(
+    "pal_prefetch_vis_merced",
+    pal_call_program(PAL_PREFETCH_VIS),
+    {"ip": 0x30, "r28": PAL_PREFETCH_VIS, "r8": 1,
+     "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
+test_pal_prefetch_vis_physical = require_registers(
+    "pal_prefetch_vis_physical",
+    pal_call_program(PAL_PREFETCH_VIS, [(29, 1), (30, 0), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_PREFETCH_VIS, "r8": 1,
+     "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10)
+
+test_pal_prefetch_vis_merced_physical = require_registers(
+    "pal_prefetch_vis_merced_physical",
+    pal_call_program(PAL_PREFETCH_VIS, [(29, 1), (30, 0), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_PREFETCH_VIS,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
 
 test_pal_prefetch_vis_reserved_arg = require_registers(
     "pal_prefetch_vis_reserved_arg",
@@ -639,7 +902,21 @@ test_pal_cache_prot_info_unified_bad_type = require_registers(
 test_pal_mem_attrib = require_registers("pal_mem_attrib",
     pal_call_program(PAL_MEM_ATTRIB),
     {"ip": 0x30, "r28": PAL_MEM_ATTRIB, "r8": 0,
-     "r9": PAL_MEM_ATTRIB_WB_UC, "r10": 0, "r11": 0}, entry=0x10)
+     "r9": PAL_MEM_ATTRIB_ITANIUM2, "r10": 0, "r11": 0}, entry=0x10)
+
+test_pal_mem_attrib_madison = require_registers(
+    "pal_mem_attrib_madison",
+    pal_call_program(PAL_MEM_ATTRIB),
+    {"ip": 0x30, "r28": PAL_MEM_ATTRIB, "r8": 0,
+     "r9": PAL_MEM_ATTRIB_ITANIUM2, "r10": 0, "r11": 0},
+    entry=0x10, cpu="madison")
+
+test_pal_mem_attrib_merced = require_registers(
+    "pal_mem_attrib_merced",
+    pal_call_program(PAL_MEM_ATTRIB),
+    {"ip": 0x30, "r28": PAL_MEM_ATTRIB, "r8": 0,
+     "r9": MERCED_PAL_MEM_ATTRIB, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
 
 test_pal_mem_attrib_reserved_arg = require_registers(
     "pal_mem_attrib_reserved_arg",
@@ -651,7 +928,16 @@ test_pal_mem_attrib_reserved_arg = require_registers(
 test_pal_bus_get_features = require_registers("pal_bus_get_features",
     pal_call_program(PAL_BUS_GET_FEATURES),
     {"ip": 0x30, "r28": PAL_BUS_GET_FEATURES, "r8": 0,
-     "r9": 0, "r10": 0, "r11": 0}, entry=0x10)
+     "r9": ((1 << 30) | (1 << 29)), "r10": 0,
+     "r11": ((1 << 30) | (1 << 29))}, entry=0x10)
+
+test_pal_bus_get_features_merced = require_registers(
+    "pal_bus_get_features_merced",
+    pal_call_program(PAL_BUS_GET_FEATURES),
+    {"ip": 0x30, "r28": PAL_BUS_GET_FEATURES, "r8": 0,
+     "r9": ((1 << 30) | (1 << 29)), "r10": 0,
+     "r11": ((1 << 30) | (1 << 29))},
+    entry=0x10, cpu="merced")
 
 test_pal_bus_get_features_reserved_arg = require_registers(
     "pal_bus_get_features_reserved_arg",
@@ -684,6 +970,69 @@ test_pal_proc_set_features_invalid = require_registers(
      "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
 
+test_pal_proc_set_features_montecito_next_set = require_registers(
+    "pal_proc_set_features_montecito_next_set",
+    pal_call_program(PAL_PROC_SET_FEATURES,
+                     [(29, 0), (30, 16), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_PROC_SET_FEATURES,
+     "r8": 1, "r9": 0, "r10": 0, "r11": 0}, entry=0x10)
+
+test_pal_proc_set_features_montecito_set18 = require_registers(
+    "pal_proc_set_features_montecito_set18",
+    pal_call_program(PAL_PROC_SET_FEATURES,
+                     [(29, (1 << 7) | (1 << 18)), (30, 18), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_PROC_SET_FEATURES,
+     "r8": 0, "r9": 0, "r10": 0, "r11": 0}, entry=0x10)
+
+test_pal_proc_set_features_montecito_round_trip = require_registers(
+    "pal_proc_set_features_montecito_round_trip", [
+        (0x10, *movl_mlx(28, PAL_PROC_SET_FEATURES)),
+        (0x20, *movl_mlx(29, (1 << 7) | (1 << 18))),
+        (0x30, *movl_mlx(30, 18)),
+        (0x40, *movl_mlx(31, 0)),
+        (0x50, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x50, PAL_PROC_ENTRY)),
+        (0x60, 0x00, nop_m(), addl(28, PAL_PROC_GET_FEATURES, 0),
+         addl(29, 0, 0)),
+        (0x70, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x70, PAL_PROC_ENTRY)),
+        (0x80, 0x10, nop_m(), nop_i(),
+         br_cond(0x80, 0x80)),
+        (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+        (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+    ], {
+        "ip": 0x80,
+        "r28": PAL_PROC_GET_FEATURES,
+        "r8": 0,
+        "r9": (1 << 5) | (1 << 7) | (1 << 18),
+        "r10": (1 << 7) | (1 << 18),
+        "r11": (1 << 5) | (1 << 7),
+    }, entry=0x10)
+
+test_pal_proc_set_features_montecito_beyond_max = require_registers(
+    "pal_proc_set_features_montecito_beyond_max",
+    pal_call_program(PAL_PROC_SET_FEATURES,
+                     [(29, 0), (30, 19), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_PROC_SET_FEATURES,
+     "r8": (-8 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10)
+
+test_pal_proc_set_features_madison_beyond_max = require_registers(
+    "pal_proc_set_features_madison_beyond_max",
+    pal_call_program(PAL_PROC_SET_FEATURES,
+                     [(29, 0), (30, 17), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_PROC_SET_FEATURES,
+     "r8": (-8 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="madison")
+
+test_pal_proc_set_features_madison_set16 = require_registers(
+    "pal_proc_set_features_madison_set16",
+    pal_call_program(PAL_PROC_SET_FEATURES,
+                     [(29, 0xffffffffffffffff), (30, 16), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_PROC_SET_FEATURES,
+     "r8": 0, "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="madison")
+
 test_pal_proc_get_features = require_registers("pal_proc_get_features",
     pal_call_program(PAL_PROC_GET_FEATURES),
     {"ip": 0x30, "r28": PAL_PROC_GET_FEATURES, "r8": 0,
@@ -706,7 +1055,10 @@ test_pal_proc_get_features_montecito_set18 = require_registers(
     "pal_proc_get_features_montecito_set18",
     pal_call_program(PAL_PROC_GET_FEATURES, [(29, 0), (30, 18), (31, 0)]),
     {"ip": 0x60, "r28": PAL_PROC_GET_FEATURES,
-     "r8": 0, "r9": 1 << 18, "r10": 1 << 18, "r11": 0}, entry=0x10)
+     "r8": 0,
+     "r9": (1 << 5) | (1 << 7) | (1 << 18),
+     "r10": (1 << 5) | (1 << 7) | (1 << 18),
+     "r11": (1 << 5) | (1 << 7)}, entry=0x10)
 
 test_pal_proc_get_features_montecito_beyond_max = require_registers(
     "pal_proc_get_features_montecito_beyond_max",
@@ -717,9 +1069,17 @@ test_pal_proc_get_features_montecito_beyond_max = require_registers(
 
 test_pal_proc_get_features_madison_beyond_max = require_registers(
     "pal_proc_get_features_madison_beyond_max",
-    pal_call_program(PAL_PROC_GET_FEATURES, [(29, 0), (30, 16), (31, 0)]),
+    pal_call_program(PAL_PROC_GET_FEATURES, [(29, 0), (30, 17), (31, 0)]),
     {"ip": 0x60, "r28": PAL_PROC_GET_FEATURES,
      "r8": (-8 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="madison")
+
+test_pal_proc_get_features_madison_set16 = require_registers(
+    "pal_proc_get_features_madison_set16",
+    pal_call_program(PAL_PROC_GET_FEATURES,
+                     [(29, 0), (30, 16), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_PROC_GET_FEATURES,
+     "r8": 0, "r9": 0, "r10": 0, "r11": 0},
     entry=0x10, cpu="madison")
 
 test_pal_logical_to_physical_current = require_registers(
@@ -747,6 +1107,14 @@ test_pal_logical_to_physical_madison_unimplemented = require_registers(
      "r8": (-1 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10, cpu="madison")
 
+test_pal_logical_to_physical_merced_unimplemented = require_registers(
+    "pal_logical_to_physical_merced_unimplemented",
+    pal_call_program(PAL_LOGICAL_TO_PHYSICAL,
+                     [(29, 0xffffffffffffffff), (30, 0), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_LOGICAL_TO_PHYSICAL,
+     "r8": (-1 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
 test_pal_cache_shared_info_single_thread = require_registers(
     "pal_cache_shared_info_single_thread",
     pal_call_program(PAL_CACHE_SHARED_INFO, [(29, 0), (30, 1), (31, 0)]),
@@ -759,6 +1127,14 @@ test_pal_cache_shared_info_sibling_thread = require_registers(
     {"ip": 0x60, "r28": PAL_CACHE_SHARED_INFO, "r8": 0,
      "r9": 2, "r10": 1, "r11": 1},
     entry=0x10, alat=None, smp="4,sockets=1,cores=2,threads=2")
+
+test_pal_cache_shared_info_merced_unimplemented = require_registers(
+    "pal_cache_shared_info_merced_unimplemented",
+    pal_call_program(PAL_CACHE_SHARED_INFO,
+                     [(29, 0), (30, 1), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_CACHE_SHARED_INFO,
+     "r8": (-1 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
 
 test_pal_brand_info_string = require_registers(
     "pal_brand_info_string", [
@@ -785,17 +1161,45 @@ test_pal_brand_info_frequency = require_registers(
     {"ip": 0x80, "r28": PAL_BRAND_INFO, "r8": 0,
      "r9": 1600000000, "r10": 0, "r11": 0}, entry=0x10)
 
+test_pal_brand_info_frequency_madison_unavailable = require_registers(
+    "pal_brand_info_frequency_madison_unavailable",
+    pal_stacked_call_program(PAL_BRAND_INFO, [16, 0, 0]),
+    {"ip": 0x80, "r28": PAL_BRAND_INFO,
+     "r8": (-6 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="madison")
+
 test_pal_brand_info_cache = require_registers(
     "pal_brand_info_cache",
     pal_stacked_call_program(PAL_BRAND_INFO, [17, 0, 0]),
     {"ip": 0x80, "r28": PAL_BRAND_INFO, "r8": 0,
      "r9": 24 * 1024 * 1024, "r10": 0, "r11": 0}, entry=0x10)
 
+test_pal_brand_info_cache_madison = require_registers(
+    "pal_brand_info_cache_madison",
+    pal_stacked_call_program(PAL_BRAND_INFO, [17, 0, 0]),
+    {"ip": 0x80, "r28": PAL_BRAND_INFO, "r8": 0,
+     "r9": 3 * 1024 * 1024, "r10": 0, "r11": 0},
+    entry=0x10, cpu="madison")
+
 test_pal_brand_info_bus = require_registers(
     "pal_brand_info_bus",
     pal_stacked_call_program(PAL_BRAND_INFO, [18, 0, 0]),
     {"ip": 0x80, "r28": PAL_BRAND_INFO, "r8": 0,
      "r9": 533333333, "r10": 0, "r11": 0}, entry=0x10)
+
+test_pal_brand_info_bus_madison_unavailable = require_registers(
+    "pal_brand_info_bus_madison_unavailable",
+    pal_stacked_call_program(PAL_BRAND_INFO, [18, 0, 0]),
+    {"ip": 0x80, "r28": PAL_BRAND_INFO,
+     "r8": (-6 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="madison")
+
+test_pal_brand_info_merced_unimplemented = require_registers(
+    "pal_brand_info_merced_unimplemented",
+    pal_stacked_call_program(PAL_BRAND_INFO, [0, PAL_BRAND_BUFFER, 0]),
+    {"ip": 0x80, "r28": PAL_BRAND_INFO,
+     "r8": (-1 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
 
 test_pal_debug_info = require_registers("pal_debug_info",
     pal_call_program(PAL_DEBUG_INFO),
@@ -850,7 +1254,7 @@ test_pal_register_info_reserved_arg = require_registers(
      "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
 
-test_pal_perf_mon_info = require_registers("pal_perf_mon_info", [
+pal_perf_mon_info_program = [
     (0x10, *movl_mlx(29, PAL_PERF_BUFFER)),
     (0x20, 0x00, nop_m(), addl(30, 0, 0), addl(31, 0, 0)),
     (0x30, 0x00, nop_m(), addl(28, PAL_PERF_MON_INFO, 0), nop_i()),
@@ -865,11 +1269,23 @@ test_pal_perf_mon_info = require_registers("pal_perf_mon_info", [
     (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, 0xc0)),
     (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
     (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
-], {"ip": 0xc0, "r28": PAL_PERF_MON_INFO, "r8": 0,
+]
+
+test_pal_perf_mon_info = require_registers(
+    "pal_perf_mon_info", pal_perf_mon_info_program,
+    {"ip": 0xc0, "r28": PAL_PERF_MON_INFO, "r8": 0,
     "r9": 0x08123004, "r10": 0, "r11": 0,
     "r20": 0x3fff, "r21": 0, "r22": 0x3ffff, "r23": 0,
     "r24": 0xf0, "r25": 0xf0},
     entry=0x10)
+
+test_pal_perf_mon_info_merced = require_registers(
+    "pal_perf_mon_info_merced", pal_perf_mon_info_program,
+    {"ip": 0xc0, "r28": PAL_PERF_MON_INFO, "r8": 0,
+     "r9": MERCED_PAL_PERF_MON_INFO_VALUE, "r10": 0, "r11": 0,
+     "r20": 0x3fff, "r21": 0, "r22": 0x3ffff, "r23": 0,
+     "r24": 0xf0, "r25": 0x30},
+    entry=0x10, cpu="merced")
 
 test_pal_perf_mon_info_bad_buffer = require_registers(
     "pal_perf_mon_info_bad_buffer",
@@ -932,14 +1348,50 @@ test_pal_platform_addr_bad_type = require_registers(
      "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
 
-test_pal_platform_addr_unmapped = require_registers(
-    "pal_platform_addr_unmapped",
+test_pal_platform_addr_alternate_interrupt = require_registers(
+    "pal_platform_addr_alternate_interrupt",
     pal_call_program(PAL_PLATFORM_ADDR,
                      [(29, PAL_PLATFORM_INTERRUPT_BLOCK),
                       (30, 0x200000), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_PLATFORM_ADDR, "r8": 0,
+     "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10)
+
+test_pal_platform_addr_unimplemented = require_registers(
+    "pal_platform_addr_unimplemented",
+    pal_call_program(PAL_PLATFORM_ADDR,
+                     [(29, PAL_PLATFORM_IO_BLOCK),
+                      (30, 1 << 50), (31, 0)]),
     {"ip": 0x60, "r28": PAL_PLATFORM_ADDR,
      "r8": (-3 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
+
+test_pal_platform_addr_misaligned = require_registers(
+    "pal_platform_addr_misaligned",
+    pal_call_program(PAL_PLATFORM_ADDR,
+                     [(29, PAL_PLATFORM_IO_BLOCK),
+                      (30, PAL_IO_BLOCK_DEFAULT + 0x1000), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_PLATFORM_ADDR,
+     "r8": (-3 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10)
+
+test_pal_platform_addr_merced_default = require_registers(
+    "pal_platform_addr_merced_default",
+    pal_call_program(PAL_PLATFORM_ADDR,
+                     [(29, PAL_PLATFORM_IO_BLOCK),
+                      (30, MERCED_PAL_IO_BLOCK_DEFAULT), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_PLATFORM_ADDR, "r8": 0,
+     "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
+test_pal_platform_addr_merced_unimplemented = require_registers(
+    "pal_platform_addr_merced_unimplemented",
+    pal_call_program(PAL_PLATFORM_ADDR,
+                     [(29, PAL_PLATFORM_IO_BLOCK),
+                      (30, 1 << 44), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_PLATFORM_ADDR,
+     "r8": (-3 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
 
 test_pal_mc_clear_log = require_registers("pal_mc_clear_log",
     pal_call_program(PAL_MC_CLEAR_LOG, [(29, 0), (30, 0), (31, 0)]),
@@ -1047,6 +1499,16 @@ test_pal_copy_pal_bad_processor = require_registers(
      "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
 
+test_pal_copy_pal_unimplemented_pa_merced = require_registers(
+    "pal_copy_pal_unimplemented_pa_merced",
+    pal_stacked_call_program(
+        PAL_COPY_PAL,
+        [(1 << MERCED_IMPL_PA_BITS) - PAL_COPY_BUFFER_SIZE,
+         PAL_COPY_BUFFER_SIZE * 2, 0]),
+    {"ip": 0x80, "r28": PAL_COPY_PAL,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
 test_pal_halt_info = require_registers("pal_halt_info", [
     (0x10, 0x00, nop_m(), alloc(2, 4, 0, 0, 0), nop_i()),
     (0x20, *movl_mlx(28, PAL_HALT_INFO)),
@@ -1078,6 +1540,58 @@ test_pal_halt_reserved_arg = require_registers("pal_halt_reserved_arg",
     {"ip": 0x60, "r28": PAL_HALT,
      "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
+
+test_pal_halt_unimplemented_detail_pa_merced = require_registers(
+    "pal_halt_unimplemented_detail_pa_merced",
+    pal_call_program(PAL_HALT,
+                     [(29, 1), (30, 1 << MERCED_IMPL_PA_BITS), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_HALT,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0,
+     "halted": 0},
+    entry=0x10, cpu="merced")
+
+test_pal_halt_io_reserved_info = require_registers(
+    "pal_halt_io_reserved_info", [
+        (0x10, *movl_mlx(2, 0x5000)),
+        (0x20, *movl_mlx(3, 1 << 16)),
+        (0x30, 0x00, st8(2, 3), addl(29, 1, 0), nop_i()),
+        (0x40, *movl_mlx(30, 0x5000)),
+        (0x50, *movl_mlx(31, 0)),
+        (0x60, *movl_mlx(28, PAL_HALT)),
+        (0x70, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x70, PAL_PROC_ENTRY)),
+        (0x80, 0x10, nop_m(), nop_i(),
+         br_cond(0x80, 0x80)),
+        (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+        (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+    ],
+    {"ip": 0x80, "r28": PAL_HALT,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0,
+     "halted": 0},
+    entry=0x10)
+
+test_pal_halt_io_unimplemented_pa_merced = require_registers(
+    "pal_halt_io_unimplemented_pa_merced", [
+        (0x10, *movl_mlx(2, 0x5000)),
+        (0x20, *movl_mlx(3, 1 | (8 << 8))),
+        (0x30, 0x00, st8(2, 3), nop_i(), nop_i()),
+        (0x40, *movl_mlx(2, 0x5008)),
+        (0x50, *movl_mlx(3, 1 << MERCED_IMPL_PA_BITS)),
+        (0x60, 0x00, st8(2, 3), addl(29, 1, 0), nop_i()),
+        (0x70, *movl_mlx(30, 0x5000)),
+        (0x80, *movl_mlx(31, 0)),
+        (0x90, *movl_mlx(28, PAL_HALT)),
+        (0xa0, 0x10, nop_m(), nop_i(),
+         br_call(0, 0xa0, PAL_PROC_ENTRY)),
+        (0xb0, 0x10, nop_m(), nop_i(),
+         br_cond(0xb0, 0xb0)),
+        (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+        (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+    ],
+    {"ip": 0xb0, "r28": PAL_HALT,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0,
+     "halted": 0},
+    entry=0x10, cpu="merced")
 
 test_pal_halt_info_bad_buffer = require_registers(
     "pal_halt_info_bad_buffer",
@@ -1167,36 +1681,78 @@ test_pal_mc_error_info_bad_level = require_registers(
 
 test_pal_mc_resume_no_context = require_registers(
     "pal_mc_resume_no_context",
-    pal_call_program(PAL_MC_RESUME, [(29, 0), (30, 0x2000), (31, 0)]),
+    pal_call_program(PAL_MC_RESUME,
+                     [(29, 0), (30, IA64_PHYS_UC_BIT | 0x2000), (31, 0)]),
     {"ip": 0x60, "r28": PAL_MC_RESUME,
      "r8": (-3 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
 
 test_pal_mc_resume_new_context_no_context = require_registers(
     "pal_mc_resume_new_context_no_context",
-    pal_call_program(PAL_MC_RESUME, [(29, 1), (30, 0x2000), (31, 1)]),
+    pal_call_program(PAL_MC_RESUME,
+                     [(29, 1), (30, IA64_PHYS_UC_BIT | 0x2000), (31, 1)]),
     {"ip": 0x60, "r28": PAL_MC_RESUME,
      "r8": (-3 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
 
 test_pal_mc_resume_bad_args = require_registers(
     "pal_mc_resume_bad_args",
-    pal_call_program(PAL_MC_RESUME, [(29, 2), (30, 0x2000), (31, 0)]),
+    pal_call_program(PAL_MC_RESUME,
+                     [(29, 2), (30, IA64_PHYS_UC_BIT | 0x2000), (31, 0)]),
     {"ip": 0x60, "r28": PAL_MC_RESUME,
      "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
 
 test_pal_mc_resume_bad_save_ptr = require_registers(
     "pal_mc_resume_bad_save_ptr",
-    pal_call_program(PAL_MC_RESUME, [(29, 0), (30, 0x2100), (31, 0)]),
+    pal_call_program(PAL_MC_RESUME,
+                     [(29, 0), (30, IA64_PHYS_UC_BIT | 0x2100), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_MC_RESUME,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10)
+
+test_pal_mc_resume_cacheable_save_ptr = require_registers(
+    "pal_mc_resume_cacheable_save_ptr",
+    pal_call_program(PAL_MC_RESUME, [(29, 0), (30, 0x2000), (31, 0)]),
     {"ip": 0x60, "r28": PAL_MC_RESUME,
      "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
 
 test_pal_mc_register_mem = require_registers("pal_mc_register_mem",
-    pal_call_program(PAL_MC_REGISTER_MEM, [(29, 0x2000), (30, 0), (31, 0)]),
+    pal_call_program(PAL_MC_REGISTER_MEM,
+                     [(29, IA64_PHYS_UC_BIT | 0x2000),
+                      (30, 0), (31, 0)]),
     {"ip": 0x60, "r28": PAL_MC_REGISTER_MEM, "r8": 0,
      "r9": 0, "r10": 0, "r11": 0}, entry=0x10)
+
+test_pal_mc_register_mem_cacheable_rejected = require_registers(
+    "pal_mc_register_mem_cacheable_rejected",
+    pal_call_program(PAL_MC_REGISTER_MEM,
+                     [(29, 0x2000), (30, 0), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_MC_REGISTER_MEM,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10)
+
+test_pal_mc_register_mem_crosses_pa_limit_merced = require_registers(
+    "pal_mc_register_mem_crosses_pa_limit_merced",
+    pal_call_program(PAL_MC_REGISTER_MEM,
+                     [(29, IA64_PHYS_UC_BIT |
+                           ((1 << MERCED_IMPL_PA_BITS) - 0x800)),
+                      (30, 0), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_MC_REGISTER_MEM,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
+test_pal_mc_resume_crosses_pa_limit_merced = require_registers(
+    "pal_mc_resume_crosses_pa_limit_merced",
+    pal_call_program(PAL_MC_RESUME,
+                     [(29, 0),
+                      (30, IA64_PHYS_UC_BIT |
+                           ((1 << MERCED_IMPL_PA_BITS) - 0x800)),
+                      (31, 0)]),
+    {"ip": 0x60, "r28": PAL_MC_RESUME,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
 
 test_pal_cache_line_init = require_registers("pal_cache_line_init",
     pal_call_program(PAL_CACHE_LINE_INIT,
@@ -1204,10 +1760,37 @@ test_pal_cache_line_init = require_registers("pal_cache_line_init",
     {"ip": 0x60, "r28": PAL_CACHE_LINE_INIT, "r8": 0,
      "r9": 0, "r10": 0, "r11": 0}, entry=0x10)
 
+test_pal_cache_line_init_unimplemented_pa_merced = require_registers(
+    "pal_cache_line_init_unimplemented_pa_merced",
+    pal_call_program(PAL_CACHE_LINE_INIT,
+                     [(29, 1 << MERCED_IMPL_PA_BITS),
+                      (30, 0x1234), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_CACHE_LINE_INIT,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
 test_pal_pmi_entrypoint = require_registers("pal_pmi_entrypoint",
     pal_call_program(PAL_PMI_ENTRYPOINT, [(29, 0x5000), (30, 0), (31, 0)]),
     {"ip": 0x60, "r28": PAL_PMI_ENTRYPOINT, "r8": 0,
      "r9": 0, "r10": 0, "r11": 0}, entry=0x10)
+
+test_pal_pmi_entrypoint_uncacheable = require_registers(
+    "pal_pmi_entrypoint_uncacheable",
+    pal_call_program(PAL_PMI_ENTRYPOINT,
+                     [(29, IA64_PHYS_UC_BIT | 0x5000),
+                      (30, 0), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_PMI_ENTRYPOINT, "r8": 0,
+     "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10)
+
+test_pal_pmi_entrypoint_unimplemented_pa_merced = require_registers(
+    "pal_pmi_entrypoint_unimplemented_pa_merced",
+    pal_call_program(PAL_PMI_ENTRYPOINT,
+                     [(29, 1 << MERCED_IMPL_PA_BITS),
+                      (30, 0), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_PMI_ENTRYPOINT,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
 
 test_pal_mem_for_test = require_registers("pal_mem_for_test",
     pal_call_program(PAL_MEM_FOR_TEST, [(29, 0), (30, 0), (31, 0)]),
@@ -1240,6 +1823,15 @@ test_pal_test_proc_bad_attributes = require_registers(
      "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
 
+test_pal_test_proc_crosses_pa_limit_merced = require_registers(
+    "pal_test_proc_crosses_pa_limit_merced",
+    pal_stacked_call_program(
+        PAL_TEST_PROC,
+        [(1 << MERCED_IMPL_PA_BITS) - 0x100, 0x200, 1]),
+    {"ip": 0x80, "r28": PAL_TEST_PROC,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
 test_pal_unknown = require_registers("pal_unknown",
     pal_call_program(0xffff),
     {"ip": 0x30, "r28": 0xffff, "r8": (-1 & 0xffffffffffffffff)},
@@ -1249,12 +1841,17 @@ GROUP = 'pal'
 CASE_NAMES = (
 
     'pal_bus_get_features',
+    'pal_bus_get_features_merced',
     'pal_bus_get_features_reserved_arg',
     'pal_bus_set_features',
     'pal_bus_set_features_invalid',
     'pal_brand_info_bus',
+    'pal_brand_info_bus_madison_unavailable',
     'pal_brand_info_cache',
+    'pal_brand_info_cache_madison',
     'pal_brand_info_frequency',
+    'pal_brand_info_frequency_madison_unavailable',
+    'pal_brand_info_merced_unimplemented',
     'pal_brand_info_string',
     'pal_cache_flush',
     'pal_cache_flush_bad_operation',
@@ -1268,17 +1865,25 @@ CASE_NAMES = (
     'pal_cache_info_l1_instruction',
     'pal_cache_info_l2_unified',
     'pal_cache_info_l2_unified_bad_type',
+    'pal_cache_info_merced_l0_data',
+    'pal_cache_info_merced_l0_instruction',
+    'pal_cache_info_merced_l1_instruction_invalid',
+    'pal_cache_info_merced_l1_unified',
+    'pal_cache_info_merced_l2_unified',
     'pal_cache_init',
     'pal_cache_init_invalid',
     'pal_cache_line_init',
+    'pal_cache_line_init_unimplemented_pa_merced',
     'pal_cache_prot_info',
     'pal_cache_prot_info_invalid',
     'pal_cache_prot_info_unified_bad_type',
     'pal_cache_summary',
     'pal_cache_summary_madison',
+    'pal_cache_summary_merced',
     'pal_cache_summary_reserved_arg',
     'pal_cache_shared_info_single_thread',
     'pal_cache_shared_info_sibling_thread',
+    'pal_cache_shared_info_merced_unimplemented',
     'pal_copy_info',
     'pal_copy_info_bad_type',
     'pal_copy_info_ia32_unsupported',
@@ -1288,6 +1893,7 @@ CASE_NAMES = (
     'pal_copy_pal_bad_processor',
     'pal_copy_pal_ap_entry_callable',
     'pal_copy_pal_entry_callable',
+    'pal_copy_pal_unimplemented_pa_merced',
     'pal_debug_info',
     'pal_debug_info_reserved_arg',
     'pal_fixed_addr',
@@ -1296,18 +1902,24 @@ CASE_NAMES = (
     'pal_freq_base_reserved_arg',
     'pal_freq_ratios',
     'pal_freq_ratios_madison',
+    'pal_freq_ratios_merced',
     'pal_freq_ratios_reserved_arg',
     'pal_halt_info',
     'pal_halt_info_bad_buffer',
     'pal_halt_info_reserved_arg',
     'pal_halt_invalid_state',
+    'pal_halt_io_reserved_info',
+    'pal_halt_io_unimplemented_pa_merced',
+    'pal_halt_light_reserved_arg',
     'pal_halt_light_stops_at_pal_continuation',
     'pal_halt_light_wakes_on_due_itm',
     'pal_halt_reserved_arg',
+    'pal_halt_unimplemented_detail_pa_merced',
     'pal_halt_wakes_on_due_itm',
     'pal_logical_to_physical_current',
     'pal_logical_to_physical_multicore_thread',
     'pal_logical_to_physical_madison_unimplemented',
+    'pal_logical_to_physical_merced_unimplemented',
     'pal_mc_clear_log',
     'pal_mc_drain',
     'pal_mc_drain_reserved_arg',
@@ -1321,34 +1933,59 @@ CASE_NAMES = (
     'pal_mc_error_info_structure_empty',
     'pal_mc_expected',
     'pal_mc_register_mem',
+    'pal_mc_register_mem_cacheable_rejected',
+    'pal_mc_register_mem_crosses_pa_limit_merced',
     'pal_mc_resume_bad_args',
     'pal_mc_resume_bad_save_ptr',
+    'pal_mc_resume_cacheable_save_ptr',
+    'pal_mc_resume_crosses_pa_limit_merced',
     'pal_mc_resume_new_context_no_context',
     'pal_mc_resume_no_context',
     'pal_mem_attrib',
+    'pal_mem_attrib_madison',
+    'pal_mem_attrib_merced',
     'pal_mem_attrib_reserved_arg',
     'pal_mem_for_test',
     'pal_perf_mon_info',
     'pal_perf_mon_info_bad_buffer',
+    'pal_perf_mon_info_merced',
     'pal_perf_mon_info_reserved_arg',
     'pal_platform_addr_bad_type',
+    'pal_platform_addr_alternate_interrupt',
     'pal_platform_addr_ignores_bit63',
     'pal_platform_addr_interrupt',
     'pal_platform_addr_io',
-    'pal_platform_addr_unmapped',
+    'pal_platform_addr_merced_default',
+    'pal_platform_addr_merced_unimplemented',
+    'pal_platform_addr_misaligned',
+    'pal_platform_addr_unimplemented',
     'pal_pmi_entrypoint',
+    'pal_pmi_entrypoint_uncacheable',
+    'pal_pmi_entrypoint_unimplemented_pa_merced',
     'pal_prefetch_vis',
+    'pal_prefetch_vis_merced',
+    'pal_prefetch_vis_physical',
+    'pal_prefetch_vis_merced_physical',
     'pal_prefetch_vis_reserved_arg',
     'pal_proc_entry_virtual_itr',
     'pal_proc_get_features',
     'pal_proc_get_features_madison_beyond_max',
+    'pal_proc_get_features_madison_set16',
     'pal_proc_get_features_montecito_beyond_max',
     'pal_proc_get_features_montecito_next_set',
     'pal_proc_get_features_montecito_set18',
     'pal_proc_get_features_reserved_arg',
     'pal_proc_set_features',
     'pal_proc_set_features_invalid',
+    'pal_proc_set_features_madison_beyond_max',
+    'pal_proc_set_features_madison_set16',
+    'pal_proc_set_features_montecito_beyond_max',
+    'pal_proc_set_features_montecito_next_set',
+    'pal_proc_set_features_montecito_round_trip',
+    'pal_proc_set_features_montecito_set18',
     'pal_ptce_info',
+    'pal_ptce_info_madison',
+    'pal_ptce_info_merced',
     'pal_ptce_info_reserved_arg',
     'pal_register_info_application_implemented',
     'pal_register_info_application_side_effects',
@@ -1357,13 +1994,19 @@ CASE_NAMES = (
     'pal_register_info_invalid_request',
     'pal_register_info_reserved_arg',
     'pal_rse_info',
+    'pal_rse_info_madison',
+    'pal_rse_info_merced',
     'pal_rse_info_reserved_arg',
     'pal_test_proc_bad_address',
     'pal_test_proc_bad_attributes',
+    'pal_test_proc_crosses_pa_limit_merced',
     'pal_test_proc_healthy',
     'pal_test_proc_missing_cacheable_attr',
     'pal_unknown',
+    'pal_return_values_clear_nat',
     'pal_version',
+    'pal_version_madison',
+    'pal_version_merced',
     'pal_version_reserved_arg',
     'pal_vm_info',
     'pal_vm_info_invalid',
@@ -1371,14 +2014,27 @@ CASE_NAMES = (
     'pal_vm_info_l1_data',
     'pal_vm_info_l1_instruction',
     'pal_vm_info_l2_invalid',
+    'pal_vm_info_merced_l0_data',
+    'pal_vm_info_merced_l0_instruction',
+    'pal_vm_info_merced_l1_data',
+    'pal_vm_info_merced_l1_instruction_invalid',
     'pal_vm_page_size',
+    'pal_vm_page_size_merced',
     'pal_vm_page_size_reserved_arg',
     'pal_vm_summary',
+    'pal_vm_summary_madison',
+    'pal_vm_summary_merced',
     'pal_vm_summary_reserved_arg',
     'pal_vm_tr_read_dtr',
     'pal_vm_tr_read_empty',
     'pal_vm_tr_read_invalid',
+    'pal_vm_tr_read_madison_first_invalid_dtr',
+    'pal_vm_tr_read_madison_last_dtr',
     'pal_vm_tr_read_max_dtr',
+    'pal_vm_tr_read_merced_first_invalid_dtr',
+    'pal_vm_tr_read_merced_first_invalid_itr',
+    'pal_vm_tr_read_merced_last_dtr',
+    'pal_vm_tr_read_merced_last_itr',
     'pal_vm_tr_read_misaligned_buffer',
     'pal_vm_tr_read_rejects_first_non_tr',
 )

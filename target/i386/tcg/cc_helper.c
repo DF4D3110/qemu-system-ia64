@@ -19,6 +19,9 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
+#ifdef TARGET_IA64
+#include "target/ia64/ia32/cc-helper-adapter.h"
+#endif
 #include "exec/helper-proto.h"
 #include "helper-tcg.h"
 

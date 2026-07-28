@@ -1,4 +1,4 @@
-/* Madison IA-32 JMPE instruction-set transition. */
+/* IA-32 JMPE instruction-set transition. */
 
 #include "qemu/osdep.h"
 #include "cpu.h"
@@ -36,8 +36,8 @@ G_NORETURN void helper_ia32_jmpe(CPUIA64State *env,
     xenv->eflags &= ~RF_MASK;
     ia64_ia32_sync_to_ia64(env);
 
-    env->gr[1] = (uint32_t)next_ip;
-    ia64_gr_nat_set(env, 1, false);
+    env->gr[IA64_IA32_GR_RETURN_POINTER] = (uint32_t)next_ip;
+    ia64_gr_nat_set(env, IA64_IA32_GR_RETURN_POINTER, false);
     env->psr &= ~(IA64_PSR_IS | IA64_PSR_ID | IA64_PSR_RI_MASK);
     env->ip = target_ip;
     env->last_successful_bundle = source_ip;

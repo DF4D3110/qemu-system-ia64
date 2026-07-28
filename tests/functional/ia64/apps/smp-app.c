@@ -77,6 +77,8 @@ static volatile UINT64 slow_lock;
 static volatile UINT16 slow_lock_counter;
 static volatile UINT64 slow_path_calls[TEST_PROCESSOR_COUNT];
 static volatile UINT64 rse_pressure_sink[TEST_PROCESSOR_COUNT];
+static volatile UINT64 slow_lock_ready[TEST_PROCESSOR_COUNT];
+static volatile UINT64 slow_lock_waiting[TEST_PROCESSOR_COUNT];
 typedef struct {
     volatile UINT32 Lock;
     volatile UINT16 Counter;
@@ -661,14 +663,60 @@ static __attribute__((noinline)) VOID slow_lock_acquire(UINTN Id)
     }
 }
 
+static BOOLEAN slow_lock_begin_contended_round(UINTN Id)
+{
+    UINT64 round = translation_round;
+    UINTN peer;
+
+    /*
+     * Do not rely on host thread scheduling to happen to create contention.
+     * CPU 0 holds the lock until every AP has attempted the same acquisition
+     * and entered the RSE-pressure slow path.  This makes the test exercise
+     * the intended call/RSE path deterministically on both fast and heavily
+     * loaded hosts.
+     */
+    if (Id == 0) {
+        while (xchg8(&slow_lock, 1) != 0) {
+            __asm__ volatile ("hint @pause" : : : "memory");
+        }
+        slow_lock_ready[Id] = round;
+        __asm__ volatile ("mf;;" : : : "memory");
+        for (peer = 1; peer < TEST_PROCESSOR_COUNT; peer++) {
+            while (slow_lock_ready[peer] != round) {
+                __asm__ volatile ("hint @pause" : : : "memory");
+            }
+        }
+        for (peer = 1; peer < TEST_PROCESSOR_COUNT; peer++) {
+            while (slow_lock_waiting[peer] != round) {
+                __asm__ volatile ("hint @pause" : : : "memory");
+            }
+        }
+        return 1;
+    }
+
+    slow_lock_ready[Id] = round;
+    __asm__ volatile ("mf;;" : : : "memory");
+    while (slow_lock_ready[0] != round) {
+        __asm__ volatile ("hint @pause" : : : "memory");
+    }
+    if (xchg8(&slow_lock, 1) == 0) {
+        return 1;
+    }
+    slow_lock_waiting[Id] = round;
+    __asm__ volatile ("mf;;" : : : "memory");
+    slow_lock_acquire(Id);
+    return 1;
+}
+
 static VOID slow_lock_increment_batch(UINTN Id)
 {
+    BOOLEAN owns_lock = slow_lock_begin_contended_round(Id);
     UINTN i;
 
     for (i = 0; i < TEST_SLOW_LOCK_INCREMENTS; i++) {
         UINT64 value;
 
-        if (xchg8(&slow_lock, 1) != 0) {
+        if (!owns_lock && xchg8(&slow_lock, 1) != 0) {
             slow_lock_acquire(Id);
         }
         __asm__ volatile ("ld2.bias %0=[%1];;"
@@ -680,6 +728,7 @@ static VOID slow_lock_increment_batch(UINTN Id)
                           : : "r"(&slow_lock_counter), "r"(value)
                           : "memory");
         store8_release(&slow_lock, 0);
+        owns_lock = 0;
     }
 }
 

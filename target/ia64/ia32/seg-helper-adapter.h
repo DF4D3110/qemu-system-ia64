@@ -1,17 +1,21 @@
-/* Reuse QEMU's real/protected-mode x86 segmentation helpers. */
+/* Adapt the shared real/protected-mode segmentation helpers. */
+
+#ifndef TARGET_IA64_IA32_SEG_HELPER_ADAPTER_H
+#define TARGET_IA64_IA32_SEG_HELPER_ADAPTER_H
 
 #include "helper-compat.h"
 #include "accel/tcg/cpu-ldst.h"
 #include "accel/tcg/probe.h"
 #include "target/i386/tcg/helper-tcg.h"
 #include "target/i386/tcg/seg_helper.h"
+#include "arch/arch.h"
 #include "ia32/ia32.h"
 
 /*
- * The x86 helpers normally select one of x86's private MMU indices.  IA-32
- * execution on Itanium uses the IA-64 translation and protection machinery,
- * so every descriptor and stack access must instead use the current IA-64
- * data MMU index.  The backing x86 view is at offset zero in CPUIA64State.
+ * The shared helpers normally select one of the private IA-32 MMU indices.
+ * IA-32 execution here uses the IA-64 translation and protection machinery,
+ * so every descriptor and stack access uses the current IA-64 data MMU
+ * index.  The backing IA-32 view is at offset zero in CPUIA64State.
  */
 #define IA32_ARCH_ENV(env) ((CPUIA64State *)(env))
 #define IA32_MMU_IDX(env) \
@@ -22,13 +26,13 @@ static void ia32_stack_access_prepare(CPUX86State *xenv, vaddr addr,
                                       uintptr_t retaddr)
 {
     CPUIA64State *env = IA32_ARCH_ENV(xenv);
+    int mmu_idx = IA32_MMU_IDX(xenv);
     unsigned access = type == MMU_DATA_STORE ?
                       IA64_IA32_SEG_ACCESS_WRITE :
                       IA64_IA32_SEG_ACCESS_READ;
 
     /* Translation and protection faults have priority over alignment. */
-    ia64_ia32_probe_access(env, addr, size, type, IA32_MMU_IDX(xenv),
-                           retaddr);
+    ia64_ia32_probe_access(env, addr, size, type, mmu_idx, retaddr);
     ia64_ia32_record_data_access(env, addr, size, access);
     ia64_ia32_check_block_alignment(xenv, addr, size, retaddr);
 }
@@ -93,13 +97,13 @@ static void ia32_supervisor_access_prepare(CPUX86State *xenv, vaddr addr,
                                            uintptr_t retaddr)
 {
     CPUIA64State *env = IA32_ARCH_ENV(xenv);
+    int mmu_idx = IA32_MMU_IDX(xenv);
     unsigned access = type == MMU_DATA_STORE ?
                       IA64_IA32_SEG_ACCESS_WRITE :
                       IA64_IA32_SEG_ACCESS_READ;
 
     /* GDT/LDT/TSS accesses ignore EFLAGS.AC, but not PSR.ac. */
-    ia64_ia32_probe_access(env, addr, size, type, IA32_MMU_IDX(xenv),
-                           retaddr);
+    ia64_ia32_probe_access(env, addr, size, type, mmu_idx, retaddr);
     ia64_ia32_record_data_access(env, addr, size, access);
     ia64_ia32_check_psr_alignment(xenv, addr, size, retaddr);
 }
@@ -231,4 +235,4 @@ static G_GNUC_UNUSED void ia32_supervisor_stq(CPUX86State *xenv,
     ia64_ia32_load_seg_cache((env), (seg), (selector), (base),         \
                              (limit), (flags))
 
-#include "target/i386/tcg/seg_helper.c"
+#endif /* TARGET_IA64_IA32_SEG_HELPER_ADAPTER_H */

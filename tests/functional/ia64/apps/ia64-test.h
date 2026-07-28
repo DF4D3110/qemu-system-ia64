@@ -55,6 +55,12 @@ typedef UINTN EFI_TPL;
 #define IA64_TEST_UART_LSR            5U
 #define IA64_TEST_UART_LSR_THRE       0x20U
 
+#define IA64_TEST_LEGACY_IO_BASE      0x00000ffffc000000ULL
+#define IA64_TEST_LEGACY_IO_SIZE      0x0000000004000000ULL
+#define IA64_TEST_IO_PORT_PA(Port) \
+    (IA64_TEST_LEGACY_IO_BASE + \
+     ((((UINT64)(Port) >> 2) << 12) | ((UINT64)(Port) & 0xfffULL)))
+
 #define EfiLoaderCode                 1U
 #define EfiLoaderData                 2U
 #define EfiBootServicesCode           3U

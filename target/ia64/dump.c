@@ -2,6 +2,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/qemu-print.h"
+#include "arch/arch.h"
 #include "cpu.h"
 #include "debug.h"
 #include "fpreg.h"
@@ -71,7 +72,7 @@ static void ia64_dump_machine_state(CPUState *cs, FILE *f, int flags)
                  " pfs=%016" PRIx64 "\n",
                  env->ar_ccv, env->ar_unat, env->ar_fpsr,
                  env->ar_csd, env->ar_ssd, env->ar_rsc,
-                 env->ar_rnat, env->ar_pfs);
+                 ia64_rse_read_rnat(env), env->ar_pfs);
     qemu_fprintf(f, "IA64STATE CFM sof=%016" PRIx64
                  " sol=%016" PRIx64 " sor=%016" PRIx64
                  " rrb_gr=%016" PRIx64 " rrb_fr=%016" PRIx64
@@ -187,10 +188,14 @@ void ia64_cpu_dump_state(CPUState *cs, FILE *f, int flags)
                  cpu->env.rse.rse_bol, cpu->env.rse.rse_dirty,
                  cpu->env.rse.rse_dirty_nat, cpu->env.rse.rse_clean,
                  cpu->env.rse.rse_clean_nat, cpu->env.rse.rse_invalid,
-                 cpu->env.ar_rnat, cpu->env.ar_rsc);
+                 ia64_rse_read_rnat(&cpu->env), cpu->env.ar_rsc);
     ia64_dump_tlb(f, "ITLB", cpu->env.mmu.tlb_inst,
                   cpu->env.mmu.tlb_inst_count);
     ia64_dump_tlb(f, "DTLB", cpu->env.mmu.tlb_data,
                   cpu->env.mmu.tlb_data_count);
+    if (ia64_env_cpu_class(&cpu->env)->model == IA64_CPU_MODEL_MERCED) {
+        ia64_dump_tlb(f, "DTLB1", cpu->env.mmu.tlb_data_l1,
+                      IA64_DTLB1_MAX);
+    }
     ia64_dump_machine_state(cs, f, flags);
 }

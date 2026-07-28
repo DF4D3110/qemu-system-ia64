@@ -7,9 +7,15 @@
  * performed at instruction-set transitions.
  */
 
+#ifndef TARGET_IA64_IA32_TRANSLATE_ADAPTER_H
+#define TARGET_IA64_IA32_TRANSLATE_ADAPTER_H
+
 #include "qemu/osdep.h"
+#include "qemu/atomic128.h"
 #include "cpu.h"
 #include "ia32/ia32.h"
+#include "exec/helper-gen.h"
+#include "tcg/tcg-op.h"
 
 #define IA32_TB_FLAG_PSR_DB (1u << 29)
 #define IA32_TB_FLAG_PSR_AC (1u << 30)
@@ -159,8 +165,66 @@
       ((decode)->e.op0 == X86_TYPE_D || \
        (decode)->e.op1 == X86_TYPE_D || \
        (decode)->e.op0 == X86_TYPE_C)))
+
+static void ia64_ia32_gen_dtlb1_touch(TCGv_i64 addr, TCGArg mmu_idx,
+                                      MemOp memop)
+{
+    gen_helper_merced_dtlb1_touch(
+        tcg_env, addr, tcg_constant_i32(1 << (memop & MO_SIZE)),
+        tcg_constant_i32(mmu_idx != MMU_PHYS_IDX));
+}
+
+static void ia64_ia32_gen_qemu_ld_i32(TCGv_i32 value, TCGv_i64 addr,
+                                      TCGArg mmu_idx, MemOp memop)
+{
+    ia64_ia32_gen_dtlb1_touch(addr, mmu_idx, memop);
+    tcg_gen_qemu_ld_i32(value, addr, mmu_idx, memop);
+}
+
+static void ia64_ia32_gen_qemu_st_i32(TCGv_i32 value, TCGv_i64 addr,
+                                      TCGArg mmu_idx, MemOp memop)
+{
+    ia64_ia32_gen_dtlb1_touch(addr, mmu_idx, memop);
+    tcg_gen_qemu_st_i32(value, addr, mmu_idx, memop);
+}
+
+static void ia64_ia32_gen_qemu_ld_i64(TCGv_i64 value, TCGv_i64 addr,
+                                      TCGArg mmu_idx, MemOp memop)
+{
+    ia64_ia32_gen_dtlb1_touch(addr, mmu_idx, memop);
+    tcg_gen_qemu_ld_i64(value, addr, mmu_idx, memop);
+}
+
+static void ia64_ia32_gen_qemu_st_i64(TCGv_i64 value, TCGv_i64 addr,
+                                      TCGArg mmu_idx, MemOp memop)
+{
+    ia64_ia32_gen_dtlb1_touch(addr, mmu_idx, memop);
+    tcg_gen_qemu_st_i64(value, addr, mmu_idx, memop);
+}
+
+static void ia64_ia32_gen_qemu_ld_i128(TCGv_i128 value, TCGv_i64 addr,
+                                       TCGArg mmu_idx, MemOp memop)
+{
+    ia64_ia32_gen_dtlb1_touch(addr, mmu_idx, memop);
+    tcg_gen_qemu_ld_i128(value, addr, mmu_idx, memop);
+}
+
+static void ia64_ia32_gen_qemu_st_i128(TCGv_i128 value, TCGv_i64 addr,
+                                       TCGArg mmu_idx, MemOp memop)
+{
+    ia64_ia32_gen_dtlb1_touch(addr, mmu_idx, memop);
+    tcg_gen_qemu_st_i128(value, addr, mmu_idx, memop);
+}
+
+#define tcg_gen_qemu_ld_i32 ia64_ia32_gen_qemu_ld_i32
+#define tcg_gen_qemu_st_i32 ia64_ia32_gen_qemu_st_i32
+#define tcg_gen_qemu_ld_i64 ia64_ia32_gen_qemu_ld_i64
+#define tcg_gen_qemu_st_i64 ia64_ia32_gen_qemu_st_i64
+#define tcg_gen_qemu_ld_i128 ia64_ia32_gen_qemu_ld_i128
+#define tcg_gen_qemu_st_i128 ia64_ia32_gen_qemu_st_i128
+
 #define X86_SKIP_HELPER_INFO
 #define tcg_x86_init ia64_ia32_translate_init
 #define x86_translate_code ia64_ia32_translate_code
 
-#include "target/i386/tcg/translate.c"
+#endif /* TARGET_IA64_IA32_TRANSLATE_ADAPTER_H */

@@ -1,4 +1,4 @@
-/* Madison IA-32 exception, software-interrupt and intercept delivery. */
+/* IA-32 exception, software-interrupt and intercept delivery. */
 
 #include "helper-compat.h"
 #include "accel/tcg/cpu-ldst.h"
@@ -368,7 +368,7 @@ void helper_ia32_sse_exception_end(CPUIA64State *env)
     }
 
     /* CFLG.mmxex=0 masks every SIMD exception in the IA-64 environment. */
-    if (!(xenv->cr[4] & CR4_OSXMMEXCPT_MASK)) {
+    if (!(xenv->cr[IA32_CR4_INDEX] & CR4_OSXMMEXCPT_MASK)) {
         return;
     }
 
@@ -392,7 +392,8 @@ static void ia32_check_block_alignment(CPUX86State *xenv, vaddr addr,
             return;
         }
         eflags = cpu_compute_eflags(xenv);
-        if (!(eflags & AC_MASK) || !(xenv->cr[0] & CR0_AM_MASK) ||
+        if (!(eflags & AC_MASK) ||
+            !(xenv->cr[IA32_CR0_INDEX] & CR0_AM_MASK) ||
             (xenv->hflags & HF_CPL_MASK) != 3) {
             return;
         }
@@ -565,21 +566,22 @@ bool ia64_ia32_code_fetch_valid(CPUX86State *xenv, uint32_t linear,
     unsigned type = (cs->flags >> DESC_TYPE_SHIFT) & 0xf;
     unsigned cpl = xenv->hflags & HF_CPL_MASK;
     bool virtual_interrupts =
-        (xenv->cr[4] & CR4_PVI_MASK) ||
-        ((eflags & VM_MASK) && (xenv->cr[4] & CR4_VME_MASK));
+        (xenv->cr[IA32_CR4_INDEX] & CR4_PVI_MASK) ||
+        ((eflags & VM_MASK) &&
+         (xenv->cr[IA32_CR4_INDEX] & CR4_VME_MASK));
 
     if (!(cs->flags & DESC_S_MASK) || !(cs->flags & DESC_P_MASK) ||
         !(cs->flags & DESC_A_MASK) || (type & 0xc) == 4 ||
         eip > cs->limit ||
         (last >= eip ? last > cs->limit : cs->limit != UINT32_MAX) ||
-        (!(xenv->cr[0] & CR0_PE_MASK) &&
+        (!(xenv->cr[IA32_CR0_INDEX] & CR0_PE_MASK) &&
          (cpl != 0 || (eflags & VM_MASK))) ||
         ((eflags & VM_MASK) &&
          (cpl != 3 ||
           ((cs->flags & DESC_DPL_MASK) >> DESC_DPL_SHIFT) != 3 ||
           (cs->flags & DESC_B_MASK))) ||
         ((eflags & (VIP_MASK | VIF_MASK)) == (VIP_MASK | VIF_MASK) &&
-         (xenv->cr[0] & CR0_PE_MASK) && cpl == 3 &&
+         (xenv->cr[IA32_CR0_INDEX] & CR0_PE_MASK) && cpl == 3 &&
          virtual_interrupts)) {
         return false;
     }
@@ -648,7 +650,8 @@ void ia64_ia32_check_segment_access(CPUX86State *xenv, uint32_t linear,
     unsigned cpl = xenv->hflags & HF_CPL_MASK;
     unsigned dpl;
     bool vm86 = eflags & VM_MASK;
-    bool protected_mode = (xenv->cr[0] & CR0_PE_MASK) && !vm86;
+    bool protected_mode =
+        (xenv->cr[IA32_CR0_INDEX] & CR0_PE_MASK) && !vm86;
     bool code;
     bool expand_down;
     bool readable;
@@ -786,7 +789,7 @@ void helper_ia32_lock_check(CPUIA64State *env, target_ulong linear,
     if (size > 1 && (addr & (size - 1)) &&
         ((env->psr & IA64_PSR_AC) ||
          ((cpu_compute_eflags(xenv) & AC_MASK) &&
-          (xenv->cr[0] & CR0_AM_MASK) &&
+          (xenv->cr[IA32_CR0_INDEX] & CR0_AM_MASK) &&
           (xenv->hflags & HF_CPL_MASK) == 3))) {
         env->cr_ifa = addr;
         ia32_raise_fault(xenv, EXCP11_ALGN, 0, GETPC());

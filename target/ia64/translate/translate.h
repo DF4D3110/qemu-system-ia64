@@ -117,7 +117,22 @@ void ia64_gen_gr_nat_from_2(uint8_t dst, uint8_t src1, uint8_t src2);
 void ia64_gen_fr_nat_from_gr(uint8_t dst, uint8_t src);
 void ia64_gen_fr_mov(uint8_t reg, TCGv_i64 value);
 void ia64_gen_fr_mov_sig(uint8_t reg, TCGv_i64 value);
-void ia64_gen_fr_load(uint8_t reg, TCGv_i64 addr, int mmu_idx, MemOp memop,
+void ia64_gen_qemu_ld_i64(DisasContext *ctx, TCGv_i64 value, TCGv_i64 addr,
+                          int mmu_idx, MemOp memop);
+void ia64_gen_qemu_st_i64(DisasContext *ctx, TCGv_i64 value, TCGv_i64 addr,
+                          int mmu_idx, MemOp memop);
+void ia64_gen_qemu_ld_i128(DisasContext *ctx, TCGv_i128 value, TCGv_i64 addr,
+                           int mmu_idx, MemOp memop);
+void ia64_gen_qemu_st_i128(DisasContext *ctx, TCGv_i128 value, TCGv_i64 addr,
+                           int mmu_idx, MemOp memop);
+void ia64_gen_atomic_xchg_i64(DisasContext *ctx, TCGv_i64 result,
+                              TCGv_i64 addr, TCGv_i64 value, int mmu_idx,
+                              MemOp memop);
+void ia64_gen_atomic_fetch_add_i64(DisasContext *ctx, TCGv_i64 result,
+                                   TCGv_i64 addr, TCGv_i64 value, int mmu_idx,
+                                   MemOp memop);
+void ia64_gen_fr_load(DisasContext *ctx, uint8_t reg, TCGv_i64 addr,
+                      int mmu_idx, MemOp memop,
                       IA64FPRegisterLoadFormat format);
 void ia64_gen_fr_set_nat(uint8_t reg);
 void ia64_gen_predicate_test_write(const Ia64Instruction *insn,
@@ -127,7 +142,8 @@ void ia64_gen_check_nat_register(const Ia64Instruction *insn, uint8_t reg);
 void ia64_gen_check_nat_consumption(const Ia64Instruction *insn,
                                     uint8_t reg, uint64_t isr_access,
                                     Ia64NatConsumptionKind kind);
-void ia64_gen_gr_nat_from_1_or_unimplemented_va(uint8_t dst, uint8_t src);
+void ia64_gen_gr_nat_from_1_or_unimplemented_va(uint8_t dst, uint8_t src,
+                                                uint8_t impl_va_msb);
 MemOp ia64_data_memop(DisasContext *ctx, MemOp memop);
 void ia64_gen_check_alignment_access(const Ia64Instruction *insn,
                                      TCGv_i64 addr, uint32_t size,

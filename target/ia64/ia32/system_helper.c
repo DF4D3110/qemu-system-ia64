@@ -1,4 +1,4 @@
-/* Madison IA-32 system-environment adapters. */
+/* Native IA-32 system-environment adapters. */
 
 #include "helper-compat.h"
 #include "accel/tcg/cpu-ldst.h"
@@ -7,6 +7,8 @@
 #include "system/memory.h"
 #include "target/i386/tcg/helper-tcg.h"
 #include "target/i386/tcg/tcg-cpu.h"
+#include "arch/arch.h"
+#include "arch/system.h"
 #include "ia32/ia32.h"
 
 void helper_ia32_rsm(CPUIA64State *env);
@@ -32,7 +34,7 @@ static uint64_t ia32_io_checked_address(CPUX86State *xenv, uint32_t port,
     CPUIA64State *env = (CPUIA64State *)xenv;
     uint64_t addr = ia32_io_address(env, port);
 
-    if (!ia64_va_is_implemented(addr)) {
+    if (!ia64_va_is_implemented((CPUIA64State *)xenv, addr)) {
         raise_exception_err_ra(xenv, EXCP0D_GPF, 0, retaddr);
     }
     return addr;
@@ -223,7 +225,8 @@ void helper_ia32_rdtsc(CPUIA64State *env)
     uint64_t value;
 
     if (ia64_psr_cpl(env->psr) != 0 &&
-        ((env->psr & IA64_PSR_SI) || (xenv->cr[4] & CR4_TSD_MASK))) {
+        ((env->psr & IA64_PSR_SI) ||
+         (xenv->cr[IA32_CR4_INDEX] & CR4_TSD_MASK))) {
         raise_exception_err_ra(xenv, EXCP0D_GPF, 0, GETPC());
     }
 
@@ -239,16 +242,16 @@ void helper_ia32_rdpmc(CPUIA64State *env)
     uint32_t index = counter + 4;
     uint64_t value;
 
-    /* Madison exposes its four generic PMD4..PMD7 counters to RDPMC. */
+    /* Native IA-32 execution exposes the four generic PMD4..PMD7 counters. */
     if (counter >= 4 ||
         (ia64_psr_cpl(env->psr) != 0 &&
          ((env->psr & IA64_PSR_SP) ||
-          !(xenv->cr[4] & CR4_PCE_MASK) ||
+          !(xenv->cr[IA32_CR4_INDEX] & CR4_PCE_MASK) ||
           (env->pmc[index] & (1ULL << 6))))) {
         raise_exception_err_ra(xenv, EXCP0D_GPF, 0, GETPC());
     }
 
-    value = env->pmd[index];
+    value = ia64_system_read_pmd(env, index);
     xenv->regs[R_EAX] = (uint32_t)value;
     xenv->regs[R_EDX] = value >> 32;
 }
@@ -409,7 +412,7 @@ void cpu_sync_avx_hflag(CPUX86State *xenv)
 
 void cpu_x86_update_cr3(CPUX86State *xenv, target_ulong value)
 {
-    xenv->cr[3] = (uint32_t)value;
+    xenv->cr[IA32_CR3_INDEX] = (uint32_t)value;
 }
 
 void cpu_x86_update_dr7(CPUX86State *xenv, uint32_t value)
@@ -471,16 +474,16 @@ void cpu_x86_cpuid(CPUX86State *xenv, uint32_t index, uint32_t count,
         *ecx = xenv->features[FEAT_1_ECX];
         *edx = xenv->features[FEAT_1_EDX];
         break;
-    case 2:
-        /*
-         * Madison's IA-32 cache descriptors.  The L3 descriptor reports
-         * 3 MB even on larger-cache parts, matching hardware erratum 6.
-         * EDX is architecturally reserved for this implementation.
-         */
-        *eax = 0x7e776701;
-        *ebx = 0x0000008d;
-        *edx = 0x80000000;
+    case 2: {
+        IA64CPUClass *icc =
+            ia64_env_cpu_class((CPUIA64State *)xenv);
+
+        *eax = icc->ia32_cpuid_leaf2[0];
+        *ebx = icc->ia32_cpuid_leaf2[1];
+        *ecx = icc->ia32_cpuid_leaf2[2];
+        *edx = icc->ia32_cpuid_leaf2[3];
         break;
+    }
     default:
         break;
     }

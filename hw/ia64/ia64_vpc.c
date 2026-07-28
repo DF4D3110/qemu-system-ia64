@@ -3,7 +3,7 @@
  *
  * IA-64 virtual PC platform.
  *
- * Provides RAM, a bootstrap CPU, a memory-mapped serial console,
+ * Provides RAM, a bootstrap CPU, a serial console,
  * firmware ROM loading via -bios, a PCI host bridge, SCSI and AHCI storage
  * controllers, an Ethernet controller, OHCI/UHCI USB,
  * local SAPIC/I/O SAPIC wiring,
@@ -67,6 +67,12 @@
 #define IA64_NVRAM_COMMIT_MAGIC 0x54494d4d4f43564eULL /* "NVCOMMIT" */
 #define IA64_HIGH_RAM_AFTER_FIRMWARE_BASE \
     (IA64_FIRMWARE_ADDRESS_SPACE_BASE + IA64_FIRMWARE_ADDRESS_SPACE_SIZE)
+#define IA64_VPC_MAX_RAM_SIZE \
+    (IA64_LOW_RAM_LIMIT + \
+     (IA64_PCI_MMIO_BASE - IA64_HIGH_RAM_BASE) + \
+     (IA64_LOCAL_SAPIC_PA - \
+      (IA64_PCI_MMIO_BASE + IA64_PCI_MMIO_SIZE)) + \
+     (IA64_PCI_IO_BASE - IA64_HIGH_RAM_AFTER_FIRMWARE_BASE))
 #define IA64_FW_BOOTSTRAP_STACK_TOP (128 * MiB)
 #define IA64_FW_LOW_RAM_MIN IA64_FW_BOOTSTRAP_STACK_TOP
 #define IA64_IVT_BASE   0x10000ULL
@@ -376,6 +382,7 @@ struct IA64VpcMachineState {
     MemoryRegion nvram_mmio;
     MemoryRegion acpi_pm;
     MemoryRegion acpi_reset;
+    MemoryRegion uart_io_alias;
 #ifdef CONFIG_IA64_VPC_GRAPHICS
     MemoryRegion int10_pci_io;
     IA64Int10Registers int10_request;
@@ -433,20 +440,20 @@ static const IA64VgaLegacyMode *ia64_vga_find_legacy_mode(uint8_t number)
 static void ia64_vbe_write(uint16_t index, uint16_t value)
 {
     address_space_stw_le(&address_space_memory,
-                         IA64_PCI_IO_BASE + IA64_VBE_IO_INDEX,
+                         IA64_LEGACY_IO_PORT_PA(IA64_VBE_IO_INDEX),
                          index, MEMTXATTRS_UNSPECIFIED, NULL);
     address_space_stw_le(&address_space_memory,
-                         IA64_PCI_IO_BASE + IA64_VBE_IO_DATA,
+                         IA64_LEGACY_IO_PORT_PA(IA64_VBE_IO_DATA),
                          value, MEMTXATTRS_UNSPECIFIED, NULL);
 }
 
 static uint16_t ia64_vbe_read(uint16_t index)
 {
     address_space_stw_le(&address_space_memory,
-                         IA64_PCI_IO_BASE + IA64_VBE_IO_INDEX,
+                         IA64_LEGACY_IO_PORT_PA(IA64_VBE_IO_INDEX),
                          index, MEMTXATTRS_UNSPECIFIED, NULL);
     return address_space_lduw_le(&address_space_memory,
-                                 IA64_PCI_IO_BASE + IA64_VBE_IO_DATA,
+                                 IA64_LEGACY_IO_PORT_PA(IA64_VBE_IO_DATA),
                                  MEMTXATTRS_UNSPECIFIED, NULL);
 }
 
@@ -458,14 +465,14 @@ static uint32_t ia64_vbe_memory_size(void)
 
 static void ia64_vga_writeb(uint16_t port, uint8_t value)
 {
-    address_space_stb(&address_space_memory, IA64_PCI_IO_BASE + port,
+    address_space_stb(&address_space_memory, IA64_LEGACY_IO_PORT_PA(port),
                       value, MEMTXATTRS_UNSPECIFIED, NULL);
 }
 
 static uint8_t ia64_vga_readb(uint16_t port)
 {
     return address_space_ldub(&address_space_memory,
-                              IA64_PCI_IO_BASE + port,
+                              IA64_LEGACY_IO_PORT_PA(port),
                               MEMTXATTRS_UNSPECIFIED, NULL);
 }
 
@@ -1953,9 +1960,11 @@ static void ia64_vpc_map_ram(IA64VpcMachineState *s)
     offset += size;
     remaining -= size;
 
-    ia64_vpc_map_ram_alias(s, IA64_HIGH_RAM_AFTER_FIRMWARE_BASE,
-                           offset, remaining, remaining,
-                           "ia64-vpc.high-ram-above-4g");
+    size = ia64_vpc_map_ram_alias(
+        s, IA64_HIGH_RAM_AFTER_FIRMWARE_BASE, offset, remaining,
+        IA64_PCI_IO_BASE - IA64_HIGH_RAM_AFTER_FIRMWARE_BASE,
+        "ia64-vpc.high-ram-above-4g");
+    g_assert(size == remaining);
 }
 
 static void ia64_vpc_write_firmware_handoff(IA64VpcMachineState *s)
@@ -2331,7 +2340,8 @@ static bool ia64_vpc_init_usb(IA64VpcMachineState *s, PCIBus *pci_bus,
 
 static IA64BootInfo ia64_vpc_boot_info(unsigned int cpu_index,
                                        uint64_t entry,
-                                       uint64_t global_pointer)
+                                       uint64_t global_pointer,
+                                       uint64_t low_ram_size)
 {
     IA64BootInfo info = {
         .firmware_base = IA64_FW_BASE,
@@ -2344,6 +2354,7 @@ static IA64BootInfo ia64_vpc_boot_info(unsigned int cpu_index,
             IA64_VPC_AP_EARLY_STACK_TOP - 16 -
                 cpu_index * IA64_VPC_EARLY_STACK_STRIDE,
         .rsc = IA64_RSC_MODE,
+        .low_ram_size = low_ram_size,
         .powered_off = cpu_index != 0,
     };
 
@@ -2415,7 +2426,9 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
     CPU_FOREACH(cs) {
         IA64BootInfo info = ia64_vpc_boot_info(cs->cpu_index,
                                                entrypoint.entry,
-                                               entrypoint.global_pointer);
+                                               entrypoint.global_pointer,
+                                               MIN(machine->ram_size,
+                                                   IA64_LOW_RAM_LIMIT));
 
         ia64_cpu_set_boot_info(IA64_CPU(cs), &info);
         ia64_cpu_reset_to_boot_info(IA64_CPU(cs));
@@ -2430,6 +2443,12 @@ static bool ia64_vpc_validate_configuration(MachineState *machine,
         g_autofree char *size = size_to_str(IA64_FW_LOW_RAM_MIN);
 
         error_setg(errp, "Invalid RAM size, should be at least %s", size);
+        return false;
+    }
+    if (machine->ram_size > IA64_VPC_MAX_RAM_SIZE) {
+        g_autofree char *size = size_to_str(IA64_VPC_MAX_RAM_SIZE);
+
+        error_setg(errp, "Invalid RAM size, should be at most %s", size);
         return false;
     }
     if (s->alat_full && machine->smp.cpus > 1) {
@@ -2481,6 +2500,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     IA64CPU *cpu;
     DeviceState *pci_host;
     DeviceState *iosapic;
+    SerialMM *primary_uart;
     PCIBus *pci_bus;
     ISABus *isa_bus;
     MemoryRegion *pci_io;
@@ -2509,7 +2529,9 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         uint32_t per_socket = threads * cores;
         uint32_t package_base = (i / per_socket) * per_socket;
         IA64BootInfo boot_info = ia64_vpc_boot_info(i, IA64_FW_BASE,
-                                                    IA64_FW_BASE);
+                                                    IA64_FW_BASE,
+                                                    MIN(machine->ram_size,
+                                                        IA64_LOW_RAM_LIMIT));
 
         cpu = IA64_CPU(object_new(machine->cpu_type));
         cpu->alat_full = s->alat_full;
@@ -2534,9 +2556,10 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     }
     sysbus_mmio_map(SYS_BUS_DEVICE(iosapic), 0, IA64_IOSAPIC_BASE);
 
-    serial_mm_init(get_system_memory(), IA64_UART_BASE, 0,
-                   qdev_get_gpio_in(iosapic, 4),
-                   115200, serial_hd(0), DEVICE_LITTLE_ENDIAN);
+    primary_uart = serial_mm_init(get_system_memory(), IA64_UART_BASE, 0,
+                                  qdev_get_gpio_in(iosapic, 4),
+                                  115200, serial_hd(0),
+                                  DEVICE_LITTLE_ENDIAN);
     if (debug_port_get_chardev()) {
         serial_mm_init(get_system_memory(), IA64_DEBUG_UART_BASE, 0,
                        qdev_get_gpio_in(iosapic, 3),
@@ -2576,6 +2599,29 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
      */
     pci_bus_set_slot_reserved_mask(pci_bus, 1U << 0);
     pci_io = pci_bus->address_space_io;
+
+    /*
+     * Present the platform UART through the IA-64 sparse I/O-port window at
+     * COM1.  This is the resource published by ACPI/HCDP and is the normal
+     * PNP0501 interface.
+     *
+     * Keep the historical 0x47f0000000 MMIO decode as an unadvertised alias:
+     * the in-tree firmware already uses that address before ACPI is available,
+     * and older guests may have recorded it.  A second UART instance cannot be
+     * used here because two devices would race for the same chardev and hold
+     * independent register state, so both decodes deliberately alias one
+     * SerialMM region.  The alias is also a narrow compatibility response to
+     * an early IA-64 serial driver's memory-resource path, whose reason for
+     * leaving SpanOfController zero is not documented; its I/O-port path does
+     * initialize the standard seven-register span.
+     */
+    memory_region_init_alias(&s->uart_io_alias, OBJECT(s), "uart-io-alias",
+                             sysbus_mmio_get_region(
+                                 SYS_BUS_DEVICE(primary_uart), 0),
+                             0, IA64_UART_IO_SIZE);
+    memory_region_add_subregion(pci_io, IA64_UART_IO_PORT,
+                                &s->uart_io_alias);
+
     ia64_vpc_init_acpi_pm(s, iosapic, pci_io);
 
     /* Leave ISA/SCI lines in the legacy range and route PCI INTx above 15. */

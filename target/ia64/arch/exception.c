@@ -58,6 +58,8 @@ const uint16_t ia64_ivt_vectors[IA64_EXCP_MAX] = {
     [IA64_EXCP_SINGLE_STEP]     = 0x6000,
 };
 
+
+
 G_NORETURN void ia64_raise_exception(CPUIA64State *env, uint32_t exception,
                             uint64_t fault_ip, uint64_t fault_imm,
                             uint32_t fault_slot)
@@ -105,8 +107,8 @@ G_NORETURN void ia64_raise_unaligned(CPUIA64State *env, uint64_t addr,
                             uint64_t isr_access, uint64_t fault_info)
 {
     bool unimplemented = env->psr & IA64_PSR_DT ?
-                         !ia64_va_is_implemented(addr) :
-                         !ia64_pa_is_implemented(addr);
+                         !ia64_va_is_implemented(env, addr) :
+                         !ia64_pa_is_implemented(env, addr);
 
     /*
      * An unimplemented address precludes a concurrent unaligned-reference
@@ -454,6 +456,68 @@ static bool ia64_exception_uses_psr_ri_slot(IA64Exception excp, uint64_t isr)
     }
 }
 
+static bool ia64_try_defer_sal_speculative_alt_dtlb(
+    CPUState *cs, IA64Exception excp, uint64_t fault_addr, uint8_t slot)
+{
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
+
+    if (excp != IA64_EXCP_ALT_DTLB ||
+        !ia64_sal_boot_environment_active(&cpu->env) ||
+        !(cpu->env.cr_isr & IA64_ISR_SP)) {
+        return false;
+    }
+
+    /*
+     * SAL 3.0 section 3.3.1 requires its boot-time Alternate Data TLB
+     * handler to return a speculative miss with IPSR.ed set.  Retrying the
+     * instruction then writes NaT and completes without another fault.
+     */
+    ia64_deliver_exception(cs, excp, fault_addr, slot);
+    cpu->env.cr_ipsr |= IA64_PSR_ED;
+    ia64_rfi(&cpu->env, cpu->env.ip, 0);
+    return true;
+}
+
+static bool ia64_try_handle_sal_alt_tlb(CPUState *cs, IA64Exception excp,
+                                        uint64_t fault_addr)
+{
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
+    bool is_data = excp == IA64_EXCP_ALT_DTLB;
+    uint64_t pa;
+    uint8_t page_shift;
+    bool direct;
+
+    if ((excp != IA64_EXCP_ALT_ITLB && !is_data) ||
+        !ia64_firmware_boot_miss_mapping(cpu, fault_addr, &pa,
+                                         &page_shift, &direct) ||
+        !ia64_mmu_insert_firmware_tc(&cpu->env, fault_addr, pa, is_data,
+                                     page_shift)) {
+        return false;
+    }
+
+    qemu_log_mask(CPU_LOG_MMU,
+                  "ia64 sal tc %c %s va=0x%016" PRIx64
+                  " rid=0x%06" PRIx32 " pa=0x%016" PRIx64
+                  " ps=%u\n",
+                  is_data ? 'd' : 'i', direct ? "direct" : "identity",
+                  fault_addr, ia64_region_rid(&cpu->env, fault_addr), pa,
+                  page_shift);
+
+    /*
+     * A mandatory RSE load can take the Alternate Data TLB vector after
+     * br.ret has committed its target.  The SAL handler installs the TC
+     * and returns with rfi; IFS.v is clear, so rfi resumes the incomplete
+     * frame before the target instruction executes (SDM Vol.2 section 6.8).
+     * This in-process SAL handler must perform the same resume step.
+     */
+    if (is_data &&
+        (cpu->env.cr_isr & (IA64_ISR_RS | IA64_ISR_IR)) ==
+        (IA64_ISR_RS | IA64_ISR_IR)) {
+        ia64_rse_resume_incomplete_frame(&cpu->env);
+    }
+    return true;
+}
+
 void ia64_cpu_do_interrupt(CPUState *cs)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
@@ -519,8 +583,8 @@ void ia64_cpu_do_interrupt(CPUState *cs)
             fault_addr = cpu->env.exception_state.fault_ip;
         } else {
             cpu->env.ip = cpu->env.psr & IA64_PSR_IT ?
-                          ia64_va_canonicalize(cpu->env.ip) :
-                          ia64_pa_canonicalize(cpu->env.ip);
+                          ia64_va_canonicalize(&cpu->env, cpu->env.ip) :
+                          ia64_pa_canonicalize(&cpu->env, cpu->env.ip);
             fault_addr = cpu->env.ip;
         }
         break;
@@ -558,6 +622,17 @@ void ia64_cpu_do_interrupt(CPUState *cs)
                       cpu->env.cr_isr, cpu->env.ar_bsp,
                       cpu->env.ar_bspstore, cpu->env.ar_rsc, cfm);
 
+    }
+
+    if (ia64_try_defer_sal_speculative_alt_dtlb(
+            cs, excp, fault_addr, slot)) {
+        cs->exception_index = IA64_EXCP_NONE;
+        return;
+    }
+
+    if (ia64_try_handle_sal_alt_tlb(cs, excp, fault_addr)) {
+        cs->exception_index = IA64_EXCP_NONE;
+        return;
     }
 
     if (excp == IA64_EXCP_UNALIGNED &&

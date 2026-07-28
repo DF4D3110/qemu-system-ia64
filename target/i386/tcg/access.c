@@ -3,6 +3,9 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
+#ifdef TARGET_IA64
+#include "target/ia64/ia32/access-adapter.h"
+#endif
 #include "accel/tcg/cpu-ldst.h"
 #include "accel/tcg/probe.h"
 #include "exec/target_page.h"

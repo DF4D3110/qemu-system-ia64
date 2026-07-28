@@ -7,6 +7,7 @@
 #include "qemu/osdep.h"
 #include "qemu/atomic128.h"
 #include "cpu.h"
+#include "arch/arch.h"
 #include "exec-access.h"
 #include "accel/tcg/cpu-ldst.h"
 #include "accel/tcg/probe.h"
@@ -180,8 +181,9 @@ bool ia64_exec_probe_host(CPUIA64State *env, uint64_t addr, int size,
 {
     int flags = probe_access_flags(env, addr, size, access_type, mmu_idx,
                                    false, host, ra);
+    bool direct = flags == 0 && *host != NULL;
 
-    return flags == 0 && *host != NULL;
+    return direct;
 }
 
 bool ia64_exec_probe_writeback_ram(CPUIA64State *env, uint64_t addr,

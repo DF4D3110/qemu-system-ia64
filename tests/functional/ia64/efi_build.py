@@ -9,7 +9,7 @@ import subprocess
 
 
 APP_NAMES = ("smoke", "services", "tables", "exitbs", "storage", "input",
-             "smp", "start-image-child")
+             "smp", "smp-merced", "start-image-child")
 SOURCE_DIR = Path(__file__).resolve().parent
 APPS_SOURCE_DIR = SOURCE_DIR / "apps"
 

@@ -33,12 +33,12 @@
 #define UART_MCR_RTS  0x02U
 #define UART_MCR_LOOP 0x10U
 
-#define FW_ITC_TICKS_PER_100NS 20ULL
+#define FW_ITC_TICKS_PER_100NS (fw_itc_ticks_per_100ns())
 #define FW_ITC_TICKS_PER_MICROSECOND (FW_ITC_TICKS_PER_100NS * 10ULL)
 #define FW_ITC_TICKS_PER_SECOND (FW_ITC_TICKS_PER_100NS * 10000000ULL)
 
-#define PS2_DATA_PORT        (0x000000800010000000ULL + 0x60U)
-#define PS2_STATUS_PORT      (0x000000800010000000ULL + 0x64U)
+#define PS2_DATA_PORT        0x60U
+#define PS2_STATUS_PORT      0x64U
 #define PS2_STATUS_OBF       0x01U
 #define PS2_STATUS_IBF       0x02U
 #define PS2_STATUS_MOUSE_OBF 0x20U
@@ -55,6 +55,7 @@
 
 void fw_copy_mem(VOID *destination, const VOID *source, UINTN length);
 UINT64 fw_read_itc(void);
+UINT64 fw_itc_ticks_per_100ns(void);
 volatile UINT8 *fw_uart_reg(UINTN offset);
 UINT64 fw_read_psr(void);
 UINT64 fw_read_ivr(void);

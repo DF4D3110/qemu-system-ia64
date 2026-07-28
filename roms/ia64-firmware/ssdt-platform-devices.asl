@@ -56,12 +56,11 @@ DefinitionBlock ("", "SSDT", 2, "QEMU  ", "IA64SSDT", 0x00000001)
             Name (_UID, 0)
             Name (_CRS, ResourceTemplate ()
             {
-                QWordMemory (ResourceConsumer, PosDecode, MinFixed,
-                    MaxFixed, NonCacheable, ReadWrite,
-                    0, 0x00000047F0000000, 0x00000047F0000007,
-                    0, 8)
-                // The UART is wired to IOSAPIC GSI 4, not a legacy PIC IRQ.
-                Interrupt (ResourceConsumer, Level, ActiveLow, Shared, ,,)
+                QWordIO (ResourceConsumer, MinFixed, MaxFixed, PosDecode,
+                    EntireRange, 0, 0x03F8, 0x03FF, 0, 8,
+                    , , , TypeStatic, DenseTranslation)
+                // COM1 is wired to the IOSAPIC's ISA-compatible GSI 4 input.
+                Interrupt (ResourceConsumer, Edge, ActiveHigh, Exclusive, ,,)
                 {
                     4
                 }

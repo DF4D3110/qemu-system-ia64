@@ -18,6 +18,10 @@ def adds(r1, imm, r3, qp=0):
 def addl(r1, imm, r3, qp=0):
     if not 0 <= r3 < 4:
         raise ValueError("addl base must be a static general register r0-r3")
+    if (1 << 63) <= imm < (1 << 64):
+        imm -= 1 << 64
+    if not -(1 << 21) <= imm < (1 << 21):
+        raise ValueError("addl immediate must fit signed 22 bits")
     encoded = imm & 0x3FFFFF
     return (
         op(9)

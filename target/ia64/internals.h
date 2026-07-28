@@ -8,6 +8,16 @@
 #ifndef TARGET_IA64_INTERNALS_H
 #define TARGET_IA64_INTERNALS_H
 
+#define PAL_PROC_MONTECITO_ICACHE_COHERENCE   (1ULL << 5)
+#define PAL_PROC_MONTECITO_EXCLUSIVE_PREFETCH (1ULL << 7)
+#define PAL_PROC_MONTECITO_HT                  (1ULL << 18)
+#define PAL_PROC_MONTECITO_CONTROLLABLE \
+    (PAL_PROC_MONTECITO_ICACHE_COHERENCE | \
+     PAL_PROC_MONTECITO_EXCLUSIVE_PREFETCH)
+#define PAL_PROC_MONTECITO_AVAILABLE \
+    (PAL_PROC_MONTECITO_CONTROLLABLE | PAL_PROC_MONTECITO_HT)
+
+
 typedef struct IA64ExceptionState {
     /* Architected/restart-visible exception state. */
     uint64_t fault_ip;
@@ -33,8 +43,18 @@ typedef struct IA64MMUState {
     /* Derived translation caches; all entries are reconstructible. */
     IA64TlbEntry tlb_data[IA64_TLB_MAX];
     IA64TlbEntry tlb_inst[IA64_TLB_MAX];
+    /*
+     * Merced's DTLB1 holds non-inclusive cached copies of DTLB2 entries.
+     * A DTLB1 copy can satisfy an access after DTLB2 replacement; keeping the
+     * corresponding softmmu translation alive is only a derived fast path.
+     * Later models leave this state unused.
+     */
+    IA64TlbEntry tlb_data_l1[IA64_DTLB1_MAX];
+    uint64_t tlb_data_l1_age[IA64_DTLB1_MAX];
+    uint64_t tlb_data_l1_clock;
     uint16_t tlb_data_count;
     uint16_t tlb_inst_count;
+    uint8_t tlb_data_l1_count;
     uint16_t tlb_data_replace;
     uint16_t tlb_inst_replace;
     uint32_t tlb_data_generation;
@@ -56,8 +76,16 @@ typedef struct IA64InterruptState {
     uint64_t sapic_irr[4];
     uint64_t sapic_isr[4];
 
-    /* Derived host timer state for architected ITC/ITM registers. */
-    int64_t itc_delta;
+    /*
+     * Derived host timer state for architected ITC/ITM registers.
+     * itc_fraction is the numerator left after converting virtual
+     * nanoseconds to ticks, with NANOSECONDS_PER_SECOND as denominator.
+     * A synthetic post-match tick is repaid from later oscillator ticks so
+     * reading ITC in an interrupt handler cannot permanently advance time.
+     */
+    int64_t itc_last_ns;
+    uint32_t itc_fraction;
+    uint64_t itc_tick_debt;
     uint64_t itm_armed_value;
     uint64_t itm_last_match;
     bool itm_armed;
@@ -67,6 +95,8 @@ typedef struct IA64InterruptState {
 typedef struct IA64PalState {
     /* Architected PAL registration and machine-check state. */
     bool pal_mc_expected;
+    uint64_t pal_bus_feature_status;
+    uint64_t pal_proc_feature_status;
     uint64_t pal_mc_save_addr;
     uint64_t pal_pmi_entry;
     bool pal_proc_copy_valid;
@@ -89,12 +119,30 @@ typedef struct IA64RSEState {
     bool rse_cfle;
 
     /*
-     * Derived: the lowest AR.RNAT bit index that the current run of RSE
-     * stores has defined.  Bits below it belong to registers spilled
-     * before AR.RNAT became the collection of AR.BSPSTORE's group and
-     * live only in the backing store.
+     * Derived spill- and fill-side NaT collection state.  AR.RNAT is the
+     * architected partial collection associated with the RSE store pointer;
+     * rse_rnat_addr identifies its 512-byte backing-store collection.
+     * rse_rnat_first is the first bit that subsequent stores will replace.
+     * rse_rnat_last is one past the last defined bit.  Internal incomplete-
+     * frame bookkeeping can move BSPSTORE above the saved spill pointer, so
+     * that pointer alone cannot recover the upper bound.
+     *
+     * RSE.BspLoad can walk a different collection from AR.BSPSTORE.  Keep
+     * its completed collection in a separate latch so a mandatory fill does
+     * not destroy an unsaved partial AR.RNAT collection.  The SDM specifies
+     * the externally visible RNAT and pointer relationships, but not this
+     * implementation latch; it is derived state, not a new architectural
+     * register.  Architectural reads compose the latch with spill bits for
+     * the collection selected by the current BSPSTORE.  UINT64_MAX
+     * rse_rnat_addr denotes architecturally undefined RNAT after
+     * mov-to-BSPSTORE or loadrs.
      */
+    uint64_t rse_rnat_addr;
+    uint64_t rse_load_rnat;
+    uint64_t rse_load_rnat_addr;
     uint32_t rse_rnat_first;
+    uint32_t rse_rnat_last;
+    bool rse_load_rnat_valid;
 } IA64RSEState;
 
 typedef struct IA64AlatState {

@@ -20,6 +20,9 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
+#ifdef TARGET_IA64
+#include "target/ia64/ia32/seg-helper-adapter.h"
+#endif
 #include "qemu/log.h"
 #include "exec/helper-proto.h"
 #include "accel/tcg/cpu-ldst.h"

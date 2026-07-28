@@ -31,4 +31,11 @@
 #undef CC_SRC2
 #undef CC_OP
 
+typedef enum IA32ControlRegisterIndex {
+    IA32_CR0_INDEX = 0,
+    IA32_CR2_INDEX = 2,
+    IA32_CR3_INDEX = 3,
+    IA32_CR4_INDEX = 4,
+} IA32ControlRegisterIndex;
+
 #endif /* TARGET_IA64_IA32_COMPAT_H */

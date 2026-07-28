@@ -25,7 +25,7 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                 WordBusNumber (ResourceProducer, MinFixed, MaxFixed,
                     PosDecode, 0, 0, 0x00FF, 0, 0x0100)
                 QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
-                    EntireRange, 0, 0, 0x00FFFFFF, 0, 0x01000000,
+                    EntireRange, 0, 0, 0x0000FFFF, 0, 0x00010000,
                     , , , TypeStatic, DenseTranslation)
                 DWordMemory (ResourceProducer, PosDecode, MinFixed,
                     MaxFixed, Cacheable, ReadWrite,
@@ -33,7 +33,10 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                 QWordMemory (ResourceProducer, PosDecode, MinFixed,
                     MaxFixed, NonCacheable, ReadWrite,
                     0, 0xC1000000, 0xD0FFFFFF, 0, 0x10000000)
-                // Parent window for the ACPI-enumerated MMIO UART child.
+                /*
+                 * Historical, unadvertised MMIO alias for firmware and old
+                 * guests.  UAR0 itself is described as COM1 I/O in the SSDT.
+                 */
                 QWordMemory (ResourceProducer, PosDecode, MinFixed,
                     MaxFixed, NonCacheable, ReadWrite,
                     0, 0x00000047F0000000, 0x00000047F0000007,

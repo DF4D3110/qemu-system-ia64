@@ -12,6 +12,34 @@ import tempfile
 from process import connect_tcp, connect_unix, terminate_process
 
 
+def test_cpu_models(qemu: str) -> None:
+    result = subprocess.run(
+        [qemu, "-cpu", "help"],
+        check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, timeout=8)
+    lines = [line.strip() for line in result.stdout.splitlines()]
+    models = [line for line in lines
+              if line and line != "Available CPUs:"]
+    expected = ["itanium", "itanium2", "madison", "merced", "montecito"]
+    if result.returncode != 0 or models != expected:
+        raise RuntimeError(
+            f"unexpected CPU model list: {models!r}\n{result.stdout}")
+
+
+def test_cpu_model_names_are_exact(qemu: str) -> None:
+    for model in ("ia64-cpu", "merced-ia64-cpu", "generic", "max"):
+        result = subprocess.run([
+            qemu, "-machine", "none", "-display", "none",
+            "-monitor", "none", "-serial", "none", "-cpu", model,
+        ], check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, timeout=8)
+        if result.returncode == 0 or \
+                f"unable to find CPU model '{model}'" not in result.stdout:
+            raise RuntimeError(
+                f"unexpectedly accepted CPU model {model!r}\n"
+                f"{result.stdout}")
+
+
 def test_duplicate_debug_port(qemu: str) -> None:
     result = subprocess.run([
         qemu, "-machine", "none", "-display", "none", "-monitor", "none",
@@ -67,6 +95,8 @@ def main() -> int:
         print("Bail out! usage: test_cli.py QEMU_SYSTEM_IA64")
         return 1
     tests = [
+        ("CPU model list is exact", test_cpu_models),
+        ("CPU model names are exact", test_cpu_model_names_are_exact),
         ("duplicate debug-port rejected", test_duplicate_debug_port),
         ("debug-port owns nographic stdio", test_nographic_debug_stdio),
         ("debug-port TCP server accepts", test_debug_tcp_server),

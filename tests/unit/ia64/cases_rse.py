@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .case import (CaseMetadata, CaseObservation, bind_cases)
+from .case import (CaseEvidence, CaseMetadata, CaseObservation, bind_cases)
 from .encoding import (
     CHECK_LOAD_DATA,
     EIGHT_K_ITIR,
@@ -16,6 +16,7 @@ from .encoding import (
     IA64_EXCP_ILLEGAL,
     IA64_EXCP_NONE,
     IA64_EXCP_RESERVED_REG_FIELD,
+    IA64_FIRMWARE_IVT_BASE,
     IA64_ISR_NI,
     IA64_ISR_RS,
     IA64_ISR_W,
@@ -81,6 +82,7 @@ from .encoding import (
     mov_m_imm_ar,
     mov_m_psr_gr,
     mov_pr_rot_imm,
+    mov_rr_write,
     movl_mlx,
     nop_b,
     nop_i,
@@ -493,6 +495,29 @@ test_rse_bspstore_preserves_dirty_partition_across_rnat = require_registers(
         "cfm_sol": 0,
     }, entry=0x10)
 
+"""mov-to-BSPSTORE makes RNAT undefined.  The target's deterministic
+spill-side choice is zero, so a later partial-collection spill must not
+resurrect lower NaT bits from an older frame's completed backing word."""
+test_rse_bspstore_undefined_rnat_drops_stale_lower_bits = require_registers(
+    "rse_bspstore_undefined_rnat_drops_stale_lower_bits", [
+        (0x10, *movl_mlx(3, 0x1001f8)),
+        (0x20, *movl_mlx(4, 0x6)),
+        (0x30, 0x00, st8(3, 4), nop_i(), nop_i()),
+        (0x40, *movl_mlx(3, 0x100030)),
+        (0x50, 0x00, mov_ar(3, 18), nop_i(), nop_i()),
+        (0x60, 0x00, nop_m(), alloc(1, 60, 0, 0, 0), nop_i()),
+        (0x70, 0x18, nop_m(), nop_m(), cover_b()),
+        (0x80, 0x00, flushrs_enc(), nop_i(), nop_i()),
+        (0x90, *movl_mlx(3, 0x1001f8)),
+        (0xa0, 0x00, ld8(8, 3), nop_i(), nop_i()),
+        (0xb0, 0x10, nop_m(), nop_i(),
+         br_cond(0xb0, 0xb0)),
+    ], {
+        "ip": 0xb0,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0,
+    }, entry=0x10)
+
 test_rse_loadrs_bspstore_return_uses_covered_frame = require_registers(
     "rse_loadrs_bspstore_return_uses_covered_frame", [
         (0x10, *movl_mlx(3, 0x100000)),
@@ -660,6 +685,53 @@ test_rse_flushrs_clears_stale_rnat = require_registers(
         "exception": IA64_EXCP_NONE,
         "r8": 0,
     }, entry=0x10)
+
+test_rse_merced_flushrs_invalidates_spilled_frame = require_registers(
+    "rse_merced_flushrs_invalidates_spilled_frame", [
+        (0x10, *movl_mlx(3, 0x100000)),
+        (0x20, 0x00, mov_ar(3, 18), nop_i(), nop_i()),
+        (0x30, 0x00, alloc(1, 5, 3, 0, 0), nop_i(), nop_i()),
+        (0x40, *movl_mlx(32, 0x1111)),
+        (0x50, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x50, 0x100)),
+        (0x60, 0x00, nop_m(), adds(8, 0, 32), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(),
+         br_cond(0x70, 0x70)),
+        (0x100, 0x00, flushrs_enc(), nop_i(), nop_i()),
+        (0x110, *movl_mlx(3, 0x100000)),
+        (0x120, *movl_mlx(4, 0x2222)),
+        (0x130, 0x00, st8(3, 4), nop_i(), nop_i()),
+        (0x140, 0x10, nop_m(), nop_i(), br_ret(0)),
+    ], {
+        "ip": 0x70,
+        "r8": 0x2222,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10, cpu="merced")
+
+test_rse_merced_return_publishes_filled_rnat_collection = require_registers(
+    "rse_merced_return_publishes_filled_rnat_collection", [
+        (0x10, *movl_mlx(3, 0x100000)),
+        (0x20, 0x00, mov_ar(3, 18), nop_i(), nop_i()),
+        (0x30, 0x00, nop_m(), alloc(1, 96, 88, 0, 0), nop_i()),
+        (0x40, 0x00, mov_m_imm_ar(36, 1), addl(6, 0x200, 0), nop_i()),
+        (0x50, 0x08, ld8_fill_postinc(88, 6, 0), nop_i(), nop_i()),
+        (0x60, 0x18, nop_m(), nop_m(), cover_b()),
+        (0x70, 0x00, flushrs_enc(), nop_i(), nop_i()),
+        (0x80, *movl_mlx(4, 40 | (40 << 7))),
+        (0x90, 0x00, mov_m_gr_ar(4, 64), nop_i(), nop_i()),
+        (0xa0, *movl_mlx(5, 0x100)),
+        (0xb0, 0x09, nop_m(), nop_m(), mov_b_gr(0, 5)),
+        (0xc0, 0x10, nop_m(), nop_i(), br_ret(0)),
+        (0x100, 0x00, mov_m_ar_gr(8, 19), nop_i(), nop_i()),
+        (0x110, 0x10, nop_m(), nop_i(), br_cond(0x110, 0x110)),
+        (0x200, 0x00, 0, 0, 0),
+    ], {
+        "ip": 0x110,
+        "exception": IA64_EXCP_NONE,
+        "r8": 1 << 56,
+        "cfm_sof": 40,
+        "cfm_sol": 40,
+    }, entry=0x10, cpu="merced")
 
 test_rse_cover_flushrs_spills_covered_frame = require_registers(
     "rse_cover_flushrs_spills_covered_frame", [
@@ -936,20 +1008,23 @@ test_rse_return_reclaims_clean_rebases_rnat_collection = require_registers(
          mov_b_gr(0, 5)),
         (0xc0, 0x10, nop_m(), nop_i(),
          br_ret(0)),
-        (0x100, 0x18, nop_m(), nop_m(),
+        (0x100, 0x00, mov_m_ar_gr(8, 19), nop_i(),
+         nop_i()),
+        (0x110, 0x18, nop_m(), nop_m(),
          cover_b()),
-        (0x110, 0x00, flushrs_enc(), nop_i(),
+        (0x120, 0x00, flushrs_enc(), nop_i(),
          nop_i()),
-        (0x120, *movl_mlx(7, 0x1001f8)),
-        (0x130, 0x00, ld8(10, 7), nop_i(),
+        (0x130, *movl_mlx(7, 0x1001f8)),
+        (0x140, 0x00, ld8(10, 7), nop_i(),
          nop_i()),
-        (0x140, 0x10, nop_m(), nop_i(),
-         br_cond(0x140, 0x140)),
+        (0x150, 0x10, nop_m(), nop_i(),
+         br_cond(0x150, 0x150)),
         (0x200, 0x00, 0, 0,
          0),
     ], {
-        "ip": 0x140,
+        "ip": 0x150,
         "exception": IA64_EXCP_NONE,
+        "r8": 0,
         "r10": 0,
     }, entry=0x10)
 
@@ -2666,6 +2741,62 @@ test_rse_br_ret_fill_dtlb_miss_retries_atomically = require_registers(
         "cfm_sol": 57,
     }, entry=0x10)
 
+SAL_DIRECT_RSE_BASE = 0xe000000080400000
+
+test_rse_sal_alt_dtlb_resumes_br_ret_fill = require_registers(
+    "rse_sal_alt_dtlb_resumes_br_ret_fill", [
+        # Region 7, RID 1, 8 KiB pages, VHPT disabled: the boot-loader
+        # direct window used while the firmware IVT owns TLB misses.
+        (0x10, *movl_mlx(17, SAL_DIRECT_RSE_BASE)),
+        (0x20, *movl_mlx(18, (1 << 8) | EIGHT_K_ITIR | 1)),
+        (0x30, 0x00, mov_rr_write(18, 17), nop_i(), nop_i()),
+        (0x40, *movl_mlx(2, IA64_FIRMWARE_IVT_BASE)),
+        (0x50, 0x00, mov_m_gr_cr(2, 2), nop_i(), nop_i()),
+        (0x60, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_DT |
+                         IA64_PSR_RT)),
+        (0x70, *movl_mlx(3, SAL_DIRECT_RSE_BASE + 0x1f00)),
+        (0x80, 0x00, mov_ar(3, 18), adds(7, EIGHT_K_ITIR, 0), nop_i()),
+        (0x90, 0x10, mov_gr_psr_full(19), nop_i(),
+         br_cond(0x90, 0xa0)),
+        (0xa0, 0x00, nop_m(), alloc(2, 8, 0, 0, 0), nop_i()),
+        (0xb0, 0x10, nop_m(), nop_i(), br_call(0, 0xb0, 0x200)),
+        (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, 0xc0)),
+
+        (0x200, 0x00, nop_m(), alloc(89, 62, 57, 0, 0), nop_i()),
+        (0x210, *movl_mlx(40, 0x1111222233334444)),
+        (0x220, *movl_mlx(70, 0x5555666677778888)),
+        (0x230, *movl_mlx(87, 0x123456789abcdef0)),
+        (0x240, 0x10, nop_m(), nop_i(), br_call(6, 0x240, 0x300)),
+        (0x250, 0x00, nop_m(), adds(8, 0, 40), adds(9, 0, 70)),
+        (0x260, 0x00, nop_m(), adds(10, 0, 87), adds(11, 0, 89)),
+        (0x270, 0x00, nop_m(), adds(14, 0, 90), adds(15, 0, 91)),
+        (0x280, 0x10, nop_m(), nop_i(), br_cond(0x280, 0x280)),
+
+        (0x300, 0x00, nop_m(), alloc(61, 36, 32, 0, 0), nop_i()),
+        (0x310, 0x00, flushrs_enc(), nop_i(), nop_i()),
+        (0x320, 0x00, loadrs_enc(), nop_i(), nop_i()),
+        (0x330, *movl_mlx(3, SAL_DIRECT_RSE_BASE + 0x2000)),
+        (0x340, 0x00, ptr_d(3, 7), nop_i(), nop_i()),
+        (0x350, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x360, *movl_mlx(32, 0xa1a2a3a4a5a6a7a8)),
+        (0x370, *movl_mlx(33, 0xb1b2b3b4b5b6b7b8)),
+        (0x380, *movl_mlx(34, 0xc1c2c3c4c5c6c7c8)),
+        (0x390, *movl_mlx(35, 0xd1d2d3d4d5d6d7d8)),
+        (0x3a0, *movl_mlx(36, 0xe1e2e3e4e5e6e7e8)),
+        (0x3b0, 0x10, nop_m(), nop_i(), br_ret(6)),
+    ], {
+        "ip": 0x280,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x1111222233334444,
+        "r9": 0x5555666677778888,
+        "r10": 0x123456789abcdef0,
+        "r11": 0xa1a2a3a4a5a6a7a8,
+        "r14": 0xb1b2b3b4b5b6b7b8,
+        "r15": 0xc1c2c3c4c5c6c7c8,
+        "cfm_sof": 62,
+        "cfm_sol": 57,
+    }, entry=0x10)
+
 test_rse_exception_loadrs_preserves_interrupted_call = require_registers(
     "rse_exception_loadrs_preserves_interrupted_call", [
         (0x10, *movl_mlx(2, 1 << 13)),
@@ -4132,6 +4263,45 @@ test_br_ctop_strcpy_pipeline_survives_cover_rfi = require_registers(
         "r30": 129}, entry=0x10)
 
 GROUP = 'rse'
+"""SDM Vol.2 6.5.2: "The RSE never saves partial NaT collections to the
+backing store."  Until AR.BSPSTORE reaches a group's collection word the RSE
+has not written it, so the NaT bits of the registers already spilled into that
+group are held in AR.RNAT and the backing-store word still holds whatever
+occupied that memory beforehand.  Here the word at 0x1001f8 is preloaded with
+all ones, the nested frame spills only ten registers so BSPSTORE stops far
+below it, and loadrs then leaves AR.RNAT undefined.  The mandatory fills on
+br.ret must not turn that untouched word into NaT on ten live registers."""
+test_rse_partial_group_fill_ignores_unwritten_collection = require_registers(
+    "rse_partial_group_fill_ignores_unwritten_collection", [
+        (0x10, *movl_mlx(3, 0x1001f8)),
+        (0x20, *movl_mlx(4, 0xffffffffffffffff)),
+        (0x30, 0x00, st8(3, 4), nop_i(),
+         nop_i()),
+        (0x40, *movl_mlx(3, 0x100000)),
+        (0x50, 0x00, mov_ar(3, 18), nop_i(),
+         nop_i()),
+        (0x60, 0x00, nop_m(), alloc(39, 20, 16, 0, 0),
+         nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x70, 0x100)),
+        (0x80, 0x10, nop_m(), nop_i(),
+         br_cond(0x80, 0x80)),
+        (0x100, 0x00, nop_m(), alloc(40, 90, 80, 0, 0),
+         nop_i()),
+        (0x110, 0x00, loadrs_enc(), nop_i(),
+         nop_i()),
+        (0x120, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+    ], {
+        "ip": 0x80,
+        "exception": IA64_EXCP_NONE,
+        "r32_nat": 0, "r33_nat": 0, "r34_nat": 0, "r35_nat": 0,
+        "r36_nat": 0, "r37_nat": 0, "r38_nat": 0, "r39_nat": 0,
+        "r40_nat": 0, "r41_nat": 0,
+        "cfm_sof": 20, "cfm_sol": 16,
+    }, entry=0x10, cpu="merced")
+
+
 CASE_NAMES = (
 
     'alloc_m34_ignored_bits_decode',
@@ -4165,6 +4335,7 @@ CASE_NAMES = (
     'rse_bspstore_rebase_preserves_dirty_cover_prefix',
     'rse_bspstore_rebase_writes_no_memory',
     'rse_bspstore_rewrite_reloads_spilled_frame',
+    'rse_bspstore_undefined_rnat_drops_stale_lower_bits',
     'rse_bspstore_write_rebases_dirty_partition',
     'rse_call_invalidates_stacked_alat',
     'rse_seventy_output_handoff_preserves_kernel_locals',
@@ -4199,10 +4370,13 @@ CASE_NAMES = (
     'rse_loadrs_sets_tear_point',
     'rse_loadrs_zero_current_frame_invalidates_parents',
     'rse_loadrs_zero_sol_return_keeps_bsp_without_cover',
+    'rse_merced_flushrs_invalidates_spilled_frame',
+    'rse_merced_return_publishes_filled_rnat_collection',
     'rse_manual_rfi_loadrs_restores_current_frame_base',
     'rse_manual_rfi_smaller_frame_restores_current_frame_base',
     'rse_nested_alloc_call_preserves_output_arg',
     'rse_nested_return_restores_bspstore_base',
+    'rse_partial_group_fill_ignores_unwritten_collection',
     'rse_parent_spill_keeps_call_snapshot',
     'rse_postinc_after_flushrs_preserves_register_value',
     'rse_return_growth_keeps_dirty_bsp_distance',
@@ -4238,6 +4412,7 @@ CASE_NAMES = (
     'rse_rfi_unmatched_context_keeps_guest_interruption_resources',
     'rse_rfi_user_context_preserves_loadrs_dirty_partition',
     'rse_rt_enables_protection_key_checks',
+    'rse_sal_alt_dtlb_resumes_br_ret_fill',
     'rse_rt_translates_with_dt_disabled',
     'rse_spill_fault_sets_isr_rs',
     'rse_tracked_return_redirties_reused_frame',
@@ -4251,6 +4426,16 @@ CASE_NAMES = (
 )
 
 CASE_METADATA = {
+    'rse_sal_alt_dtlb_resumes_br_ret_fill': CaseMetadata(
+        expectation_evidence=CaseEvidence.PAL_OR_PLATFORM_ABI,
+        tags=frozenset({'firmware-sal'}),
+        spec_refs=(
+            'IA64-softdevman-vol2.pdf: System Architecture, section 6.8',
+            'itanium-system-abstraction-layer-specification.pdf: '
+            'section 3.3.1',
+        ),
+        required_features=frozenset({'firmware-sal'}),
+    ),
     'rse_spill_fault_sets_isr_rs': CaseMetadata(nonterminal_effect_loop=True),
     'rse_uses_rsc_pl_for_access_rights': CaseMetadata(nonterminal_effect_loop=True),
 }

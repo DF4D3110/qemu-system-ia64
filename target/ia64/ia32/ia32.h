@@ -1,4 +1,4 @@
-/* Madison IA-32 application-execution support. */
+/* IA-32 application-execution support. */
 
 #ifndef TARGET_IA64_IA32_IA32_H
 #define TARGET_IA64_IA32_IA32_H

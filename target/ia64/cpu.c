@@ -125,6 +125,24 @@ const IA64TlbEntry *ia64_tlb_find_slow(CPUIA64State *env, uint64_t va,
                                       env->mmu.tlb_data_generation;
     uint16_t i;
 
+    /*
+     * Merced's DTLB1 and DTLB2 are non-inclusive.  Although DTLB1 is not
+     * architecturally enumerated as additional TR/TC storage, an entry
+     * cached there continues to translate accesses after its DTLB2 source
+     * has been replaced.  The host softmmu TLB is only an optimization and
+     * may be flushed independently, so it cannot stand in for this lookup.
+     */
+    if (!is_ifetch &&
+        ia64_env_cpu_class(env)->model == IA64_CPU_MODEL_MERCED) {
+        for (i = 0; i < IA64_DTLB1_MAX; i++) {
+            IA64TlbEntry *entry = &env->mmu.tlb_data_l1[i];
+
+            if (ia64_tlb_match(entry, va, rid)) {
+                return entry;
+            }
+        }
+    }
+
     for (i = 0; i < tlb_count; i++) {
         IA64TlbEntry *entry = &tlb[i];
 
@@ -348,35 +366,12 @@ static void ia64_tlb_set_entry_page(CPUState *cs, vaddr addr, hwaddr pa,
 static hwaddr ia64_cpu_get_phys_page_debug(CPUState *cs, vaddr addr)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
-    const IA64TlbEntry *entry;
     uint64_t pa;
-    uint8_t perm;
-    uint32_t rid;
 
-    if (!(cpu->env.psr & IA64_PSR_IT)) {
-        return addr;
+    if (!ia64_mmu_translate_debug(&cpu->env, addr, &pa)) {
+        return -1;
     }
-
-    if (ia64_firmware_identity_pa(cpu->env.cr_iva, addr, cpu->env.psr,
-                                  addr, &pa)) {
-        return pa & TARGET_PAGE_MASK;
-    }
-
-    if (ia64_sal_boot_virtual_pa(&cpu->env, addr, &pa)) {
-        return pa & TARGET_PAGE_MASK;
-    }
-
-    rid = ia64_region_rid(&cpu->env, addr);
-    entry = ia64_tlb_find_cached(&cpu->env, addr, rid, true);
-    if (entry) {
-        ia64_tlb_entry_translate(entry, addr, ia64_psr_cpl(cpu->env.psr),
-                                 &pa, &perm);
-        return pa & TARGET_PAGE_MASK;
-    }
-    if (ia64_sal_boot_identity_pa(&cpu->env, addr, &pa)) {
-        return pa & TARGET_PAGE_MASK;
-    }
-    return addr;
+    return pa & TARGET_PAGE_MASK;
 }
 
 static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
@@ -408,14 +403,14 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
 
     rid = ia64_region_rid(&cpu->env, addr);
     if (mmu_idx == MMU_PHYS_IDX) {
-        if (!ia64_pa_is_implemented(addr)) {
+        if (!ia64_pa_is_implemented(&cpu->env, addr)) {
             if (probe) {
                 return false;
             }
             excp = is_ifetch ? IA64_EXCP_UNIMPL_INST_ADDR :
                    IA64_EXCP_UNIMPL_DATA_ADDR;
             if (is_ifetch) {
-                cpu->env.ip = ia64_pa_canonicalize(addr);
+                cpu->env.ip = ia64_pa_canonicalize(&cpu->env, addr);
             }
             goto raise_exception;
         }
@@ -439,14 +434,15 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
 
     /* A translated MMU index is itself the serialized translation state. */
     virt_translation_enabled = true;
-    if (virt_translation_enabled && !ia64_va_is_implemented(addr)) {
+    if (virt_translation_enabled &&
+        !ia64_va_is_implemented(&cpu->env, addr)) {
         if (probe) {
             return false;
         }
         excp = is_ifetch ? IA64_EXCP_UNIMPL_INST_ADDR :
                IA64_EXCP_UNIMPL_DATA_ADDR;
         if (is_ifetch) {
-            cpu->env.ip = ia64_va_canonicalize(addr);
+            cpu->env.ip = ia64_va_canonicalize(&cpu->env, addr);
         }
         goto raise_exception;
     }
@@ -456,20 +452,6 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
                                   cpu->env.psr, addr, &pa)) {
         int prot = is_ifetch ? PAGE_EXEC : (PAGE_READ | PAGE_WRITE);
 
-        ia64_tlb_set_entry_page(cs, addr, pa, TARGET_PAGE_SIZE, prot,
-                                mmu_idx, IA64_MEM_SPECULATIVE, 0);
-        return true;
-    }
-
-    if (ia64_sal_boot_virtual_pa(&cpu->env, addr, &pa)) {
-        int prot = is_ifetch ? PAGE_EXEC : (PAGE_READ | PAGE_WRITE);
-
-        qemu_log_mask(CPU_LOG_MMU,
-                      "ia64 firmware identity %c va=0x%016" PRIx64
-                      " pa=0x%016" PRIx64 " psr=0x%016" PRIx64 "\n",
-                      is_ifetch ? 'i' :
-                      (access_type == MMU_DATA_STORE ? 'w' : 'd'),
-                      (uint64_t)addr, pa, cpu->env.psr);
         ia64_tlb_set_entry_page(cs, addr, pa, TARGET_PAGE_SIZE, prot,
                                 mmu_idx, IA64_MEM_SPECULATIVE, 0);
         return true;
@@ -504,6 +486,14 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
                           " perm=0x%x\n",
                           is_ifetch ? 'i' : 'd', (uint64_t)addr, rid, pa,
                           perm);
+            /*
+             * An L1 replacement can flush a derived softmmu entry.  Do it
+             * before installing this access's host entry so the fill caller
+             * never resumes through an entry invalidated during the fill.
+             */
+            if (!is_ifetch && !probe) {
+                ia64_mmu_data_access(&cpu->env, addr, size, true);
+            }
             ia64_tlb_set_entry_page(
                 cs, addr, pa, entry->ps, prot, mmu_idx,
                 ia64_pte_memory_speculation(entry->pte),
@@ -550,6 +540,9 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
                           " perm=0x%x iha=0x%016" PRIx64 "\n",
                           (uint64_t)addr, rid, pa, perm,
                           ia64_vhpt_hash_address(&cpu->env, addr));
+            if (!probe) {
+                ia64_mmu_data_access(&cpu->env, addr, size, true);
+            }
             ia64_tlb_set_entry_page(
                 cs, addr, pa, page_size, prot, mmu_idx,
                 ia64_pte_memory_speculation(new_entry ? new_entry->pte :
@@ -602,19 +595,6 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
                 ((new_entry ? new_entry->pte : pte) >> 2) & 7);
             return true;
         }
-    }
-    if (ia64_sal_boot_identity_pa(&cpu->env, addr, &pa)) {
-        int prot = is_ifetch ? PAGE_EXEC : (PAGE_READ | PAGE_WRITE);
-
-        qemu_log_mask(CPU_LOG_MMU,
-                      "ia64 sal boot identity %c va=0x%016" PRIx64
-                      " pa=0x%016" PRIx64 " psr=0x%016" PRIx64 "\n",
-                      is_ifetch ? 'i' :
-                      (access_type == MMU_DATA_STORE ? 'w' : 'd'),
-                      (uint64_t)addr, pa, cpu->env.psr);
-        ia64_tlb_set_entry_page(cs, addr, pa, TARGET_PAGE_SIZE, prot,
-                                mmu_idx, IA64_MEM_SPECULATIVE, 0);
-        return true;
     }
     if (probe) {
         return false;
@@ -765,13 +745,14 @@ static void ia64_cpu_apply_boot_info(IA64CPU *cpu)
     /* Preserve the platform's historical boot-time PTA value. */
     env->cr_pta = 0x0000000000000030ULL;
     env->cr_dcr = IA64_DCR_DM | IA64_DCR_DP;
-    env->ar_kr0 = info->firmware_base;
+    env->ar_kr0 =
+        ia64_cpu_default_io_block_pa(IA64_CPU_GET_CLASS(cpu));
     env->ar_kr7 = 0;
     env->ar_rsc = info->rsc;
     env->ar_bsp = info->bsp;
     env->ar_bspstore = info->bsp;
     env->ar_rnat = 0;
-    env->rse.rse_rnat_first = 0;
+    ia64_rse_rnat_undefined(env);
     env->gr[IA64_GR_STACK_POINTER] = info->stack_pointer;
     env->gr[IA64_GR_GLOBAL_POINTER] = info->global_pointer;
     env->interrupt.pal_halt_wake = info->powered_off;
@@ -815,21 +796,30 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
         ia64_sapic_lid(MAX(CPU(cpu)->cpu_index, 0), 0);
     cpu->env.cr[IA64_CR_SAPIC_TPR] = 0;
     cpu->env.cr[IA64_CR_ITV] = IA64_VECTOR_MASKED;
+    if (icc->model == IA64_CPU_MODEL_MERCED) {
+        cpu->env.pmc[8] = 0xf00000003ffffff8ULL;
+        cpu->env.pmc[9] = 0xf00000003ffffff8ULL;
+        cpu->env.pmc[11] = 1ULL << 28;
+        cpu->env.pmc[13] = 1;
+    }
+    cpu->env.pal.pal_bus_feature_status = 0;
+    cpu->env.pal.pal_proc_feature_status =
+        icc->model == IA64_CPU_MODEL_MONTECITO ?
+        (PAL_PROC_MONTECITO_ICACHE_COHERENCE |
+         PAL_PROC_MONTECITO_EXCLUSIVE_PREFETCH |
+         PAL_PROC_MONTECITO_HT) : 0;
     cpu->env.pal.pal_proc_copy_valid = false;
     cpu->env.pal.pal_proc_copy_addr = 0;
     cpu->env.pal.pal_interrupt_block_addr = IA64_LOCAL_SAPIC_PA;
-    cpu->env.pal.pal_io_block_addr = IA64_PAL_IO_BLOCK_PA;
+    cpu->env.pal.pal_io_block_addr =
+        ia64_cpu_default_io_block_pa(icc);
     ia64_cpu_apply_boot_info(cpu);
 }
 
 static ObjectClass *ia64_cpu_class_by_name(const char *cpu_model)
 {
-    ObjectClass *oc = object_class_by_name(cpu_model);
     char *typename;
-
-    if (oc != NULL && object_class_dynamic_cast(oc, TYPE_IA64_CPU) != NULL) {
-        return oc;
-    }
+    ObjectClass *oc;
 
     typename = g_strdup_printf(IA64_CPU_TYPE_NAME("%s"), cpu_model);
     oc = object_class_by_name(typename);
@@ -893,6 +883,13 @@ static const TCGCPUOps ia64_tcg_ops = {
     .do_interrupt = ia64_cpu_do_interrupt,
 };
 
+#define IA64_ITANIUM2_MEMORY_ATTRIBUTE_MASK \
+    ((1U << IA64_PTE_MA_WB) | (1U << IA64_PTE_MA_UC) | \
+     (1U << IA64_PTE_MA_UCE) | (1U << IA64_PTE_MA_WC))
+
+#define IA64_FREQUENCY_RATIO(numerator, denominator) \
+    (((uint64_t)(numerator) << 32) | (denominator))
+
 static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
@@ -915,21 +912,80 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
     cc->gdb_num_core_regs = IA64_GDB_NUM_CORE_REGS;
     cc->tcg_ops = &ia64_tcg_ops;
 
+    icc->model = IA64_CPU_MODEL_MONTECITO;
+    icc->cpuid_version = 0x0000000020000704ULL;
+    icc->cpuid_features = IA64_CPUID4_LB | IA64_CPUID4_AO;
+    icc->pal_version = 0x0000096801000968ULL;
+    icc->frequency_base_hz = 100000000;
+    icc->itc_frequency_hz = 400000000;
+    icc->processor_frequency_ratio = IA64_FREQUENCY_RATIO(16, 1);
+    icc->bus_frequency_ratio = IA64_FREQUENCY_RATIO(16, 3);
+    icc->itc_frequency_ratio = IA64_FREQUENCY_RATIO(4, 1);
+    icc->ia32_cpuid_version = 0;
+    memset(icc->ia32_cpuid_leaf2, 0, sizeof(icc->ia32_cpuid_leaf2));
+    icc->insertable_page_size_mask = IA64_INSERTABLE_PAGE_SIZE_MASK;
+    icc->purgeable_page_size_mask = IA64_PURGEABLE_PAGE_SIZE_MASK;
+    icc->itr_count = 32;
+    icc->dtr_count = 32;
+    icc->itlb_entries = IA64_TLB_MAX;
+    icc->dtlb_entries = IA64_TLB_MAX;
+    icc->phys_addr_bits = IA64_IMPL_PA_BITS;
+    icc->impl_va_msb = IA64_IMPL_VA_MSB;
+    icc->rid_bits = IA64_IMPL_RID_BITS;
+    icc->key_bits = IA64_IMPL_KEY_BITS;
+    icc->hash_tag_id = 8;
+    icc->unique_tcs = 4;
+    icc->tc_levels = 2;
+    icc->perf_counter_width = 48;
     /*
-     * Keep direct instantiation of the base type aligned with the legacy model.
+     * The Madison model implements WB, UC, UCE, and WC.  TCG has no
+     * physical write-coalescing buffer, so WC does not promise physical
+     * coalescing or timing; its architected access, ordering, speculation,
+     * and unsupported-operation rules remain distinct from WB.
      */
-    icc->cpuid_version = 0x000000001f010504ULL;
-    icc->cpuid_features = IA64_CPUID4_LB | IA64_CPUID4_SD;
-    icc->tr_count = 64;
-    icc->has_native_ia32 = true;
-    icc->has_virtualization = false;
-    icc->is_montecito = false;
+    icc->memory_attribute_mask = IA64_ITANIUM2_MEMORY_ATTRIBUTE_MASK;
+    icc->implemented_pmc_mask = 0x3fffULL;
+    icc->implemented_pmd_mask = 0x3ffffULL;
+    icc->perf_cycles_mask = 0xf0ULL;
+    icc->perf_retired_mask = 0xf0ULL;
+    icc->rse_has_clean_partition = true;
+    icc->has_native_ia32 = false;
+    icc->has_virtualization = true;
+    icc->is_montecito = true;
 }
 
 typedef struct IA64CPUModelDef {
+    IA64CPUModel model;
     uint64_t cpuid_version;
     uint64_t cpuid_features;
-    uint8_t tr_count;
+    uint64_t pal_version;
+    uint32_t frequency_base_hz;
+    uint32_t itc_frequency_hz;
+    uint64_t processor_frequency_ratio;
+    uint64_t bus_frequency_ratio;
+    uint64_t itc_frequency_ratio;
+    uint32_t ia32_cpuid_version;
+    uint32_t ia32_cpuid_leaf2[4];
+    uint64_t insertable_page_size_mask;
+    uint64_t purgeable_page_size_mask;
+    uint8_t itr_count;
+    uint8_t dtr_count;
+    uint16_t itlb_entries;
+    uint16_t dtlb_entries;
+    uint8_t phys_addr_bits;
+    uint8_t impl_va_msb;
+    uint8_t rid_bits;
+    uint8_t key_bits;
+    uint8_t hash_tag_id;
+    uint8_t unique_tcs;
+    uint8_t tc_levels;
+    uint8_t perf_counter_width;
+    uint8_t memory_attribute_mask;
+    uint64_t implemented_pmc_mask;
+    uint64_t implemented_pmd_mask;
+    uint64_t perf_cycles_mask;
+    uint64_t perf_retired_mask;
+    bool rse_has_clean_partition;
     bool has_native_ia32;
     bool has_virtualization;
     bool is_montecito;
@@ -940,34 +996,232 @@ static void ia64_cpu_model_class_init(ObjectClass *oc, const void *data)
     IA64CPUClass *icc = IA64_CPU_CLASS(oc);
     const IA64CPUModelDef *model = data;
 
+    icc->model = model->model;
     icc->cpuid_version = model->cpuid_version;
     icc->cpuid_features = model->cpuid_features;
-    icc->tr_count = model->tr_count;
+    icc->pal_version = model->pal_version;
+    icc->frequency_base_hz = model->frequency_base_hz;
+    icc->itc_frequency_hz = model->itc_frequency_hz;
+    icc->processor_frequency_ratio = model->processor_frequency_ratio;
+    icc->bus_frequency_ratio = model->bus_frequency_ratio;
+    icc->itc_frequency_ratio = model->itc_frequency_ratio;
+    icc->ia32_cpuid_version = model->ia32_cpuid_version;
+    memcpy(icc->ia32_cpuid_leaf2, model->ia32_cpuid_leaf2,
+           sizeof(icc->ia32_cpuid_leaf2));
+    icc->insertable_page_size_mask = model->insertable_page_size_mask;
+    icc->purgeable_page_size_mask = model->purgeable_page_size_mask;
+    icc->itr_count = model->itr_count;
+    icc->dtr_count = model->dtr_count;
+    icc->itlb_entries = model->itlb_entries;
+    icc->dtlb_entries = model->dtlb_entries;
+    icc->phys_addr_bits = model->phys_addr_bits;
+    icc->impl_va_msb = model->impl_va_msb;
+    icc->rid_bits = model->rid_bits;
+    icc->key_bits = model->key_bits;
+    icc->hash_tag_id = model->hash_tag_id;
+    icc->unique_tcs = model->unique_tcs;
+    icc->tc_levels = model->tc_levels;
+    icc->perf_counter_width = model->perf_counter_width;
+    icc->memory_attribute_mask = model->memory_attribute_mask;
+    icc->implemented_pmc_mask = model->implemented_pmc_mask;
+    icc->implemented_pmd_mask = model->implemented_pmd_mask;
+    icc->perf_cycles_mask = model->perf_cycles_mask;
+    icc->perf_retired_mask = model->perf_retired_mask;
+    icc->rse_has_clean_partition = model->rse_has_clean_partition;
     icc->has_native_ia32 = model->has_native_ia32;
     icc->has_virtualization = model->has_virtualization;
     icc->is_montecito = model->is_montecito;
+
+    g_assert(model->itlb_entries > 0 &&
+             model->itlb_entries <= IA64_TLB_MAX);
+    g_assert(model->dtlb_entries > 0 &&
+             model->dtlb_entries <= IA64_TLB_MAX);
+    g_assert(model->itr_count <= model->itlb_entries);
+    g_assert(model->dtr_count <= model->dtlb_entries);
+    g_assert(model->frequency_base_hz > 0);
+    g_assert(model->itc_frequency_hz > 0 &&
+             model->itc_frequency_hz <= 1600000000);
+    g_assert((uint32_t)model->itc_frequency_ratio != 0);
+    g_assert((uint64_t)model->frequency_base_hz *
+             (model->itc_frequency_ratio >> 32) /
+             (uint32_t)model->itc_frequency_ratio ==
+             model->itc_frequency_hz);
 }
 
-/*
- * Translation-register file size is implementation-specific; the SDM only
- * guarantees eight of each bank.  Model both supported CPU generations
- * with 64 ITRs and 64 DTRs.
- */
+static const IA64CPUModelDef ia64_cpu_model_merced = {
+    .model = IA64_CPU_MODEL_MERCED,
+    .cpuid_version = 0x0000000007000804ULL,
+    .cpuid_features = 0,
+    /*
+     * PAL_A model 8 and PAL_B model 8 use revision 30 for this release.
+     */
+    .pal_version = 0x0000883001008830ULL,
+    /*
+     * The selected 800 MHz part advances ITC at the processor rate.  Keep
+     * this ratio explicit because the dual-core model uses a divided ITC.
+     */
+    .frequency_base_hz = 100000000,
+    .itc_frequency_hz = 800000000,
+    .processor_frequency_ratio = IA64_FREQUENCY_RATIO(8, 1),
+    .bus_frequency_ratio = IA64_FREQUENCY_RATIO(4, 3),
+    .itc_frequency_ratio = IA64_FREQUENCY_RATIO(8, 1),
+    /*
+     * Public product documentation specifies family 7 and the cache/TLB
+     * descriptors but does not publish the complete native IA-32 leaf-1
+     * signature.  Family 7, model 1, stepping 5 is retained as this model's
+     * compatibility identity; it is not used to select execution behavior.
+     */
+    .ia32_cpuid_version = 0x00000715,
+    .ia32_cpuid_leaf2 = {
+        0x00151001, 0x0000891a, 0x009b9690, 0x80000000,
+    },
+    /*
+     * The architectural page-size table requires 64 MiB support on every
+     * processor, while the product-specific summary omits that size without
+     * declaring an exception.  Follow the normative architectural table.
+     */
+    .insertable_page_size_mask =
+        (1ULL << 12) | (1ULL << 13) | (1ULL << 14) | (1ULL << 16) |
+        (1ULL << 18) | (1ULL << 20) | (1ULL << 22) | (1ULL << 24) |
+        (1ULL << 26) | (1ULL << 28),
+    .purgeable_page_size_mask =
+        (1ULL << 12) | (1ULL << 13) | (1ULL << 14) | (1ULL << 16) |
+        (1ULL << 18) | (1ULL << 20) | (1ULL << 22) | (1ULL << 24) |
+        (1ULL << 26) | (1ULL << 28) | (1ULL << 32),
+    .itr_count = 8,
+    .dtr_count = 48,
+    /*
+     * The architecturally visible translation storage is the 64-entry
+     * instruction TLB and the 96-entry main data TLB.  The 32-entry
+     * first-level data TLB only caches the main data TLB and is not extra
+     * TR/TC storage.
+     */
+    .itlb_entries = 64,
+    .dtlb_entries = 96,
+    .phys_addr_bits = 44,
+    .impl_va_msb = 50,
+    .rid_bits = 18,
+    .key_bits = 21,
+    .hash_tag_id = 0,
+    .unique_tcs = 3,
+    .tc_levels = 2,
+    .perf_counter_width = 32,
+    .memory_attribute_mask = (1U << IA64_PTE_MA_WB) |
+                             (1U << IA64_PTE_MA_UC) |
+                             (1U << IA64_PTE_MA_WC) |
+                             (1U << IA64_PTE_MA_NATPAGE),
+    .implemented_pmc_mask = 0x3fffULL,
+    .implemented_pmd_mask = 0x3ffffULL,
+    .perf_cycles_mask = 0xf0ULL,
+    /*
+     * The product manual records the old-PAL 0x10 result.  The processor
+     * update identifies that as an erratum through PAL 7.7.28; PAL 8.8.30,
+     * advertised above, reports the implemented PMC4/PMC5 pair.
+     */
+    .perf_retired_mask = 0x30ULL,
+    .rse_has_clean_partition = false,
+    .has_native_ia32 = true,
+};
+
 static const IA64CPUModelDef ia64_cpu_model_madison = {
+    .model = IA64_CPU_MODEL_MADISON,
     /* Family 0x1f, model 1, revision 5, CPUID[4] is the last register. */
     .cpuid_version = 0x000000001f010504ULL,
-    /* No 16-byte atomics and no virtualization: both post-date Madison. */
-    .cpuid_features = IA64_CPUID4_LB | IA64_CPUID4_SD,
-    .tr_count = 64,
+    /*
+     * The selected family 0x1f/model 1/revision 5 processor reports only
+     * long-branch support in CPUID[4].  In particular, early deferral
+     * selected through PAL is not the CPUID spontaneous-deferral feature.
+     */
+    .cpuid_features = IA64_CPUID4_LB,
+    /* Latest documented PAL release for the selected B1 model. */
+    .pal_version = 0x0000057301000573ULL,
+    .frequency_base_hz = 100000000,
+    .itc_frequency_hz = 1600000000,
+    .processor_frequency_ratio = IA64_FREQUENCY_RATIO(16, 1),
+    .bus_frequency_ratio = IA64_FREQUENCY_RATIO(4, 1),
+    .itc_frequency_ratio = IA64_FREQUENCY_RATIO(16, 1),
+    .ia32_cpuid_version = 0x00000673,
+    .ia32_cpuid_leaf2 = {
+        0x7e776701, 0x0000008d, 0, 0x80000000,
+    },
+    .insertable_page_size_mask = IA64_INSERTABLE_PAGE_SIZE_MASK,
+    .purgeable_page_size_mask = IA64_PURGEABLE_PAGE_SIZE_MASK,
+    .itr_count = 64,
+    .dtr_count = 64,
+    .itlb_entries = IA64_TLB_MAX,
+    .dtlb_entries = IA64_TLB_MAX,
+    .phys_addr_bits = IA64_IMPL_PA_BITS,
+    .impl_va_msb = IA64_IMPL_VA_MSB,
+    .rid_bits = IA64_IMPL_RID_BITS,
+    .key_bits = IA64_IMPL_KEY_BITS,
+    .hash_tag_id = 8,
+    .unique_tcs = 4,
+    .tc_levels = 2,
+    .perf_counter_width = 48,
+    .memory_attribute_mask = IA64_ITANIUM2_MEMORY_ATTRIBUTE_MASK,
+    .implemented_pmc_mask = 0x3fffULL,
+    .implemented_pmd_mask = 0x3ffffULL,
+    .perf_cycles_mask = 0xf0ULL,
+    .perf_retired_mask = 0xf0ULL,
+    .rse_has_clean_partition = true,
     .has_native_ia32 = true,
     .has_virtualization = false,
 };
 
 static const IA64CPUModelDef ia64_cpu_model_montecito = {
+    .model = IA64_CPU_MODEL_MONTECITO,
     /* Family 0x20, model 0, C2 revision 7, CPUID[4] is the last register. */
     .cpuid_version = 0x0000000020000704ULL,
-    .cpuid_features = IA64_CPUID4_LB | IA64_CPUID4_SD | IA64_CPUID4_AO,
-    .tr_count = 64,
+    /* C2 reports long-branch and 16-byte atomic support (CPUID[4] = 5). */
+    .cpuid_features = IA64_CPUID4_LB | IA64_CPUID4_AO,
+    /* Latest documented PAL release for the selected C2 model. */
+    .pal_version = 0x0000096801000968ULL,
+    /*
+     * This model's ITC is one quarter of its 1.6 GHz processor clock.
+     * Advertising a 4:1 ratio while advancing a different host-side rate
+     * makes operating-system timer calibration internally inconsistent.
+     */
+    .frequency_base_hz = 100000000,
+    .itc_frequency_hz = 400000000,
+    .processor_frequency_ratio = IA64_FREQUENCY_RATIO(16, 1),
+    .bus_frequency_ratio = IA64_FREQUENCY_RATIO(16, 3),
+    .itc_frequency_ratio = IA64_FREQUENCY_RATIO(4, 1),
+    .ia32_cpuid_version = 0,
+    .ia32_cpuid_leaf2 = { 0, 0, 0, 0 },
+    .insertable_page_size_mask = IA64_INSERTABLE_PAGE_SIZE_MASK,
+    .purgeable_page_size_mask = IA64_PURGEABLE_PAGE_SIZE_MASK,
+    .itr_count = 32,
+    .dtr_count = 32,
+    .itlb_entries = IA64_TLB_MAX,
+    .dtlb_entries = IA64_TLB_MAX,
+    .phys_addr_bits = IA64_IMPL_PA_BITS,
+    .impl_va_msb = IA64_IMPL_VA_MSB,
+    .rid_bits = IA64_IMPL_RID_BITS,
+    .key_bits = IA64_IMPL_KEY_BITS,
+    .hash_tag_id = 8,
+    .unique_tcs = 4,
+    .tc_levels = 2,
+    .perf_counter_width = 48,
+    /*
+     * The dual-core update inherits the Madison WB/UC/UCE/WC memory
+     * attributes and explicitly gives UC/UCE/WC restrictions for its new
+     * 16-byte operations.
+     */
+    .memory_attribute_mask = IA64_ITANIUM2_MEMORY_ATTRIBUTE_MASK,
+    .implemented_pmc_mask = 0x3fffULL,
+    .implemented_pmd_mask = 0x3ffffULL,
+    .perf_cycles_mask = 0xf0ULL,
+    .perf_retired_mask = 0xf0ULL,
+    .rse_has_clean_partition = true,
+    /*
+     * Montecito removed native IA-32 hardware.  Product documentation
+     * describes a closed PAL-based translation layer for pre-OS use after
+     * PAL_COPY_PAL, but does not publish the translator implementation; the
+     * copied QEMU PAL image is only a procedure-call portal.  Do not treat
+     * that copy as enabling native PSR.is transitions, because doing so would
+     * also expose unsupported PAL-based execution to an operating system.
+     */
+    .has_native_ia32 = false,
     /*
      * Montecito implements the virtualization extensions, but this model
      * does not virtualize.  vmsw is decoded and reported as a Virtualization
@@ -986,6 +1240,13 @@ static const TypeInfo ia64_cpu_type_info[] = {
         .instance_align = __alignof__(IA64CPU),
         .class_size = sizeof(IA64CPUClass),
         .class_init = ia64_cpu_class_init,
+        .abstract = true,
+    },
+    {
+        .name = IA64_CPU_TYPE_NAME("merced"),
+        .parent = TYPE_IA64_CPU,
+        .class_init = ia64_cpu_model_class_init,
+        .class_data = &ia64_cpu_model_merced,
     },
     {
         .name = IA64_CPU_TYPE_NAME("madison"),
@@ -995,6 +1256,18 @@ static const TypeInfo ia64_cpu_type_info[] = {
     },
     {
         .name = IA64_CPU_TYPE_NAME("montecito"),
+        .parent = TYPE_IA64_CPU,
+        .class_init = ia64_cpu_model_class_init,
+        .class_data = &ia64_cpu_model_montecito,
+    },
+    {
+        .name = IA64_CPU_TYPE_NAME("itanium"),
+        .parent = TYPE_IA64_CPU,
+        .class_init = ia64_cpu_model_class_init,
+        .class_data = &ia64_cpu_model_merced,
+    },
+    {
+        .name = IA64_CPU_TYPE_NAME("itanium2"),
         .parent = TYPE_IA64_CPU,
         .class_init = ia64_cpu_model_class_init,
         .class_data = &ia64_cpu_model_montecito,

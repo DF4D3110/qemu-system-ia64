@@ -4,7 +4,6 @@
 
 #define EFI_MEMORY_RUNTIME 0x8000000000000000ULL
 #define IA64_RUNTIME_ALIGNMENT 0x2000ULL
-#define IA64_LEGACY_IO_BASE 0x000000800010000000ULL
 #define VGA_TEXT_FB_BASE 0x00000000000b8000ULL
 #define VGA_TEXT_COLUMNS 80U
 #define VGA_TEXT_ROWS 25U
@@ -13,9 +12,9 @@
 static UINT16 vbe_read(UINT16 Index)
 {
     volatile UINT16 *index =
-        (volatile UINT16 *)(UINTN)(IA64_LEGACY_IO_BASE + 0x1ceU);
+        (volatile UINT16 *)(UINTN)IA64_TEST_IO_PORT_PA(0x1ceU);
     volatile UINT16 *data =
-        (volatile UINT16 *)(UINTN)(IA64_LEGACY_IO_BASE + 0x1d0U);
+        (volatile UINT16 *)(UINTN)IA64_TEST_IO_PORT_PA(0x1d0U);
 
     *index = Index;
     return *data;

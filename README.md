@@ -9,8 +9,8 @@ related to this project to the QEMU upstream.
 The default machine is `ia64-vpc`.
 It models an IA-64 virtual PC profile intended for firmware, boot loader, and operating-system bring-up:
 
-- Montecito CPU model by default, with Madison selection available.
-  Both models use TCG translation and provide PAL/SAL helpers, the register stack engine, TLB/VHPT paths, and architectural floating-point state.
+- Montecito CPU model by default, with Merced and Madison selection available.
+  All models use TCG translation and provide PAL/SAL helpers, the register stack engine, TLB/VHPT paths, and architectural floating-point state.
 - 1 vCPU by default, configurable from 1 to 4 vCPUs; MTTCG is supported with `-accel tcg,thread=multi`
 - 2 GiB default RAM
 - project-owned IA-64 EFI firmware built from source under `roms/ia64-firmware/`
@@ -60,12 +60,12 @@ The firmware build requires an IA-64 ELF cross toolchain named
 
 The `ia64-vpc` machine uses the `montecito` CPU model by default.
 Select a different model with `-cpu`.
-For example, use `-cpu madison` when the guest requires the processor's hardware IA-32 execution environment:
+For example, use `-cpu merced` for first-generation guests:
 
 ```sh
 ./build/qemu-system-ia64 \
   -machine ia64-vpc \
-  -cpu madison \
+  -cpu merced \
   -bios ./build/roms/ia64-firmware/ia64-firmware.bin \
   ...
 ```
@@ -85,9 +85,16 @@ Madison provides the hardware IA-32 execution environment.
 Eligible `br.ia` and `rfi` transitions execute IA-32 code, and IA-32 `JMPE` returns to IA-64.
 The later 16-byte operations and virtualization instructions are not available and raise an Illegal Operation fault.
 
-`-cpu help` lists the available names.
-The generic `ia64-cpu` entry is retained for compatibility and currently has Madison-like capabilities.
-Use an explicit generation name for predictable guest-visible behavior.
+#### `merced`
+
+Merced provides its native IA-32 execution environment and reports the
+generation-specific CPUID, PAL, cache, translation-cache, page-size, address,
+protection-key, performance-monitor, and register-stack characteristics.
+Later long-branch, 16-byte atomic, and virtualization facilities are not
+available.
+
+`-cpu help` lists exactly `merced`, `madison`, `montecito`, `itanium`, and
+`itanium2`. `itanium` aliases `merced`; `itanium2` aliases `montecito`.
 
 For four vCPUs, MTTCG, 8 GiB of RAM, and USB input without the PS/2 controller:
 

@@ -1,4 +1,7 @@
-/* Reuse QEMU's x87, MMX and SSE helper implementation for IA-32 mode. */
+/* Adapt the shared floating-point and vector helpers to IA-32 state. */
+
+#ifndef TARGET_IA64_IA32_FPU_HELPER_ADAPTER_H
+#define TARGET_IA64_IA32_FPU_HELPER_ADAPTER_H
 
 #include "helper-compat.h"
 #define X86_CPU_ARCH_ENV(env) ((CPUIA64State *)(env))
@@ -9,4 +12,5 @@
 #define X86_FPU_ALWAYS_NE 1
 #define X86_MXCSR_VALID_MASK 0x0000ffbfU
 #include "ia32/ia32.h"
-#include "target/i386/tcg/fpu_helper.c"
+
+#endif /* TARGET_IA64_IA32_FPU_HELPER_ADAPTER_H */

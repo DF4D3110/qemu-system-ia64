@@ -1,6 +1,4 @@
-/*
- * IA-64 application-register mapping for Madison's IA-32 execution mode.
- */
+/* IA-64 application-register mapping for native IA-32 execution. */
 
 #include "qemu/osdep.h"
 #include "cpu.h"
@@ -195,24 +193,28 @@ static void ia32_store_fp(CPUIA64State *env)
     }
 }
 
-static void ia32_init_features(CPUX86State *xenv)
+static void ia32_init_features(CPUIA64State *env)
 {
+    CPUX86State *xenv = &env->ia32;
+    IA64CPUClass *icc = ia64_env_cpu_class(env);
+
     /*
-     * Madison identifies its IA-32 engine as family 6, model 7, stepping 3.
-     * Its feature word follows the corresponding Pentium III value, with PAE
-     * omitted because IA-32 paging is not available, and IA64 added to report
-     * that JMPE can return to the Itanium instruction set.  Other IA-32
-     * paging/system bits may still be set even though the IA-64 System
-     * Environment does not make the corresponding facility usable.
+     * The native IA-32 engines expose the common processor-family feature
+     * set.  PAE is implemented for the legacy IA-32 System Environment and
+     * therefore remains advertised even though CFLG.pae is ignored in the
+     * IA-64 System Environment.  PSN remains clear because that feature was
+     * removed from the architecture.  IA64 reports that JMPE can return to
+     * the 64-bit instruction set.
      */
     xenv->features[FEAT_1_EDX] =
         CPUID_FP87 | CPUID_VME | CPUID_DE | CPUID_PSE | CPUID_TSC |
-        CPUID_MSR | CPUID_MCE | CPUID_CX8 | CPUID_APIC | CPUID_SEP |
+        CPUID_MSR | CPUID_PAE | CPUID_MCE | CPUID_CX8 | CPUID_APIC |
+        CPUID_SEP |
         CPUID_MTRR | CPUID_PGE | CPUID_MCA | CPUID_CMOV | CPUID_PAT |
         CPUID_PSE36 | CPUID_MMX | CPUID_FXSR | CPUID_SSE | CPUID_IA64;
     xenv->features[FEAT_1_ECX] = 0;
     xenv->cpuid_level = 2;
-    xenv->cpuid_version = 0x00000673;
+    xenv->cpuid_version = icc->ia32_cpuid_version;
     xenv->cpuid_vendor1 = CPUID_VENDOR_INTEL_1;
     xenv->cpuid_vendor2 = CPUID_VENDOR_INTEL_2;
     xenv->cpuid_vendor3 = CPUID_VENDOR_INTEL_3;
@@ -223,15 +225,17 @@ static void ia32_update_hflags(CPUIA64State *env)
     CPUX86State *xenv = &env->ia32;
     uint32_t hflags = ia64_psr_cpl(env->psr);
 
-    hflags |= (xenv->cr[0] & CR0_PE_MASK) ? HF_PE_MASK : 0;
-    hflags |= (xenv->cr[0] & CR0_MP_MASK) ? HF_MP_MASK : 0;
-    hflags |= (xenv->cr[0] & CR0_EM_MASK) ? HF_EM_MASK : 0;
-    hflags |= (xenv->cr[0] & CR0_TS_MASK) ? HF_TS_MASK : 0;
+    hflags |= (xenv->cr[IA32_CR0_INDEX] & CR0_PE_MASK) ? HF_PE_MASK : 0;
+    hflags |= (xenv->cr[IA32_CR0_INDEX] & CR0_MP_MASK) ? HF_MP_MASK : 0;
+    hflags |= (xenv->cr[IA32_CR0_INDEX] & CR0_EM_MASK) ? HF_EM_MASK : 0;
+    hflags |= (xenv->cr[IA32_CR0_INDEX] & CR0_TS_MASK) ? HF_TS_MASK : 0;
     hflags |= (xenv->segs[R_CS].flags & DESC_B_MASK) ? HF_CS32_MASK : 0;
     hflags |= (xenv->segs[R_SS].flags & DESC_B_MASK) ? HF_SS32_MASK : 0;
-    hflags |= (xenv->cr[4] & CR4_OSFXSR_MASK) ? HF_OSFXSR_MASK : 0;
+    hflags |= (xenv->cr[IA32_CR4_INDEX] & CR4_OSFXSR_MASK) ?
+              HF_OSFXSR_MASK : 0;
 
-    if (!(xenv->cr[0] & CR0_PE_MASK) || (xenv->eflags & VM_MASK) ||
+    if (!(xenv->cr[IA32_CR0_INDEX] & CR0_PE_MASK) ||
+        (xenv->eflags & VM_MASK) ||
         !(hflags & HF_CS32_MASK) || xenv->segs[R_DS].base ||
         xenv->segs[R_ES].base || xenv->segs[R_SS].base) {
         hflags |= HF_ADDSEG_MASK;
@@ -247,8 +251,8 @@ uint32_t ia64_ia32_virtual_ip(const CPUIA64State *env)
 void ia64_ia32_enter(CPUIA64State *env)
 {
     CPUX86State *xenv = &env->ia32;
-    uint64_t selectors_ds = env->gr[16];
-    uint64_t selectors_cs = env->gr[17];
+    uint64_t selectors_ds = env->gr[IA64_IA32_GR_DATA_SELECTORS];
+    uint64_t selectors_cs = env->gr[IA64_IA32_GR_SYSTEM_SELECTORS];
     uint32_t eflags =
         ((uint32_t)env->ar_eflag & IA32_EFLAGS_VALID_MASK) | 2;
     unsigned i;
@@ -259,7 +263,7 @@ void ia64_ia32_enter(CPUIA64State *env)
     xenv->a20_mask = -1;
     xenv->hflags2 = HF2_GIF_MASK;
     xenv->xcr0 = XSTATE_FP_MASK | XSTATE_SSE_MASK;
-    ia32_init_features(xenv);
+    ia32_init_features(env);
 
     /*
      * SDM vol. 1 section 6.4.3 makes entry with a NaT in any register
@@ -268,36 +272,47 @@ void ia64_ia32_enter(CPUIA64State *env)
      * integer state; sync_to_ia64() clears the mapped GR NaT bits on exit.
      */
     for (i = 0; i < 8; i++) {
-        xenv->regs[i] = (uint32_t)env->gr[8 + i];
+        xenv->regs[i] =
+            (uint32_t)env->gr[IA64_IA32_GR_INTEGER_BASE + i];
     }
 
-    /* CSD and SSD are copied into their mapped GR descriptors on entry. */
-    env->gr[25] = env->ar_csd;
-    env->gr[26] = env->ar_ssd;
+    /*
+     * GR25 and GR26 are architecturally undefined during IA-32 execution.
+     * Private scratch mirrors let the common exit path store every segment
+     * descriptor uniformly; only ar.csd and ar.ssd expose these two values.
+     */
+    env->gr[IA64_IA32_GR_CS_DESCRIPTOR_SCRATCH] = env->ar_csd;
+    env->gr[IA64_IA32_GR_SS_DESCRIPTOR_SCRATCH] = env->ar_ssd;
     ia32_load_desc(&xenv->segs[R_DS], ia32_selector(selectors_ds, 0),
-                   env->gr[27]);
+                   env->gr[IA64_IA32_GR_DS_DESCRIPTOR]);
     ia32_load_desc(&xenv->segs[R_ES], ia32_selector(selectors_ds, 1),
-                   env->gr[24]);
+                   env->gr[IA64_IA32_GR_ES_DESCRIPTOR]);
     ia32_load_desc(&xenv->segs[R_FS], ia32_selector(selectors_ds, 2),
-                   env->gr[28]);
+                   env->gr[IA64_IA32_GR_FS_DESCRIPTOR]);
     ia32_load_desc(&xenv->segs[R_GS], ia32_selector(selectors_ds, 3),
-                   env->gr[29]);
+                   env->gr[IA64_IA32_GR_GS_DESCRIPTOR]);
     ia32_load_desc(&xenv->segs[R_CS], ia32_selector(selectors_cs, 0),
                    env->ar_csd);
     ia32_load_desc(&xenv->segs[R_SS], ia32_selector(selectors_cs, 1),
                    env->ar_ssd);
-    ia32_load_desc(&xenv->ldt, ia32_selector(selectors_cs, 2), env->gr[30]);
+    ia32_load_desc(&xenv->ldt, ia32_selector(selectors_cs, 2),
+                   env->gr[IA64_IA32_GR_LDT_DESCRIPTOR]);
     ia32_load_desc(&xenv->tr, ia32_selector(selectors_cs, 3),
-                   env->ar[IA64_AR_KR0 + 1]);
-    ia32_load_desc(&xenv->gdt, 0, env->gr[31]);
+                   env->ar[IA64_IA32_AR_TSS_DESCRIPTOR]);
+    ia32_load_desc(&xenv->gdt, 0,
+                   env->gr[IA64_IA32_GR_GDT_DESCRIPTOR]);
     memset(&xenv->idt, 0, sizeof(xenv->idt));
 
     /* CFLG.io, CFLG.if and CFLG.ii read as zero through IA-32 CR0. */
-    xenv->cr[0] = ((uint32_t)env->ar_cflg & IA32_CFLG_CR0_MASK &
-                   ~IA32_CFLG_VIRTUAL_MASK) | CR0_ET_MASK;
-    xenv->cr[2] = env->ar[IA64_AR_KR0 + 2] >> 32;
-    xenv->cr[3] = (uint32_t)env->ar[IA64_AR_KR0 + 2];
-    xenv->cr[4] = (env->ar_cflg >> 32) & IA32_CFLG_CR4_MASK;
+    xenv->cr[IA32_CR0_INDEX] =
+        ((uint32_t)env->ar_cflg & IA32_CFLG_CR0_MASK &
+         ~IA32_CFLG_VIRTUAL_MASK) | CR0_ET_MASK;
+    xenv->cr[IA32_CR2_INDEX] =
+        env->ar[IA64_IA32_AR_CR3_CR2] >> 32;
+    xenv->cr[IA32_CR3_INDEX] =
+        (uint32_t)env->ar[IA64_IA32_AR_CR3_CR2];
+    xenv->cr[IA32_CR4_INDEX] =
+        (env->ar_cflg >> 32) & IA32_CFLG_CR4_MASK;
     xenv->eip = (uint32_t)(env->ip - xenv->segs[R_CS].base);
     xenv->cc_src = eflags & IA32_EFLAGS_CC_MASK;
     xenv->cc_op = CC_OP_EFLAGS;
@@ -316,8 +331,9 @@ void ia64_ia32_sync_to_ia64(CPUIA64State *env)
     unsigned i;
 
     for (i = 0; i < 8; i++) {
-        env->gr[8 + i] = (int64_t)(int32_t)xenv->regs[i];
-        ia64_gr_nat_set(env, 8 + i, false);
+        env->gr[IA64_IA32_GR_INTEGER_BASE + i] =
+            (int64_t)(int32_t)xenv->regs[i];
+        ia64_gr_nat_set(env, IA64_IA32_GR_INTEGER_BASE + i, false);
     }
 
     ds_selectors = (uint64_t)xenv->segs[R_DS].selector |
@@ -328,26 +344,37 @@ void ia64_ia32_sync_to_ia64(CPUIA64State *env)
                    (uint64_t)xenv->segs[R_SS].selector << 16 |
                    (uint64_t)xenv->ldt.selector << 32 |
                    (uint64_t)xenv->tr.selector << 48;
-    env->gr[16] = ds_selectors;
-    env->gr[17] = cs_selectors;
-    env->gr[24] = ia32_store_desc(&xenv->segs[R_ES], false);
-    env->gr[25] = ia32_store_desc(&xenv->segs[R_CS], true);
-    env->gr[26] = ia32_store_desc(&xenv->segs[R_SS], true);
-    env->gr[27] = ia32_store_desc(&xenv->segs[R_DS], false);
-    env->gr[28] = ia32_store_desc(&xenv->segs[R_FS], false);
-    env->gr[29] = ia32_store_desc(&xenv->segs[R_GS], false);
-    env->gr[30] = ia32_store_desc(&xenv->ldt, false);
-    env->gr[31] = ia32_store_desc(&xenv->gdt, false);
-    env->ar_csd = env->gr[25];
-    env->ar_ssd = env->gr[26];
-    env->ar[IA64_AR_KR0 + 1] = ia32_store_desc(&xenv->tr, false);
+    env->gr[IA64_IA32_GR_DATA_SELECTORS] = ds_selectors;
+    env->gr[IA64_IA32_GR_SYSTEM_SELECTORS] = cs_selectors;
+    env->gr[IA64_IA32_GR_ES_DESCRIPTOR] =
+        ia32_store_desc(&xenv->segs[R_ES], false);
+    env->gr[IA64_IA32_GR_CS_DESCRIPTOR_SCRATCH] =
+        ia32_store_desc(&xenv->segs[R_CS], true);
+    env->gr[IA64_IA32_GR_SS_DESCRIPTOR_SCRATCH] =
+        ia32_store_desc(&xenv->segs[R_SS], true);
+    env->gr[IA64_IA32_GR_DS_DESCRIPTOR] =
+        ia32_store_desc(&xenv->segs[R_DS], false);
+    env->gr[IA64_IA32_GR_FS_DESCRIPTOR] =
+        ia32_store_desc(&xenv->segs[R_FS], false);
+    env->gr[IA64_IA32_GR_GS_DESCRIPTOR] =
+        ia32_store_desc(&xenv->segs[R_GS], false);
+    env->gr[IA64_IA32_GR_LDT_DESCRIPTOR] =
+        ia32_store_desc(&xenv->ldt, false);
+    env->gr[IA64_IA32_GR_GDT_DESCRIPTOR] =
+        ia32_store_desc(&xenv->gdt, false);
+    env->ar_csd = env->gr[IA64_IA32_GR_CS_DESCRIPTOR_SCRATCH];
+    env->ar_ssd = env->gr[IA64_IA32_GR_SS_DESCRIPTOR_SCRATCH];
+    env->ar[IA64_IA32_AR_TSS_DESCRIPTOR] =
+        ia32_store_desc(&xenv->tr, false);
     env->ar_cflg =
         (env->ar_cflg & IA32_CFLG_VIRTUAL_MASK) |
-        ((uint32_t)xenv->cr[0] & IA32_CFLG_CR0_MASK &
+        ((uint32_t)xenv->cr[IA32_CR0_INDEX] & IA32_CFLG_CR0_MASK &
          ~IA32_CFLG_VIRTUAL_MASK) |
-        (uint64_t)((uint32_t)xenv->cr[4] & IA32_CFLG_CR4_MASK) << 32;
-    env->ar[IA64_AR_KR0 + 2] = (uint32_t)xenv->cr[3] |
-                               (uint64_t)(uint32_t)xenv->cr[2] << 32;
+        (uint64_t)((uint32_t)xenv->cr[IA32_CR4_INDEX] &
+                   IA32_CFLG_CR4_MASK) << 32;
+    env->ar[IA64_IA32_AR_CR3_CR2] =
+        (uint32_t)xenv->cr[IA32_CR3_INDEX] |
+        (uint64_t)(uint32_t)xenv->cr[IA32_CR2_INDEX] << 32;
 
     env->ar_eflag = eflags & IA32_EFLAGS_VALID_MASK;
     ia64_ia32_sync_psr_cpl(env);

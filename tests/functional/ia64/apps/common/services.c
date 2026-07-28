@@ -197,6 +197,7 @@ typedef struct {
 } __attribute__((packed)) TEST_DEVICE_PATH_NODE;
 
 #define TEST_UART_BASE               0x00000047f0000000ULL
+#define TEST_UART_IO_PORT            0x00000000000003f8ULL
 #define TEST_UART_SIZE               0x0000000000002000ULL
 #define TEST_RTC_BASE                0x00000000ffef0000ULL
 #define TEST_RTC_SIZE                0x0000000000002000ULL
@@ -206,12 +207,12 @@ typedef struct {
 #define TEST_ECAM_SIZE               0x0000000010000000ULL
 #define TEST_PCI_MMIO_BASE           0x00000000c1000000ULL
 #define TEST_PCI_MMIO_SIZE           0x0000000010000000ULL
-#define TEST_SPARSE_IO_BASE          0x000000800010000000ULL
-#define TEST_SPARSE_IO_SIZE          0x0000000004000000ULL
+#define TEST_SPARSE_IO_BASE          IA64_TEST_LEGACY_IO_BASE
+#define TEST_SPARSE_IO_SIZE          IA64_TEST_LEGACY_IO_SIZE
 #define TEST_PM_IO_BASE              0x2000U
 #define TEST_HCDP_LENGTH             129U
 #define TEST_HCDP_UART_HID           0x0105d041U
-#define TEST_HCDP_UART_BASE_FLAGS    0x42U
+#define TEST_HCDP_UART_BASE_FLAGS    0x41U
 #define TEST_HCDP_UART_PRIMARY       0x04U
 #define TEST_HCDP_UART_CONOUT_INDEX  1U
 #define TEST_CONOUT_DEV_SIZE         57U
@@ -1664,9 +1665,9 @@ static BOOLEAN test_pci_root_resources(EFI_SYSTEM_TABLE *SystemTable)
            io->Descriptor == 0x8aU && get_u16(&io->Length) == 0x2bU &&
            io->ResourceType == 1U && get_u64(&io->Granularity) == 32U &&
            get_u64(&io->Minimum) == 0 &&
-           get_u64(&io->Maximum) == 0xffffffU &&
+           get_u64(&io->Maximum) == 0xffffU &&
            get_u64(&io->Translation) == 0 &&
-           get_u64(&io->AddressLength) == 0x1000000U &&
+           get_u64(&io->AddressLength) == 0x10000U &&
            memory->Descriptor == 0x8aU &&
            get_u16(&memory->Length) == 0x2bU &&
            memory->ResourceType == 0U &&
@@ -1957,9 +1958,9 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
                        descriptor[3] == 1U &&
                        get_u64(descriptor + 6U) == 0 &&
                        get_u64(descriptor + 14U) == 0 &&
-                       get_u64(descriptor + 22U) == 0xffffffU &&
+                       get_u64(descriptor + 22U) == 0xffffU &&
                        get_u64(descriptor + 30U) == 0 &&
-                       get_u64(descriptor + 38U) == 0x1000000U) {
+                       get_u64(descriptor + 38U) == 0x10000U) {
                 io = 1;
             } else if (descriptor[0] == 0x87U && length == 23U &&
                        descriptor[3] == 0U &&
@@ -2018,7 +2019,7 @@ static BOOLEAN test_ssdt_uart_crs(const TEST_TABLE_CONTEXT *Context)
     UINTN scope_offset;
     UINTN offset = 0;
     BOOLEAN under_pci0 = 0;
-    BOOLEAN address = 0;
+    BOOLEAN io_address = 0;
     BOOLEAN irq = 0;
 
     if (!Context->Valid) {
@@ -2068,15 +2069,16 @@ static BOOLEAN test_ssdt_uart_crs(const TEST_TABLE_CONTEXT *Context)
                 return 0;
             }
             if (descriptor[0] == 0x8aU && length == 43U &&
-                descriptor[3] == 0U &&
-                get_u64(descriptor + 14U) == TEST_UART_BASE &&
-                get_u64(descriptor + 22U) == TEST_UART_BASE + 7U &&
+                descriptor[3] == 1U && descriptor[4] == 0x0dU &&
+                descriptor[5] == 0x03U &&
+                get_u64(descriptor + 14U) == TEST_UART_IO_PORT &&
+                get_u64(descriptor + 22U) == TEST_UART_IO_PORT + 7U &&
                 get_u64(descriptor + 30U) == 0 &&
                 get_u64(descriptor + 38U) == 8U) {
-                address = 1;
+                io_address = 1;
             }
             if (descriptor[0] == 0x89U && length == 6U &&
-                descriptor[3] == 0x0dU && descriptor[4] == 1U &&
+                descriptor[3] == 0x03U && descriptor[4] == 1U &&
                 get_u32(descriptor + 5U) == 4U) {
                 irq = 1;
             }
@@ -2089,7 +2091,7 @@ static BOOLEAN test_ssdt_uart_crs(const TEST_TABLE_CONTEXT *Context)
             offset += 1U + length;
         }
     }
-    return under_pci0 && address && irq;
+    return under_pci0 && io_address && irq;
 }
 
 static BOOLEAN test_dsdt_prt(const TEST_TABLE_CONTEXT *Context)
@@ -2377,7 +2379,7 @@ static BOOLEAN test_acpi_console_tables(const TEST_TABLE_CONTEXT *Context)
         hcdp[41U] != 8U || hcdp[42U] != 1U || hcdp[43U] != 1U ||
         get_u32(hcdp + 44U) != 0 ||
         get_u64(hcdp + 48U) != 115200U ||
-        !gas_matches(hcdp + 56U, 0, 8, TEST_UART_BASE) ||
+        !gas_matches(hcdp + 56U, 1, 8, TEST_UART_IO_PORT) ||
         get_u32(hcdp + 68U) != TEST_HCDP_UART_HID ||
         get_u32(hcdp + 72U) != 4U ||
         get_u32(hcdp + 76U) != 115200U || hcdp[80U] != 0x02U ||
@@ -2425,11 +2427,17 @@ static BOOLEAN test_platform_memory_descriptors(
     return Context->Valid &&
            memory_range_has_type(map, TEST_UART_BASE, TEST_UART_SIZE,
                                  EfiMemoryMappedIO, EFI_MEMORY_UC) &&
+           /*
+            * SAL 3.0 Table 3-6 maps SAL firmware address space, including
+            * the RTC and NVRAM device pages, to EfiRuntimeServicesData.
+            * Checking the device subranges here also verifies that the
+            * single firmware-space descriptor covers both runtime devices.
+            */
            memory_range_has_type(map, TEST_RTC_BASE, TEST_RTC_SIZE,
-                                 EfiMemoryMappedIO,
+                                 EfiRuntimeServicesData,
                                  EFI_MEMORY_UC | EFI_MEMORY_RUNTIME) &&
            memory_range_has_type(map, TEST_NVRAM_BASE, TEST_NVRAM_SIZE,
-                                 EfiMemoryMappedIO,
+                                 EfiRuntimeServicesData,
                                  EFI_MEMORY_UC | EFI_MEMORY_RUNTIME) &&
            memory_range_has_type(map, TEST_ECAM_BASE, TEST_ECAM_SIZE,
                                  EfiMemoryMappedIO,

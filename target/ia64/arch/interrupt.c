@@ -4,6 +4,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/atomic.h"
+#include "qemu/host-utils.h"
 #include "qemu/timer.h"
 #include "cpu.h"
 #include "exec/cpu-common.h"
@@ -160,6 +161,58 @@ static bool ia64_itm_interrupt_active(CPUIA64State *env)
     return vector >= 0 && sapic_vector_active(env->interrupt.sapic_isr, vector);
 }
 
+static uint64_t ia64_itc_ticks_for_ns(uint64_t elapsed_ns,
+                                      uint32_t frequency_hz,
+                                      uint32_t initial_fraction,
+                                      uint32_t *final_fraction)
+{
+    uint64_t seconds = elapsed_ns / NANOSECONDS_PER_SECOND;
+    uint64_t nanoseconds = elapsed_ns % NANOSECONDS_PER_SECOND;
+    uint64_t fraction = nanoseconds * frequency_hz + initial_fraction;
+    uint64_t ticks = seconds * frequency_hz;
+
+    ticks += fraction / NANOSECONDS_PER_SECOND;
+    if (final_fraction != NULL) {
+        *final_fraction = fraction % NANOSECONDS_PER_SECOND;
+    }
+    return ticks;
+}
+
+static uint64_t ia64_itc_delay_ns(CPUIA64State *env, uint64_t delta_ticks)
+{
+    IA64CPUClass *icc = ia64_env_cpu_class(env);
+    uint64_t required_ticks;
+    uint64_t maximum_ticks;
+    uint64_t delay_ns;
+
+    if (delta_ticks > UINT64_MAX - env->interrupt.itc_tick_debt) {
+        return INT64_MAX;
+    }
+    required_ticks = delta_ticks + env->interrupt.itc_tick_debt;
+    maximum_ticks = ia64_itc_ticks_for_ns(INT64_MAX,
+                                          icc->itc_frequency_hz,
+                                          env->interrupt.itc_fraction,
+                                          NULL);
+    if (required_ticks > maximum_ticks) {
+        return INT64_MAX;
+    }
+
+    delay_ns = muldiv64(required_ticks, NANOSECONDS_PER_SECOND,
+                        icc->itc_frequency_hz);
+    /*
+     * muldiv64() rounds down.  Host timers have nanosecond resolution, so
+     * choose the first representable instant at which the model oscillator
+     * has produced every required tick.  This also handles rates above
+     * 1 GHz, where several guest ticks can elapse in one host nanosecond.
+     */
+    if (ia64_itc_ticks_for_ns(delay_ns, icc->itc_frequency_hz,
+                             env->interrupt.itc_fraction, NULL) <
+        required_ticks) {
+        delay_ns++;
+    }
+    return delay_ns;
+}
+
 void ia64_itc_advance_pending_itm(CPUIA64State *env)
 {
     ia64_itc_sync(env);
@@ -176,7 +229,15 @@ void ia64_itc_advance_pending_itm(CPUIA64State *env)
         uint64_t ticks = env->interrupt.itm_last_match + 1 - env->ar_itc;
 
         env->ar_itc += ticks;
-        env->interrupt.itc_delta += (int64_t)ticks * IA64_ITC_NS_PER_TICK;
+        /*
+         * This post-match advancement is an emulation artifact needed when
+         * the host timer lands exactly on ITM.  Record it as debt instead of
+         * changing the oscillator phase: later physical ticks repay it, so
+         * repeated handler reads do not make the model clock run fast.
+         */
+        env->interrupt.itc_tick_debt =
+            ticks > UINT64_MAX - env->interrupt.itc_tick_debt ?
+            UINT64_MAX : env->interrupt.itc_tick_debt + ticks;
     }
 }
 
@@ -325,7 +386,7 @@ void ia64_itm_update(CPUIA64State *env, uint64_t itm_value)
     IA64CPU *cpu = container_of(env, IA64CPU, env);
     uint64_t itc;
     int64_t delta_ticks;
-    int64_t delay_ns;
+    uint64_t delay_ns;
     int64_t deadline_ns;
     bool was_armed = env->interrupt.itm_armed &&
                      env->interrupt.itm_armed_value == itm_value;
@@ -342,15 +403,15 @@ void ia64_itm_update(CPUIA64State *env, uint64_t itm_value)
         return;
     }
 
-    if (delta_ticks > INT64_MAX / IA64_ITC_NS_PER_TICK) {
-        delay_ns = INT64_MAX;
-    } else {
-        delay_ns = delta_ticks * IA64_ITC_NS_PER_TICK;
-    }
+    delay_ns = ia64_itc_delay_ns(env, delta_ticks);
     env->interrupt.itm_armed = true;
     env->interrupt.itm_armed_value = itm_value;
-    deadline_ns = delay_ns > INT64_MAX - env->interrupt.itc_delta ?
-                  INT64_MAX : env->interrupt.itc_delta + delay_ns;
+    if (delay_ns == INT64_MAX ||
+        env->interrupt.itc_last_ns > INT64_MAX - (int64_t)delay_ns) {
+        deadline_ns = INT64_MAX;
+    } else {
+        deadline_ns = env->interrupt.itc_last_ns + (int64_t)delay_ns;
+    }
     trace_ia64_itm(CPU(cpu)->cpu_index, "arm", itc, itm_value,
                    ia64_itv_vector(env));
     timer_mod(cpu->itm_timer, deadline_ns);
@@ -358,15 +419,22 @@ void ia64_itm_update(CPUIA64State *env, uint64_t itm_value)
 
 void ia64_itc_sync(CPUIA64State *env)
 {
+    IA64CPUClass *icc = ia64_env_cpu_class(env);
     int64_t now = ia64_itc_clock_ns();
-    int64_t elapsed = now - env->interrupt.itc_delta;
+    int64_t elapsed = now - env->interrupt.itc_last_ns;
 
     if (elapsed > 0) {
-        uint64_t ticks = (uint64_t)(elapsed / IA64_ITC_NS_PER_TICK);
+        uint64_t ticks = ia64_itc_ticks_for_ns(
+            elapsed, icc->itc_frequency_hz, env->interrupt.itc_fraction,
+            &env->interrupt.itc_fraction);
 
-        if (ticks != 0) {
+        env->interrupt.itc_last_ns = now;
+        if (ticks <= env->interrupt.itc_tick_debt) {
+            env->interrupt.itc_tick_debt -= ticks;
+        } else {
+            ticks -= env->interrupt.itc_tick_debt;
+            env->interrupt.itc_tick_debt = 0;
             env->ar_itc += ticks;
-            env->interrupt.itc_delta += (int64_t)ticks * IA64_ITC_NS_PER_TICK;
         }
     }
 }

@@ -11,6 +11,68 @@
 #include "exec-access.h"
 #include "fpreg.h"
 
+#define FW_BOOT_NONSTANDARD_DIRECT_BASE 0x0000000080000000ULL
+#define FW_BOOT_NONSTANDARD_DIRECT_RR \
+    ((1ULL << IA64_RR_RID_SHIFT) | \
+     (13ULL << IA64_ITIR_PS_SHIFT) | IA64_RR_VE)
+#define FW_BOOT_NONSTANDARD_DIRECT_RR_MASK \
+    (IA64_RR_RID_MASK | \
+     (IA64_ITIR_PS_MASK << IA64_ITIR_PS_SHIFT) | IA64_RR_VE)
+
+bool ia64_firmware_boot_miss_mapping(IA64CPU *cpu, uint64_t va,
+                                     uint64_t *pa, uint8_t *page_shift,
+                                     bool *direct)
+{
+    CPUIA64State *env = &cpu->env;
+    uint64_t phys = va & IA64_REGION7_PHYS_MASK;
+    uint64_t rr = env->rr[ia64_rr_index(va)];
+
+    if (!ia64_sal_boot_environment_active(env)) {
+        return false;
+    }
+
+    /*
+     * Non-standard loader compatibility:
+     *
+     * SAL 3.0, sections 3.3.2.1 and 3.3.2.2, specify firmware-assisted
+     * identity mappings (VA == PA).  They do not specify this PA + 2 GiB
+     * alias.  The alias was observed in an IA-64 build 2600 setup-loader
+     * trace, but no published loader or platform ABI defining it has been
+     * located.  It is therefore unclear whether it originated in historical
+     * platform firmware or in a private loader contract.
+     *
+     * Keep the observed behavior narrowly scoped to its exact RR state
+     * (region 7, RID 1, 8 KiB pages, VHPT disabled), only while the firmware
+     * IVT owns misses, and only for installed low RAM.  The caller installs
+     * an ordinary TC entry so architectural replacement and purge rules
+     * still apply; this must never become a persistent address-space bypass.
+     */
+    if (ia64_rr_index(va) == 7 &&
+        (rr & FW_BOOT_NONSTANDARD_DIRECT_RR_MASK) ==
+            FW_BOOT_NONSTANDARD_DIRECT_RR &&
+        !(env->cr_pta & IA64_PTA_VE) &&
+        phys >= FW_BOOT_NONSTANDARD_DIRECT_BASE) {
+        uint64_t direct_pa = phys - FW_BOOT_NONSTANDARD_DIRECT_BASE;
+
+        if (!cpu->boot_info_valid ||
+            direct_pa >= cpu->boot_info.low_ram_size) {
+            return false;
+        }
+        *pa = direct_pa;
+        *page_shift = 13;
+        *direct = true;
+        return true;
+    }
+
+    if (!ia64_pa_is_implemented(env, phys)) {
+        return false;
+    }
+    *pa = phys;
+    *page_shift = 12;
+    *direct = false;
+    return true;
+}
+
 /* ---- Native EFI Debug Support context bridge -------------------------- */
 
 #define FW_DEBUG_CTX_R1         8U
@@ -134,7 +196,8 @@ void ia64_firmware_debug_capture(CPUIA64State *env, uint16_t vector,
     ia64_fw_debug_putq(env, FW_DEBUG_CTX_AR_RSC, env->ar_rsc);
     ia64_fw_debug_putq(env, FW_DEBUG_CTX_AR_BSP, env->ar_bsp);
     ia64_fw_debug_putq(env, FW_DEBUG_CTX_AR_BSPSTORE, env->ar_bspstore);
-    ia64_fw_debug_putq(env, FW_DEBUG_CTX_AR_RNAT, env->ar_rnat);
+    ia64_fw_debug_putq(env, FW_DEBUG_CTX_AR_RNAT,
+                       ia64_rse_read_rnat(env));
     ia64_fw_debug_putq(env, FW_DEBUG_CTX_AR_FCR, env->ar_fcr);
     ia64_fw_debug_putq(env, FW_DEBUG_CTX_AR_EFLAG, env->ar_eflag);
     ia64_fw_debug_putq(env, FW_DEBUG_CTX_AR_CSD, env->ar_csd);
@@ -262,7 +325,12 @@ static void ia64_fw_debug_save_rse(CPUIA64State *env)
     state->clean = env->rse.rse_clean;
     state->clean_nat = env->rse.rse_clean_nat;
     state->invalid = env->rse.rse_invalid;
+    state->rnat_addr = env->rse.rse_rnat_addr;
+    state->load_rnat = env->rse.rse_load_rnat;
+    state->load_rnat_addr = env->rse.rse_load_rnat_addr;
     state->rnat_first = env->rse.rse_rnat_first;
+    state->rnat_last = env->rse.rse_rnat_last;
+    state->load_rnat_valid = env->rse.rse_load_rnat_valid;
     state->cfm_sof = env->cfm_sof;
     state->cfm_sol = env->cfm_sol;
     state->cfm_sor = env->cfm_sor;
@@ -290,7 +358,12 @@ static void ia64_fw_debug_restore_rse(CPUIA64State *env)
     env->rse.rse_clean = state->clean;
     env->rse.rse_clean_nat = state->clean_nat;
     env->rse.rse_invalid = state->invalid;
+    env->rse.rse_rnat_addr = state->rnat_addr;
+    env->rse.rse_load_rnat = state->load_rnat;
+    env->rse.rse_load_rnat_addr = state->load_rnat_addr;
     env->rse.rse_rnat_first = state->rnat_first;
+    env->rse.rse_rnat_last = state->rnat_last;
+    env->rse.rse_load_rnat_valid = state->load_rnat_valid;
     env->cfm_sof = state->cfm_sof;
     env->cfm_sol = state->cfm_sol;
     env->cfm_sor = state->cfm_sor;

@@ -35,7 +35,13 @@
 
 #define IA64_DCR_LC     (1ULL << 2)
 
-#define SAL_REVISION                 0x0340U
+/*
+ * Advertise the newest SAL contract that this firmware is implemented and
+ * tested against.  The previous 0x0340 value claimed SAL 3.4 without an
+ * implementation audit for the post-3.0 requirements.  SAL_REV is a BCD
+ * specification revision, not a firmware release number.
+ */
+#define SAL_REVISION                 0x0300U
 #define SAL_TR_VIRTUAL_ADDRESS       0x0000000000000000ULL
 #define SAL_TR_PAGE_SHIFT            22U
 #define SAL_TR_ENCODED_PAGE_SIZE     (SAL_TR_PAGE_SHIFT << 2)
@@ -46,6 +52,40 @@
     (((UINT64)(Rid) << 8) | ((UINT64)SAL_RR_PREFERRED_PAGE_SHIFT << 2))
 #define SAL_BACKING_STORE_BASE       0x0000000000080000ULL
 #define SAL_BACKING_STORE_END        0x00000000000a0000ULL
+#define SAL_SYSTEM_ADDRESS_LIMIT     (1ULL << 44)
+
+#define SAL_DESCRIPTOR_ENTRYPOINT    0U
+#define SAL_DESCRIPTOR_MEMORY        1U
+#define SAL_DESCRIPTOR_FEATURES      2U
+#define SAL_DESCRIPTOR_TR            3U
+#define SAL_DESCRIPTOR_AP_WAKE       5U
+
+#define SAL_MEMORY_ATTRIBUTE_WB      0U
+#define SAL_MEMORY_ATTRIBUTE_UC      4U
+#define SAL_MEMORY_SUPPORTS_WB       (1U << 0)
+#define SAL_MEMORY_SUPPORTS_UC       (1U << 1)
+
+#define SAL_PAGE_ACCESS_READ         0U
+#define SAL_PAGE_ACCESS_RX           1U
+#define SAL_PAGE_ACCESS_RW           2U
+
+#define SAL_MEMORY_TYPE_REGULAR      0U
+#define SAL_MEMORY_TYPE_MMIO         1U
+#define SAL_MEMORY_TYPE_SAPIC        2U
+#define SAL_MEMORY_TYPE_IO_PORT      3U
+#define SAL_MEMORY_TYPE_FIRMWARE     4U
+#define SAL_MEMORY_TYPE_BAD          9U
+#define SAL_MEMORY_TYPE_NONEXISTENT  10U
+
+#define SAL_MEMORY_USAGE_UNSPECIFIED 0U
+#define SAL_MEMORY_USAGE_PAL_CODE    1U
+#define SAL_MEMORY_USAGE_BOOT_CODE   2U
+#define SAL_MEMORY_USAGE_BOOT_DATA   3U
+#define SAL_MEMORY_USAGE_RUNTIME_CODE 4U
+#define SAL_MEMORY_USAGE_RUNTIME_DATA 5U
+#define SAL_MEMORY_USAGE_ACPI_RECLAIM 8U
+#define SAL_MEMORY_USAGE_ACPI_NVS    9U
+#define SAL_MEMORY_USAGE_RESERVED    12U
 
 #define PCI_OHCI_MMIO_BAR             0xc1010000U
 #define PCI_AHCI_MMIO_BAR             0xc1020000U
@@ -94,18 +134,20 @@
 #define VGA_BAR_SIZE     (16U * 1024U * 1024U)
 #define FW_POOL_ZERO_LIMIT (1U * 1024U * 1024U)
 #define FW_LOW_RECLAIM_BASE 0x0000000000800000ULL
-#define FW_LOW_FREE_BASE  0x0000000001100000ULL
+#define FW_EARLY_LOADER_WINDOW_BASE 0x0000000001000000ULL
 #define FW_LOW_IMAGE_ALIGN 0x0000000002000000ULL
 #define FW_LOW_IMAGE_BASE 0x0000000002000000ULL
 #define FW_LOW_LEGACY_IMAGE_BASE 0x0000000003000000ULL
 #define FW_LOW_IMAGE_ALIGNED_END (FW_LOW_IMAGE_BASE + FW_LOW_IMAGE_ALIGN)
 #define FW_LOW_IMAGE_END  0x0000000005000000ULL
+#define FW_EARLY_LOADER_WINDOW_END FW_LOW_IMAGE_END
+#define FW_AUTO_ALLOCATION_BASE 0x0000000008000000ULL
 #define FW_BOOTSTRAP_STACK_TOP 0x0000000008000000ULL
 #define FW_BOOT_STACK_SIZE     0x0000000000400000ULL
 #define IA64_EFI_MEMORY_ALIGN 0x0000000000002000ULL
 #define IA64_EFI_MIN_STACK_BYTES   0x0000000000020000ULL
 #define IA64_EFI_MIN_BACKING_BYTES 0x0000000000004000ULL
-#define FW_LOW_RUNTIME_IMAGE_BASE 0x0000000008000000ULL
+#define FW_LOW_RUNTIME_IMAGE_BASE FW_AUTO_ALLOCATION_BASE
 #define FW_LOW_RAM_LIMIT  0x0000000080000000ULL
 #define FW_HIGH_RAM_BASE  0x0000000080200000ULL
 #define FW_HIGH_RAM_BELOW_PCI_END IA64_PCI_MMIO_BASE
@@ -136,6 +178,7 @@
 #define EFI_MEMORY_WB     0x0000000000000008ULL
 #define EFI_MEMORY_RUNTIME 0x8000000000000000ULL
 #define EFI_MEMORY_DESCRIPTOR_VERSION 1U
+#define MEMORY_MAP_MAX   128U
 #define EFI_OPTIONAL_PTR  0x0000000000000001ULL
 #define FW_NANOSECONDS_PER_SECOND 1000000000ULL
 #define FW_RTC_RESOLUTION_HZ 1U
@@ -190,11 +233,9 @@
 #define VBE_DISPI_ENABLED             0x01U
 #define VBE_DISPI_LFB_ENABLED         0x40U
 
-#define PCI_IO_SIZE                   0x1000000ULL
-/* Sparse IA-64 port encoding expands the legacy 16-bit I/O port space. */
-#define PCI_IO_SPARSE_SIZE            0x4000000ULL
-#define LEGACY_IO_BASE                0x000000800010000000ULL
-#define LEGACY_IO_LIMIT               (LEGACY_IO_BASE + PCI_IO_SIZE)
+#define PCI_IO_SIZE                   IA64_LEGACY_IO_PORTS_SIZE
+#define PCI_IO_SPARSE_SIZE            IA64_LEGACY_IO_BLOCK_SIZE
+#define LEGACY_IO_BASE                IA64_LEGACY_IO_BASE
 #define LEGACY_IO_SPARSE_LIMIT        (LEGACY_IO_BASE + PCI_IO_SPARSE_SIZE)
 #define LEGACY_IO_SPARSE_END          (LEGACY_IO_SPARSE_LIMIT - 1)
 /*
@@ -904,6 +945,20 @@ struct _EFI_UGA_DRAW_PROTOCOL {
 /* --- SAL + ACPI platform table scaffolds ---------------------------------- */
 
 typedef struct {
+    UINT32 Signature;
+    UINT32 Length;
+    UINT16 Revision;
+    UINT16 EntryCount;
+    UINT8  Checksum;
+    UINT8  Reserved0[7];
+    UINT16 SalAVersion;
+    UINT16 SalBVersion;
+    UINT8  OemId[32];
+    UINT8  ProductId[32];
+    UINT8  Reserved1[8];
+} __attribute__((packed)) IA64_SAL_SYSTEM_TABLE_HEADER;
+
+typedef struct {
     UINT8  Type;
     UINT8  Reserved0[7];
     UINT64 PalProc;
@@ -911,6 +966,21 @@ typedef struct {
     UINT64 SalGp;
     UINT8  Reserved1[16];
 } __attribute__((packed)) IA64_SAL_ENTRYPOINT_DESCRIPTOR;
+
+typedef struct {
+    UINT8  Type;
+    UINT8  NeedVirtualAddress;
+    UINT8  CurrentMemoryAttribute;
+    UINT8  PageAccessRights;
+    UINT8  SupportedMemoryAttributes;
+    UINT8  Reserved0;
+    UINT8  MemoryType;
+    UINT8  MemoryUsage;
+    UINT64 PhysicalAddress;
+    UINT32 PageCount;
+    UINT32 Reserved1;
+    UINT64 OemReserved;
+} __attribute__((packed)) IA64_SAL_MEMORY_DESCRIPTOR;
 
 typedef struct {
     UINT8 Type;
@@ -935,22 +1005,24 @@ typedef struct {
     UINT64 Vector;
 } __attribute__((packed)) IA64_SAL_AP_WAKE_DESCRIPTOR;
 
+/*
+ * Each EFI descriptor can require a preceding non-existent-memory entry.
+ * Four extra slots cover the final gap and any 32-bit page-count split.
+ */
+#define SAL_MEMORY_DESCRIPTOR_MAX (2U * MEMORY_MAP_MAX + 4U)
+#define SAL_FIXED_DESCRIPTOR_BYTES \
+    (sizeof(IA64_SAL_ENTRYPOINT_DESCRIPTOR) + \
+     sizeof(IA64_SAL_PLATFORM_FEATURES_DESCRIPTOR) + \
+     sizeof(IA64_SAL_TR_DESCRIPTOR) + \
+     sizeof(IA64_SAL_AP_WAKE_DESCRIPTOR))
+#define SAL_SYSTEM_TABLE_MAX_SIZE \
+    (sizeof(IA64_SAL_SYSTEM_TABLE_HEADER) + SAL_FIXED_DESCRIPTOR_BYTES + \
+     SAL_MEMORY_DESCRIPTOR_MAX * sizeof(IA64_SAL_MEMORY_DESCRIPTOR))
+
 typedef struct {
-    UINT32 Signature;
-    UINT32 Length;
-    UINT16 Revision;
-    UINT16 EntryCount;
-    UINT8  Checksum;
-    UINT8  Reserved0[7];
-    UINT16 SalAVersion;
-    UINT16 SalBVersion;
-    UINT8  OemId[32];
-    UINT8  ProductId[32];
-    UINT8  Reserved1[8];
-    IA64_SAL_ENTRYPOINT_DESCRIPTOR Entrypoint;
-    IA64_SAL_PLATFORM_FEATURES_DESCRIPTOR PlatformFeatures;
-    IA64_SAL_TR_DESCRIPTOR TranslationRegister;
-    IA64_SAL_AP_WAKE_DESCRIPTOR ApWake;
+    IA64_SAL_SYSTEM_TABLE_HEADER Header;
+    UINT8 Entries[SAL_SYSTEM_TABLE_MAX_SIZE -
+                  sizeof(IA64_SAL_SYSTEM_TABLE_HEADER)];
 } __attribute__((packed)) IA64_SAL_SYSTEM_TABLE;
 
 typedef struct {
@@ -1596,21 +1668,27 @@ typedef struct {
 } __attribute__((packed)) FW_PCI_BAR_RESOURCES;
 
 FW_STATIC_ASSERT(sizeof(ACPI_SDT_HEADER) == 36, acpi_sdt_header_size);
+FW_STATIC_ASSERT(sizeof(IA64_SAL_SYSTEM_TABLE_HEADER) == 96,
+                 sal_system_table_header_size);
 FW_STATIC_ASSERT(sizeof(IA64_SAL_ENTRYPOINT_DESCRIPTOR) == 48,
                  sal_entrypoint_descriptor_size);
+FW_STATIC_ASSERT(sizeof(IA64_SAL_MEMORY_DESCRIPTOR) == 32,
+                 sal_memory_descriptor_size);
+FW_STATIC_ASSERT(__builtin_offsetof(IA64_SAL_MEMORY_DESCRIPTOR,
+                                    PhysicalAddress) == 8,
+                 sal_memory_descriptor_address_offset);
+FW_STATIC_ASSERT(__builtin_offsetof(IA64_SAL_MEMORY_DESCRIPTOR,
+                                    PageCount) == 16,
+                 sal_memory_descriptor_page_count_offset);
 FW_STATIC_ASSERT(sizeof(IA64_SAL_PLATFORM_FEATURES_DESCRIPTOR) == 16,
                  sal_platform_features_descriptor_size);
 FW_STATIC_ASSERT(sizeof(IA64_SAL_TR_DESCRIPTOR) == 32,
                  sal_tr_descriptor_size);
 FW_STATIC_ASSERT(sizeof(IA64_SAL_AP_WAKE_DESCRIPTOR) == 16,
                  sal_ap_wake_descriptor_size);
-FW_STATIC_ASSERT(sizeof(IA64_SAL_SYSTEM_TABLE) == 208,
-                 sal_system_table_size);
-FW_STATIC_ASSERT(__builtin_offsetof(IA64_SAL_SYSTEM_TABLE,
-                                    TranslationRegister) == 160,
-                 sal_tr_descriptor_offset);
-FW_STATIC_ASSERT(__builtin_offsetof(IA64_SAL_SYSTEM_TABLE, ApWake) == 192,
-                 sal_ap_wake_descriptor_offset);
+FW_STATIC_ASSERT(sizeof(IA64_SAL_SYSTEM_TABLE) ==
+                 SAL_SYSTEM_TABLE_MAX_SIZE,
+                 sal_system_table_storage_size);
 FW_STATIC_ASSERT(FW_BOOT_STACK_SIZE >=
                  IA64_EFI_MIN_STACK_BYTES,
                  efi_boot_stack_capacity);
@@ -1673,6 +1751,8 @@ FW_STATIC_ASSERT(__builtin_offsetof(TCG_PCR_EVENT, Event) == 32,
                  tcg_pcr_event_payload_offset);
 FW_STATIC_ASSERT((LEGACY_IO_BASE & (PCI_IO_SPARSE_SIZE - 1)) == 0,
                  legacy_io_base_sparse_alignment);
+FW_STATIC_ASSERT(LEGACY_IO_SPARSE_LIMIT == (1ULL << 44),
+                 legacy_io_block_fits_first_generation_pa);
 FW_STATIC_ASSERT(__builtin_offsetof(HCDP_UART_DESCRIPTOR, Flags) == 41,
                  acpi_hcdp_uart_flags_offset);
 FW_STATIC_ASSERT(__builtin_offsetof(HCDP_UART_DESCRIPTOR, ConOutIndex) == 42,
@@ -1704,6 +1784,7 @@ FW_STATIC_ASSERT(sizeof(SMBIOS_TYPE32_SYSTEM_BOOT_INFORMATION) == 11,
 FW_STATIC_ASSERT(sizeof(SMBIOS_TYPE127_END_OF_TABLE) == 4,
                  smbios_type127_size);
 
+#define HCDP_UART_FLAG_EDGE_SENSITIVE   (1u << 0)
 #define HCDP_UART_FLAG_ACTIVE_LOW       (1u << 1)
 #define HCDP_UART_FLAG_PRIMARY_CONSOLE  (1u << 2)
 #define HCDP_UART_FLAG_INTERRUPT        (1u << 6)
@@ -1740,7 +1821,9 @@ static UINT8                   mSmbiosTable[SMBIOS_TABLE_MAX_SIZE];
 static UINT16                  mSmbiosTableLength;
 static UINT16                  mSmbiosStructureCount;
 static UINT16                  mSmbiosMaxStructureSize;
-static IA64_SAL_SYSTEM_TABLE   mSalSystemTable;
+static IA64_SAL_SYSTEM_TABLE   mSalSystemTable
+    __attribute__((aligned(8)));
+static BOOLEAN                mSalSystemTableValid;
 static ACPI_FADT               mFadt;
 static ACPI_XSDT               mXsdt;
 static ACPI_RSDT               mRsdt;
@@ -1750,8 +1833,8 @@ static ACPI_FACS               mFacs __attribute__((aligned(64)));
  * Source: dsdt-pci-root.asl (compiled with iasl -on).
  *
  * AML body for \_SB.PCI0 with _HID/_CID, _CRS windows (including the
- * parent window for the UART child), and _PRT entries routing the fixed
- * root-bus PCI INTx pins to IOSAPIC GSIs 16..19.
+ * historical UART MMIO compatibility decode), and _PRT entries routing the
+ * fixed root-bus PCI INTx pins to IOSAPIC GSIs 16..19.
  *
  * The root bridge _HID must be PNP0A03 (conventional PCI), not PNP0A08:
  * some guest OS installers validate every ancestor device of the install
@@ -1771,11 +1854,12 @@ static ACPI_DSDT               mDsdt = {
     0x47, 0x00, 0x08, 0x5f, 0x42, 0x42, 0x4e, 0x00, 0x08, 0x5f, 0x55, 0x49,
     0x44, 0x00, 0x08, 0x5f, 0x43, 0x43, 0x41, 0x01, 0x08, 0x5f, 0x43, 0x52,
     0x53, 0x11, 0x4a, 0x0b, 0x0a, 0xb6, 0x88, 0x0d, 0x00, 0x02, 0x0c, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0x00, 0x01, 0x8a, 0x2b,
-    0x00, 0x01, 0x0c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0x00, 0x01,
+    0x8a, 0x2b, 0x00, 0x01, 0x0c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x87, 0x17, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x87, 0x17, 0x00, 0x00,
     0x0c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0a, 0x00, 0xff, 0xff,
     0x0b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00,
     0x8a, 0x2b, 0x00, 0x00,
@@ -1829,7 +1913,7 @@ static ACPI_SSDT               mSsdt = {
          * Scope (\_SB.PCI0) {
          *   Name (P2EN, 0x0F)
          *   Device (UAR0) { _HID PNP0501;
-         *     _CRS { QWordMemory UART; level/active-low/shared GSI 4 } }
+         *     _CRS { QWordIO COM1; edge/active-high/exclusive GSI 4 } }
          *   Device (PS2K) { _HID PNP0303; _STA { Return (P2EN) };
          *                   _CRS { IO 0x60; IO 0x64; IRQ 1 } }
          *   Device (PS2M) { _HID PNP0F13; _STA { Return (P2EN) };
@@ -1855,11 +1939,13 @@ static ACPI_SSDT               mSsdt = {
         0x5b, 0x82, 0x4c, 0x05, 0x55, 0x41, 0x52, 0x30, 0x08, 0x5f, 0x48,
         0x49, 0x44, 0x0d, 0x50, 0x4e, 0x50, 0x30, 0x35, 0x30, 0x31, 0x00, 0x08,
         0x5f, 0x55, 0x49, 0x44, 0x00, 0x08, 0x5f, 0x43, 0x52, 0x53, 0x11, 0x3c,
-        0x0a, 0x39, 0x8a, 0x2b, 0x00, 0x00, 0x0d, 0x01, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x47, 0x00, 0x00, 0x00,
-        0x07, 0x00, 0x00, 0xf0, 0x47, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x89, 0x06, 0x00, 0x0d, 0x01, 0x04, 0x00, 0x00, 0x00, 0x79, 0x00,
+        0x0a, 0x39,
+        0x8a, 0x2b, 0x00, 0x01, 0x0d, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0xf8, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x03,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x89, 0x06,
+        0x00, 0x03, 0x01, 0x04, 0x00, 0x00, 0x00, 0x79,
+        0x00,
         0x5b, 0x82, 0x39, 0x50, 0x53, 0x32, 0x4b,
         0x08, 0x5f, 0x48, 0x49, 0x44, 0x0c, 0x41, 0xd0, 0x03, 0x03, 0x14, 0x0b,
         0x5f, 0x53, 0x54, 0x41, 0x00, 0xa4, 0x50, 0x32, 0x45, 0x4e, 0x08, 0x5f,
@@ -1931,8 +2017,6 @@ static const UINT8 gEfiEventGroupVirtualAddressChangeGuid[16] = {
 };
 
 /* --- Memory map (built at firmware init) ---------------------------------- */
-#define MEMORY_MAP_MAX   128
-
 static EFI_MEMORY_DESCRIPTOR  mMemoryMap[MEMORY_MAP_MAX];
 static UINTN                  mMemoryMapEntries;
 static EFI_MEMORY_DESCRIPTOR  mVirtualAddressMap[MEMORY_MAP_MAX];
@@ -2083,7 +2167,7 @@ static void fw_init_guest_high_ram_ranges(UINT64 RamSize)
                                 FW_LOCAL_SAPIC_BASE,
                                 &remaining);
     fw_add_guest_high_ram_range(FW_FIRMWARE_ADDRESS_SPACE_END,
-                                ~0ULL, &remaining);
+                                LEGACY_IO_BASE, &remaining);
 }
 
 static UINT64 fw_guest_high_ram_total(void)
@@ -2283,7 +2367,8 @@ static UINT64 fw_system_table_pointer_base(UINT64 LowRamEnd,
 {
     UINT64 base;
 
-    if (LowRamEnd <= FW_LOW_IMAGE_END + FW_SYSTEM_TABLE_POINTER_SIZE) {
+    if (LowRamEnd <=
+        FW_EARLY_LOADER_WINDOW_END + FW_SYSTEM_TABLE_POINTER_SIZE) {
         return 0;
     }
 
@@ -2293,7 +2378,7 @@ static UINT64 fw_system_table_pointer_base(UINT64 LowRamEnd,
         base = (BootStackBase - FW_SYSTEM_TABLE_POINTER_SIZE) &
                ~(FW_SYSTEM_TABLE_POINTER_ALIGN - 1U);
     }
-    if (base <= FW_LOW_IMAGE_END ||
+    if (base <= FW_EARLY_LOADER_WINDOW_END ||
         base + FW_SYSTEM_TABLE_POINTER_SIZE > LowRamEnd) {
         return 0;
     }
@@ -2351,14 +2436,14 @@ static CHAR16                 mTextChars[VGA_TEXT_ROWS][VGA_TEXT_COLUMNS];
 static UINT8                  mTextAttrs[VGA_TEXT_ROWS][VGA_TEXT_COLUMNS];
 static BOOLEAN                mTextWrapPending;
 static UINTN                  mMapKey = 1;
-static EFI_PHYSICAL_ADDRESS   mNextPageAddr = 0x01000000ULL;
+static EFI_PHYSICAL_ADDRESS   mNextPageAddr = FW_AUTO_ALLOCATION_BASE;
 static BOOLEAN                mBootServicesExited;
 static BOOLEAN                mBeforeExitBootServicesSignaled;
 static BOOLEAN                mExitBootServicesEventsSignaled;
 static UINTN                  mRuntimeAcpiPm1Cnt =
-    LEGACY_IO_BASE + ACPI_PM_IO_BASE + ACPI_PM1_CNT_OFFSET;
+    IA64_LEGACY_IO_PORT_PA(ACPI_PM_IO_BASE + ACPI_PM1_CNT_OFFSET);
 static UINTN                  mRuntimeResetControl =
-    LEGACY_IO_BASE + ACPI_PM_IO_BASE + ACPI_PM_RESET_OFFSET;
+    IA64_LEGACY_IO_PORT_PA(ACPI_PM_IO_BASE + ACPI_PM_RESET_OFFSET);
 static UINTN                  mRuntimePciConfigEcam =
     PCI_CONFIG_ECAM_BASE;
 static UINTN                  mRuntimeRtc = FW_RTC_BASE;
@@ -2795,11 +2880,6 @@ static UINT64 fw_current_gp(void)
     return gp;
 }
 
-static UINT64 fw_function_entry(UINTN FunctionPointer)
-{
-    return *(UINT64 *)(UINTN)FunctionPointer;
-}
-
 typedef struct {
     UINT64 Status;
     UINT64 Value0;
@@ -2835,10 +2915,6 @@ typedef struct {
 #define SAL_VECTOR_OS_INIT          1
 #define SAL_VECTOR_OS_BOOT_RENDEZ   2
 #define SAL_VECTOR_COUNT            3
-#define SAL_VECTOR_LENGTH_MASK      0xffffffffULL
-#define SAL_VECTOR_CHECKSUM_VALID   (1ULL << 32)
-#define SAL_VECTOR_LENGTH_RESERVED_MASK \
-    ((((1ULL << 7) - 1) << 33) | (0xffffULL << 48))
 
 #define SAL_PHYSICAL_ENTITY_PAL_PROC 0
 
@@ -2865,9 +2941,11 @@ typedef struct {
     UINT64 HandlerAddr1;
     UINT64 Gp1;
     UINT64 HandlerLen1;
+    UINT8 Checksum1;
     UINT64 HandlerAddr2;
     UINT64 Gp2;
     UINT64 HandlerLen2;
+    UINT8 Checksum2;
     BOOLEAN Valid;
 } SAL_VECTOR_REGISTRATION;
 
@@ -2895,68 +2973,123 @@ static SAL_RETURN_VALUE sal_return(UINT64 Status, UINT64 Value0,
     return Ret;
 }
 
-static BOOLEAN sal_vector_length_cs_valid(UINT64 LengthCs)
+static BOOLEAN sal_physical_range_is_ram(UINT64 Address, UINT64 Length)
 {
-    if ((LengthCs & SAL_VECTOR_CHECKSUM_VALID) == 0) {
+    UINT64 end;
+    UINTN i;
+
+    if (Length == 0) {
         return 1;
     }
-
-    if ((LengthCs & SAL_VECTOR_LENGTH_RESERVED_MASK) != 0) {
+    end = Address + Length;
+    if (end <= Address) {
         return 0;
     }
-
-    return (LengthCs & SAL_VECTOR_LENGTH_MASK) != 0 &&
-           (LengthCs & 0xfU) == 0;
+    if (end <= mGuestLowRamEnd) {
+        return 1;
+    }
+    for (i = 0; i < mGuestHighRamCount; i++) {
+        if (Address >= mGuestHighRam[i].Base &&
+            end <= mGuestHighRam[i].End) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
-static BOOLEAN sal_vector_entry_valid(UINT64 Address, UINT64 LengthCs)
+static UINT8 sal_vector_code_checksum(UINT64 Address, UINT64 Length)
 {
-    if ((Address & 0xfU) != 0) {
+    const volatile UINT8 *code = (const volatile UINT8 *)(UINTN)Address;
+    UINT8 checksum = 0;
+    UINT64 i;
+
+    for (i = 0; i < Length; i++) {
+        checksum = (UINT8)(checksum + code[i]);
+    }
+    return checksum;
+}
+
+static BOOLEAN sal_vector_entry_valid(UINT64 Address, UINT64 Gp,
+                                      UINT64 Length)
+{
+    (void)Gp;
+
+    if (Address == 0) {
+        return 1;
+    }
+    return (Address & 0xfU) == 0 &&
+           sal_physical_range_is_ram(Address, Length);
+}
+
+static BOOLEAN
+sal_vector_registration_authentic(const SAL_VECTOR_REGISTRATION *Entry,
+                                  BOOLEAN Secondary)
+{
+    UINT64 address = Secondary ? Entry->HandlerAddr2 : Entry->HandlerAddr1;
+    UINT64 length = Secondary ? Entry->HandlerLen2 : Entry->HandlerLen1;
+    UINT8 checksum = Secondary ? Entry->Checksum2 : Entry->Checksum1;
+
+    if (!Entry->Valid || address == 0) {
         return 0;
     }
-
-    return sal_vector_length_cs_valid(LengthCs);
+    return length == 0 ||
+           sal_vector_code_checksum(address, length) == checksum;
 }
 
 static SAL_RETURN_VALUE __attribute__((noinline))
 sal_set_vectors(UINT64 VectorType, UINT64 PhysAddr1, UINT64 Gp1,
-                UINT64 LengthCs1, UINT64 PhysAddr2, UINT64 Gp2,
-                UINT64 LengthCs2)
+                UINT64 Length1, UINT64 PhysAddr2, UINT64 Gp2,
+                UINT64 Length2)
 {
     SAL_VECTOR_REGISTRATION *entry;
 
+    /*
+     * Compatibility debt: SAL 3.0 names Arg4/Arg7 length_cs and packs the
+     * length, checksum-present bit, and checksum into them.  This path still
+     * accepts the older plain-length form and computes the checksum itself.
+     * Keep that distinction visible until both forms have guest coverage.
+     */
     if (VectorType >= SAL_VECTOR_COUNT ||
-        !sal_vector_entry_valid(PhysAddr1, LengthCs1) ||
+        !sal_vector_entry_valid(PhysAddr1, Gp1, Length1) ||
         (VectorType == SAL_VECTOR_OS_INIT &&
          ((PhysAddr1 == 0) != (PhysAddr2 == 0) ||
-          !sal_vector_entry_valid(PhysAddr2, LengthCs2))) ||
+          !sal_vector_entry_valid(PhysAddr2, Gp2, Length2))) ||
         (VectorType != SAL_VECTOR_OS_INIT &&
-         (PhysAddr2 != 0 || Gp2 != 0 || LengthCs2 != 0))) {
+         (PhysAddr2 != 0 || Gp2 != 0 || Length2 != 0))) {
         return sal_return(SAL_STATUS_INVALID_ARGUMENT, 0, 0, 0);
     }
 
     entry = &mSalVectors[VectorType];
     entry->HandlerAddr1 = PhysAddr1;
     entry->Gp1 = Gp1;
-    entry->HandlerLen1 = LengthCs1;
+    entry->HandlerLen1 = PhysAddr1 != 0 ? Length1 : 0;
+    entry->Checksum1 =
+        PhysAddr1 != 0 && Length1 != 0 ?
+        sal_vector_code_checksum(PhysAddr1, Length1) : 0;
     entry->HandlerAddr2 = PhysAddr2;
     entry->Gp2 = Gp2;
-    entry->HandlerLen2 = LengthCs2;
-    entry->Valid = 1;
+    entry->HandlerLen2 = PhysAddr2 != 0 ? Length2 : 0;
+    entry->Checksum2 =
+        PhysAddr2 != 0 && Length2 != 0 ?
+        sal_vector_code_checksum(PhysAddr2, Length2) : 0;
+    entry->Valid = PhysAddr1 != 0;
+    __asm__ volatile ("mf;;" : : : "memory");
     return sal_return(SAL_STATUS_SUCCESS, 0, 0, 0);
 }
 
 static BOOLEAN __attribute__((noinline)) sal_set_vectors_selftest(void)
 {
+    static UINT8 code1[32] __attribute__((aligned(16)));
+    static UINT8 code2[32] __attribute__((aligned(16)));
     SAL_VECTOR_REGISTRATION saved[SAL_VECTOR_COUNT];
     SAL_RETURN_VALUE mca_valid;
     SAL_RETURN_VALUE bad_secondary;
     SAL_RETURN_VALUE bad_type;
     SAL_RETURN_VALUE init_mismatch;
     SAL_RETURN_VALUE init_checksum_valid;
-    SAL_RETURN_VALUE bad_checksum_reserved;
-    SAL_RETURN_VALUE bad_checksum_length;
-    UINT64 length_cs = 0x20U | SAL_VECTOR_CHECKSUM_VALID | (0x80ULL << 40);
+    SAL_RETURN_VALUE bad_handler_alignment;
+    SAL_RETURN_VALUE bad_code_range;
+    UINT8 saved_byte;
     UINTN i;
     BOOLEAN ok;
 
@@ -2964,30 +3097,49 @@ static BOOLEAN __attribute__((noinline)) sal_set_vectors_selftest(void)
         saved[i] = mSalVectors[i];
     }
 
-    mca_valid = sal_set_vectors(SAL_VECTOR_OS_MCA, 0x2000, 0x1000, 0,
+    mca_valid = sal_set_vectors(SAL_VECTOR_OS_MCA,
+                                (UINTN)code1, 0, sizeof(code1),
                                 0, 0, 0);
-    bad_secondary = sal_set_vectors(SAL_VECTOR_OS_MCA, 0x2000, 0x1000, 0,
-                                    0x3000, 0, 0);
+    bad_secondary = sal_set_vectors(SAL_VECTOR_OS_MCA,
+                                    (UINTN)code1, 0, 0,
+                                    (UINTN)code2, 0, 0);
     bad_type = sal_set_vectors(3, 0, 0, 0, 0, 0, 0);
     init_mismatch = sal_set_vectors(SAL_VECTOR_OS_INIT, 0, 0, 0,
-                                    0x3000, 0, 0);
-    init_checksum_valid = sal_set_vectors(SAL_VECTOR_OS_INIT, 0x2000, 0x1000,
-                                          length_cs, 0x3000, 0x1000,
-                                          length_cs);
-    bad_checksum_reserved =
-        sal_set_vectors(SAL_VECTOR_OS_BOOT_RENDEZ, 0x2000, 0x1000,
-                        length_cs | (1ULL << 33), 0, 0, 0);
-    bad_checksum_length =
-        sal_set_vectors(SAL_VECTOR_OS_BOOT_RENDEZ, 0x2000, 0x1000,
-                        SAL_VECTOR_CHECKSUM_VALID | 0x18U, 0, 0, 0);
+                                    (UINTN)code2, 0, 0);
+    init_checksum_valid =
+        sal_set_vectors(SAL_VECTOR_OS_INIT,
+                        (UINTN)code1, 0, sizeof(code1),
+                        (UINTN)code2, 0, sizeof(code2));
+    bad_handler_alignment =
+        sal_set_vectors(SAL_VECTOR_OS_BOOT_RENDEZ,
+                        (UINTN)code1 + 1U, 0, 0, 0, 0, 0);
+    bad_code_range =
+        sal_set_vectors(SAL_VECTOR_OS_BOOT_RENDEZ,
+                        mGuestLowRamEnd & ~0xfULL, 0, 32, 0, 0, 0);
 
     ok = mca_valid.Status == SAL_STATUS_SUCCESS &&
          bad_secondary.Status == SAL_STATUS_INVALID_ARGUMENT &&
          bad_type.Status == SAL_STATUS_INVALID_ARGUMENT &&
          init_mismatch.Status == SAL_STATUS_INVALID_ARGUMENT &&
          init_checksum_valid.Status == SAL_STATUS_SUCCESS &&
-         bad_checksum_reserved.Status == SAL_STATUS_INVALID_ARGUMENT &&
-         bad_checksum_length.Status == SAL_STATUS_INVALID_ARGUMENT;
+         bad_handler_alignment.Status == SAL_STATUS_INVALID_ARGUMENT &&
+         bad_code_range.Status == SAL_STATUS_INVALID_ARGUMENT &&
+         sal_vector_registration_authentic(
+             &mSalVectors[SAL_VECTOR_OS_INIT], 0) &&
+         sal_vector_registration_authentic(
+             &mSalVectors[SAL_VECTOR_OS_INIT], 1);
+
+    saved_byte = code1[0];
+    code1[0] ^= 1U;
+    ok = ok &&
+         !sal_vector_registration_authentic(
+             &mSalVectors[SAL_VECTOR_OS_INIT], 0) &&
+         sal_vector_registration_authentic(
+             &mSalVectors[SAL_VECTOR_OS_INIT], 1);
+    code1[0] = saved_byte;
+    ok = ok &&
+         sal_vector_registration_authentic(
+             &mSalVectors[SAL_VECTOR_OS_INIT], 0);
 
     for (i = 0; i < SAL_VECTOR_COUNT; i++) {
         mSalVectors[i] = saved[i];
@@ -3650,10 +3802,11 @@ static BOOLEAN __attribute__((noinline)) sal_pci_config_selftest(void)
            bad_alignment.Status == SAL_STATUS_INVALID_ARGUMENT;
 }
 
-static BOOLEAN sal_runtime_state_valid(void)
+static BOOLEAN sal_dispatch_state_valid(void)
 {
     UINT64 psr = fw_read_psr();
-    UINT64 translation = psr & (IA64_PSR_DT | IA64_PSR_RT | IA64_PSR_IT);
+    UINT64 translation =
+        psr & (IA64_PSR_DT | IA64_PSR_RT | IA64_PSR_IT);
 
     if ((psr & IA64_PSR_CPL_MASK) != 0) {
         return 0;
@@ -3663,14 +3816,14 @@ static BOOLEAN sal_runtime_state_valid(void)
            translation == (IA64_PSR_DT | IA64_PSR_RT | IA64_PSR_IT);
 }
 
-static SAL_RETURN_VALUE sal_proc_entry(UINT64 Index, UINT64 Arg1, UINT64 Arg2,
-                                       UINT64 Arg3, UINT64 Arg4, UINT64 Arg5,
-                                       UINT64 Arg6, UINT64 Arg7)
+SAL_RETURN_VALUE sal_proc_dispatch(
+    UINT64 Index, UINT64 Arg1, UINT64 Arg2, UINT64 Arg3,
+    UINT64 Arg4, UINT64 Arg5, UINT64 Arg6, UINT64 Arg7)
 {
     UINT64 FunctionId = (UINT32)Index;
     SAL_RETURN_VALUE ret;
 
-    if (!sal_runtime_state_valid()) {
+    if (!sal_dispatch_state_valid()) {
         ret = sal_return(SAL_STATUS_ERROR, 0, 0, 0);
         goto out;
     }
@@ -3761,12 +3914,13 @@ static BOOLEAN __attribute__((noinline)) sal_proc_dispatch_selftest(void)
     SAL_RETURN_VALUE masked;
     SAL_RETURN_VALUE unimplemented;
 
-    masked = sal_proc_entry(0xfeedface00000000ULL | SAL_FREQ_BASE,
-                            SAL_FREQ_BASE_PLATFORM, 0, 0, 0, 0, 0, 0);
-    unimplemented = sal_proc_entry(0xfeedface04000000ULL,
-                                   0, 0, 0, 0, 0, 0, 0);
+    masked = sal_proc_dispatch(
+        0xfeedface00000000ULL | SAL_FREQ_BASE,
+        SAL_FREQ_BASE_PLATFORM, 0, 0, 0, 0, 0, 0);
+    unimplemented = sal_proc_dispatch(
+        0xfeedface04000000ULL, 0, 0, 0, 0, 0, 0, 0);
 
-    return sal_runtime_state_valid() &&
+    return sal_dispatch_state_valid() &&
            masked.Status == SAL_STATUS_SUCCESS &&
            masked.Value0 == PLATFORM_BASE_FREQUENCY &&
            masked.Value1 == (UINT64)-1 &&
@@ -4416,6 +4570,47 @@ static BOOLEAN __attribute__((noinline)) sal_loader_handoff_selftest(void)
 }
 
 extern VOID fw_pal_halt_light(VOID);
+extern INT64 fw_pal_platform_addr(UINT64 Address);
+extern UINT64 fw_pal_itc_ratio(VOID);
+
+static UINT64 mItcTicksPer100ns;
+
+UINT64 fw_itc_ticks_per_100ns(VOID)
+{
+    return mItcTicksPer100ns;
+}
+
+static BOOLEAN fw_init_itc_frequency(VOID)
+{
+    UINT64 ratio = fw_pal_itc_ratio();
+    UINT64 numerator = ratio >> 32;
+    UINT64 denominator = (UINT32)ratio;
+    UINT64 scaled_frequency;
+    UINT64 frequency;
+
+    /*
+     * PAL_FREQ_RATIOS defines ITC relative to the platform clock returned by
+     * SAL_FREQ_BASE.  Deriving this value at boot keeps EFI delays and event
+     * deadlines consistent with the selected processor model.
+     *
+     * The supported models use an integral number of ITC ticks per 100 ns.
+     * A ratio that cannot represent that platform contract is rejected
+     * before any timed boot service is exposed.
+     */
+    if (numerator == 0 || denominator == 0) {
+        return 0;
+    }
+    scaled_frequency = PLATFORM_BASE_FREQUENCY * numerator;
+    if (scaled_frequency % denominator != 0) {
+        return 0;
+    }
+    frequency = scaled_frequency / denominator;
+    if (frequency < 10000000ULL || frequency % 10000000ULL != 0) {
+        return 0;
+    }
+    mItcTicksPer100ns = frequency / 10000000ULL;
+    return 1;
+}
 
 UINT64 fw_read_ivr(void)
 {
@@ -4441,6 +4636,7 @@ static void fw_ap_rendezvous(void)
     /* The BSP publishes this registration before issuing the wake IPI. */
     volatile SAL_VECTOR_REGISTRATION *registration =
         &mSalVectors[SAL_VECTOR_OS_BOOT_RENDEZ];
+    SAL_VECTOR_REGISTRATION entry;
     UINT64 descriptor[2] __attribute__((aligned(16)));
     UINT64 saved_psr;
     UINT64 saved_rsc;
@@ -4452,11 +4648,12 @@ static void fw_ap_rendezvous(void)
     fw_write_eoi();
 
     __asm__ volatile ("mf;;" : : : "memory");
-    if (!registration->Valid || registration->HandlerAddr1 == 0) {
+    entry = *registration;
+    if (!sal_vector_registration_authentic(&entry, 0)) {
         return;
     }
-    descriptor[0] = registration->HandlerAddr1;
-    descriptor[1] = registration->Gp1;
+    descriptor[0] = entry.HandlerAddr1;
+    descriptor[1] = entry.Gp1;
     saved_psr = fw_read_psr();
     saved_rsc = fw_read_rsc();
     prepare_sal_loader_handoff();
@@ -4468,6 +4665,11 @@ void firmware_ap_main(UINT64 ProcessorId)
 {
     (void)ProcessorId;
 
+    if (fw_pal_platform_addr(LEGACY_IO_BASE) != 0) {
+        for (;;) {
+            fw_pal_halt_light();
+        }
+    }
     fw_ap_rendezvous();
     for (;;) {
         /* TPR is scratch on return from OS_BOOT_RENDEZ. */
@@ -4505,9 +4707,9 @@ static UINT8 uart_getc(void)
     return *fw_uart_reg(UART_RBR);
 }
 
-volatile UINT8 *ps2_reg(UINTN addr)
+volatile UINT8 *ps2_reg(UINTN port)
 {
-    return (volatile UINT8 *)addr;
+    return (volatile UINT8 *)(UINTN)IA64_LEGACY_IO_PORT_PA(port);
 }
 
 UINT8 ps2_read_status(void)
@@ -7502,6 +7704,50 @@ static BOOLEAN efi_find_free_pages_backward(UINT64 Start, UINT64 End,
     return 0;
 }
 
+/*
+ * Some early IA-64 loaders unconditionally use 16--80 MiB as fixed
+ * driver/decompression windows.  Keep the range visible as ordinary
+ * EfiConventionalMemory, but do not let firmware-selected allocations
+ * consume it.  AllocateAddress remains the explicit opt-in path.
+ */
+static BOOLEAN efi_find_auto_pages_forward(UINT64 Start, UINT64 End,
+                                           UINT64 Size, UINT64 Alignment,
+                                           EFI_PHYSICAL_ADDRESS *Memory)
+{
+    UINT64 low_end = End < FW_EARLY_LOADER_WINDOW_BASE ?
+                     End : FW_EARLY_LOADER_WINDOW_BASE;
+    UINT64 high_start = Start > FW_EARLY_LOADER_WINDOW_END ?
+                        Start : FW_EARLY_LOADER_WINDOW_END;
+
+    if (Start < low_end &&
+        efi_find_free_pages_forward(Start, low_end, Size, Alignment,
+                                    Memory)) {
+        return 1;
+    }
+    return high_start < End &&
+           efi_find_free_pages_forward(high_start, End, Size, Alignment,
+                                       Memory);
+}
+
+static BOOLEAN efi_find_auto_pages_backward(UINT64 Start, UINT64 End,
+                                            UINT64 Size, UINT64 Alignment,
+                                            EFI_PHYSICAL_ADDRESS *Memory)
+{
+    UINT64 high_start = Start > FW_EARLY_LOADER_WINDOW_END ?
+                        Start : FW_EARLY_LOADER_WINDOW_END;
+    UINT64 low_end = End < FW_EARLY_LOADER_WINDOW_BASE ?
+                     End : FW_EARLY_LOADER_WINDOW_BASE;
+
+    if (high_start < End &&
+        efi_find_free_pages_backward(high_start, End, Size, Alignment,
+                                     Memory)) {
+        return 1;
+    }
+    return Start < low_end &&
+           efi_find_free_pages_backward(Start, low_end, Size, Alignment,
+                                        Memory);
+}
+
 static BOOLEAN efi_find_any_pages(UINT64 Size, UINT64 Alignment,
                                   EFI_PHYSICAL_ADDRESS *Memory)
 {
@@ -7547,7 +7793,7 @@ static BOOLEAN efi_find_any_pages(UINT64 Size, UINT64 Alignment,
                 }
             }
 
-            if (efi_find_free_pages_forward(range_start, range_end, Size,
+            if (efi_find_auto_pages_forward(range_start, range_end, Size,
                                             Alignment, Memory)) {
                 return 1;
             }
@@ -7593,7 +7839,7 @@ static BOOLEAN efi_find_max_pages(UINT64 MaxAddress, UINT64 Size,
             continue;
         }
 
-        if (efi_find_free_pages_backward(desc_start, limit_end, Size,
+        if (efi_find_auto_pages_backward(desc_start, limit_end, Size,
                                          Alignment, Memory)) {
             return 1;
         }
@@ -7765,8 +8011,7 @@ static BOOLEAN efi_find_pool_pages(UINT64 Size, UINT64 Alignment,
         return 0;
     }
 
-    /* Keep fixed-address image candidates available to AllocatePages(). */
-    return efi_find_max_pages(~0ULL, Size, Alignment, Memory);
+    return efi_find_any_pages(Size, Alignment, Memory);
 }
 
 static BOOLEAN efi_pool_find_gap(const EFI_POOL_ALLOCATION_RECORD *Arena,
@@ -8211,7 +8456,7 @@ void *memset(void *Buffer, int Value, size_t Size)
 
 static volatile UINT8 *vga_io_reg(UINTN Port)
 {
-    return (volatile UINT8 *)(UINTN)(LEGACY_IO_BASE + Port);
+    return (volatile UINT8 *)(UINTN)IA64_LEGACY_IO_PORT_PA(Port);
 }
 
 static UINT8 vga_io_read(UINTN Port)
@@ -8227,9 +8472,9 @@ static void vga_io_write(UINTN Port, UINT8 Value)
 static void vga_bochs_write(UINTN Index, UINT16 Value)
 {
     volatile UINT16 *index =
-        (volatile UINT16 *)(UINTN)(LEGACY_IO_BASE + 0x1ceU);
+        (volatile UINT16 *)(UINTN)IA64_LEGACY_IO_PORT_PA(0x1ceU);
     volatile UINT16 *data =
-        (volatile UINT16 *)(UINTN)(LEGACY_IO_BASE + 0x1d0U);
+        (volatile UINT16 *)(UINTN)IA64_LEGACY_IO_PORT_PA(0x1d0U);
 
     *index = (UINT16)Index;
     *data = Value;
@@ -12209,10 +12454,10 @@ static void efi_insert_memory_descriptor(UINTN Index,
 
 static BOOLEAN efi_preserve_memory_map_boundary(UINT64 Boundary)
 {
-    return Boundary == FW_LOW_IMAGE_BASE ||
+    return Boundary == FW_EARLY_LOADER_WINDOW_BASE ||
+           Boundary == FW_LOW_IMAGE_BASE ||
            Boundary == FW_LOW_LEGACY_IMAGE_BASE ||
-           Boundary == FW_LOW_IMAGE_ALIGNED_END ||
-           Boundary == FW_LOW_IMAGE_END;
+           Boundary == FW_EARLY_LOADER_WINDOW_END;
 }
 
 static BOOLEAN efi_memory_descriptors_can_merge(EFI_MEMORY_DESCRIPTOR *A,
@@ -12467,7 +12712,7 @@ static BOOLEAN efi_memory_map_has_boot_stack_layout(void)
 
     if (pointer_start == 0) {
         return efi_memory_map_has_descriptor(
-                   EfiConventionalMemory, FW_LOW_IMAGE_END,
+                   EfiConventionalMemory, FW_EARLY_LOADER_WINDOW_END,
                    mBootStackBase, EFI_MEMORY_WB) &&
                efi_memory_map_has_range_or_empty(
                    EfiConventionalMemory, mBootStackTop,
@@ -12482,7 +12727,7 @@ static BOOLEAN efi_memory_map_has_boot_stack_layout(void)
 
     if (pointer_start < mBootStackBase) {
         return efi_memory_map_has_range_or_empty(
-                   EfiConventionalMemory, FW_LOW_IMAGE_END,
+                   EfiConventionalMemory, FW_EARLY_LOADER_WINDOW_END,
                    pointer_start, EFI_MEMORY_WB) &&
                efi_memory_map_has_range_or_empty(
                    EfiConventionalMemory, pointer_end,
@@ -12493,7 +12738,7 @@ static BOOLEAN efi_memory_map_has_boot_stack_layout(void)
     }
 
     return efi_memory_map_has_descriptor(
-               EfiConventionalMemory, FW_LOW_IMAGE_END,
+               EfiConventionalMemory, FW_EARLY_LOADER_WINDOW_END,
                mBootStackBase, EFI_MEMORY_WB) &&
            efi_memory_map_has_range_or_empty(
                EfiConventionalMemory, mBootStackTop,
@@ -12515,7 +12760,6 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
     EFI_MEMORY_DESCRIPTOR before;
     EFI_MEMORY_DESCRIPTOR preserved;
     EFI_MEMORY_DESCRIPTOR legacy;
-    EFI_MEMORY_DESCRIPTOR aligned;
     EFI_MEMORY_DESCRIPTOR ordinary;
     EFI_MEMORY_DESCRIPTOR ordinary_next;
     UINTN saved_entries = mMemoryMapEntries;
@@ -12524,6 +12768,8 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
     EFI_PHYSICAL_ADDRESS expected_pool_address;
     EFI_PHYSICAL_ADDRESS failed_address;
     EFI_PHYSICAL_ADDRESS failed_next_page_addr;
+    EFI_PHYSICAL_ADDRESS automatic_any;
+    EFI_PHYSICAL_ADDRESS automatic_max;
     EFI_PHYSICAL_ADDRESS conventional_any;
     EFI_PHYSICAL_ADDRESS conventional_duplicate;
     EFI_PHYSICAL_ADDRESS conventional_max_one;
@@ -12615,9 +12861,10 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
     }
 
     before.Type = EfiConventionalMemory;
-    before.PhysicalStart = FW_LOW_FREE_BASE;
+    before.PhysicalStart = FW_EARLY_LOADER_WINDOW_BASE;
     before.VirtualStart = 0;
-    before.NumberOfPages = (FW_LOW_IMAGE_BASE - FW_LOW_FREE_BASE) >> 12;
+    before.NumberOfPages =
+        (FW_LOW_IMAGE_BASE - FW_EARLY_LOADER_WINDOW_BASE) >> 12;
     before.Attribute = EFI_MEMORY_WB;
 
     preserved = before;
@@ -12628,43 +12875,39 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
     legacy = before;
     legacy.PhysicalStart = FW_LOW_LEGACY_IMAGE_BASE;
     legacy.NumberOfPages =
-        (FW_LOW_IMAGE_ALIGNED_END - FW_LOW_LEGACY_IMAGE_BASE) >> 12;
-
-    aligned = before;
-    aligned.PhysicalStart = FW_LOW_IMAGE_ALIGNED_END;
-    aligned.NumberOfPages = (FW_LOW_IMAGE_END - FW_LOW_IMAGE_ALIGNED_END) >> 12;
+        (FW_EARLY_LOADER_WINDOW_END - FW_LOW_LEGACY_IMAGE_BASE) >> 12;
 
     if ((FW_LOW_IMAGE_BASE & (FW_LOW_IMAGE_ALIGN - 1ULL)) != 0 ||
-        (FW_LOW_IMAGE_ALIGNED_END & (FW_LOW_IMAGE_ALIGN - 1ULL)) != 0 ||
         FW_LOW_IMAGE_ALIGNED_END - FW_LOW_IMAGE_BASE != FW_LOW_IMAGE_ALIGN ||
-        FW_LOW_IMAGE_END <= FW_LOW_IMAGE_ALIGNED_END) {
+        FW_EARLY_LOADER_WINDOW_END <= FW_LOW_LEGACY_IMAGE_BASE) {
         ok = 0;
         goto out;
     }
 
-    if (mGuestLowRamEnd <= FW_LOW_IMAGE_END) {
+    if (mGuestLowRamEnd <= FW_AUTO_ALLOCATION_BASE) {
         ok = 0;
         goto out;
     }
     ordinary.Type = EfiConventionalMemory;
-    ordinary.PhysicalStart = FW_LOW_IMAGE_END;
+    ordinary.PhysicalStart = FW_EARLY_LOADER_WINDOW_END;
     ordinary.VirtualStart = 0;
     ordinary.NumberOfPages = 1;
     ordinary.Attribute = EFI_MEMORY_WB;
     ordinary_next = ordinary;
-    ordinary_next.PhysicalStart = FW_LOW_IMAGE_END + 0x1000ULL;
+    ordinary_next.PhysicalStart =
+        FW_EARLY_LOADER_WINDOW_END + 0x1000ULL;
 
-    if (!efi_memory_map_has_descriptor(EfiConventionalMemory,
+    if (!efi_memory_map_has_descriptor(
+            EfiConventionalMemory, FW_EARLY_LOADER_WINDOW_BASE,
+            FW_LOW_IMAGE_BASE, EFI_MEMORY_WB) ||
+        !efi_memory_map_has_descriptor(EfiConventionalMemory,
                                        FW_LOW_IMAGE_BASE,
                                        FW_LOW_LEGACY_IMAGE_BASE,
                                        EFI_MEMORY_WB) ||
         !efi_memory_map_has_descriptor(EfiConventionalMemory,
                                        FW_LOW_LEGACY_IMAGE_BASE,
-                                       FW_LOW_IMAGE_ALIGNED_END,
+                                       FW_EARLY_LOADER_WINDOW_END,
                                        EFI_MEMORY_WB) ||
-        !efi_memory_map_has_descriptor(EfiConventionalMemory,
-                                       FW_LOW_IMAGE_ALIGNED_END,
-                                       FW_LOW_IMAGE_END, EFI_MEMORY_WB) ||
         !efi_memory_map_has_boot_stack_layout() ||
         !efi_memory_map_has_descriptor(EfiMemoryMappedIO, IOSAPIC_BASE,
                                        IOSAPIC_BASE + IOSAPIC_SIZE,
@@ -12690,6 +12933,14 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
                                        LEGACY_IO_BASE,
                                        LEGACY_IO_SPARSE_LIMIT,
                                        EFI_MEMORY_UC | EFI_MEMORY_RUNTIME) ||
+        /*
+         * SAL 3.0 Table 3-6 maps firmware address space to
+         * EfiRuntimeServicesData, not EfiMemoryMappedIO.
+         */
+        !efi_memory_map_has_descriptor(
+            EfiRuntimeServicesData, FW_FIRMWARE_ADDRESS_SPACE_BASE,
+            FW_FIRMWARE_ADDRESS_SPACE_END,
+            EFI_MEMORY_UC | EFI_MEMORY_RUNTIME) ||
         !efi_memory_map_has_descriptor(EfiACPIMemoryNVS,
                                        ACPI_RECLAIM_BASE,
                                        ACPI_RECLAIM_TABLE_BASE,
@@ -12704,7 +12955,7 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
                                      EFI_MEMORY_WB | EFI_MEMORY_RUNTIME) ||
         efi_memory_descriptors_can_merge(&before, &preserved) ||
         efi_memory_descriptors_can_merge(&preserved, &legacy) ||
-        efi_memory_descriptors_can_merge(&legacy, &aligned) ||
+        efi_memory_descriptors_can_merge(&legacy, &ordinary) ||
         !efi_memory_descriptors_can_merge(&ordinary, &ordinary_next)) {
         ok = 0;
         goto out;
@@ -12719,15 +12970,43 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
         }
     }
 
-    /* Pool backing must not consume the low fixed-address candidate. */
-    loader_address = FW_LOW_IMAGE_END;
+    automatic_any = 0;
+    automatic_max = FW_EARLY_LOADER_WINDOW_END - 1U;
+    if (!efi_find_any_pages(
+            EFI_PAGE_SIZE,
+            efi_memory_type_allocation_granularity(EfiLoaderData),
+            &automatic_any) ||
+        automatic_any < FW_AUTO_ALLOCATION_BASE ||
+        ranges_overlap(automatic_any, EFI_PAGE_SIZE,
+                       FW_EARLY_LOADER_WINDOW_BASE,
+                       FW_EARLY_LOADER_WINDOW_END -
+                           FW_EARLY_LOADER_WINDOW_BASE) ||
+        !efi_find_max_pages(
+            automatic_max, EFI_PAGE_SIZE,
+            efi_memory_type_allocation_granularity(EfiLoaderData),
+            &automatic_max) ||
+        automatic_max + EFI_PAGE_SIZE > FW_EARLY_LOADER_WINDOW_BASE) {
+        ok = 0;
+        goto out;
+    }
+
+    /*
+     * Firmware-selected pool backing must stay out of the early loader's fixed
+     * window.  An exact AllocateAddress request inside that window remains
+     * legal.
+     */
+    loader_address = FW_EARLY_LOADER_WINDOW_BASE;
     if (!efi_range_is_available(loader_address,
                                 loader_address + EFI_PAGE_SIZE) ||
         !efi_find_pool_pages(EFI_POOL_CHUNK_SIZE,
                              efi_memory_type_allocation_granularity(
                                  EfiLoaderData),
                              &expected_pool_address) ||
-        expected_pool_address <= loader_address ||
+        expected_pool_address < FW_AUTO_ALLOCATION_BASE ||
+        ranges_overlap(expected_pool_address, EFI_POOL_CHUNK_SIZE,
+                       FW_EARLY_LOADER_WINDOW_BASE,
+                       FW_EARLY_LOADER_WINDOW_END -
+                           FW_EARLY_LOADER_WINDOW_BASE) ||
         bs_allocate_pool(EfiLoaderData, 17, &pool) != EFI_SUCCESS ||
         pool == NULL) {
         ok = 0;
@@ -12759,7 +13038,8 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
         goto out;
     }
 
-    runtime_address = FW_LOW_IMAGE_END + IA64_EFI_MEMORY_ALIGN;
+    runtime_address =
+        FW_EARLY_LOADER_WINDOW_END + IA64_EFI_MEMORY_ALIGN;
     loader_address = runtime_address - EFI_PAGE_SIZE;
     if (bs_allocate_pages(AllocateAddress, EfiLoaderData, 1,
                           &loader_address) != EFI_SUCCESS ||
@@ -12781,7 +13061,7 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
         goto out;
     }
 
-    runtime_address = FW_LOW_IMAGE_END + IA64_EFI_MEMORY_ALIGN +
+    runtime_address = FW_EARLY_LOADER_WINDOW_END + IA64_EFI_MEMORY_ALIGN +
                       EFI_PAGE_SIZE;
     if (bs_allocate_pages(AllocateAddress, EfiRuntimeServicesCode, 1,
                           &runtime_address) != EFI_NOT_FOUND ||
@@ -12794,7 +13074,8 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
         goto out;
     }
 
-    runtime_address = FW_LOW_IMAGE_END + 2U * IA64_EFI_MEMORY_ALIGN;
+    runtime_address = FW_EARLY_LOADER_WINDOW_END +
+                      2U * IA64_EFI_MEMORY_ALIGN;
     if (bs_allocate_pages(AllocateAddress, EfiACPIReclaimMemory, 1,
                           &runtime_address) != EFI_SUCCESS ||
         !efi_memory_map_has_descriptor(
@@ -12806,7 +13087,8 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
         goto out;
     }
 
-    runtime_address = FW_LOW_IMAGE_END + 3U * IA64_EFI_MEMORY_ALIGN;
+    runtime_address = FW_EARLY_LOADER_WINDOW_END +
+                      3U * IA64_EFI_MEMORY_ALIGN;
     pool = NULL;
     if (bs_allocate_pages(AllocateAddress, EfiMaxMemoryType, 1,
                           &runtime_address) != EFI_INVALID_PARAMETER ||
@@ -13090,7 +13372,7 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
     /* AllocatePages failure must not advance its cursor or record a page. */
     for (i = 0; i < MEMORY_MAP_MAX; i++) {
         mMemoryMap[i].Type = EfiReservedMemoryType;
-        mMemoryMap[i].PhysicalStart = 0x2000000ULL +
+        mMemoryMap[i].PhysicalStart = FW_AUTO_ALLOCATION_BASE +
                                       (UINT64)i * 0x10000ULL;
         mMemoryMap[i].VirtualStart = 0;
         mMemoryMap[i].NumberOfPages = 1;
@@ -13147,14 +13429,15 @@ static void efi_add_boot_stack_low_ram(UINTN *Index, UINT64 LowRamEnd)
 
     if (pointer_start != 0 && pointer_start < mBootStackBase) {
         efi_add_memory_range(Index, EfiConventionalMemory,
-                             FW_LOW_IMAGE_END, pointer_start, EFI_MEMORY_WB);
+                             FW_EARLY_LOADER_WINDOW_END, pointer_start,
+                             EFI_MEMORY_WB);
         efi_add_memory_range(Index, EfiReservedMemoryType,
                              pointer_start, pointer_end, EFI_MEMORY_WB);
         efi_add_memory_range(Index, EfiConventionalMemory,
                              pointer_end, mBootStackBase, EFI_MEMORY_WB);
     } else {
         efi_add_memory_range(Index, EfiConventionalMemory,
-                             FW_LOW_IMAGE_END, mBootStackBase,
+                             FW_EARLY_LOADER_WINDOW_END, mBootStackBase,
                              EFI_MEMORY_WB);
     }
 
@@ -13244,10 +13527,9 @@ static void efi_init_memory_map(void)
     }
 
     /*
-     * IA-64 loaders commonly build page lists from EFI descriptors before
-     * reserving image pages.  Expose the natural 32 MiB/64 MiB low-image
-     * boundaries while also keeping the legacy 48 MiB/80 MiB staging bounds
-     * visible as descriptor boundaries.
+     * Some early IA-64 loaders reserve fixed physical windows from 16 MiB
+     * through 80 MiB.  Publish those pages as free memory, with 48--80 MiB in
+     * one descriptor, and keep firmware-selected allocations elsewhere.
      */
     efi_add_memory_range(&index, EfiConventionalMemory, firmware_end,
                          FW_LOW_RECLAIM_BASE, EFI_MEMORY_WB);
@@ -13257,17 +13539,15 @@ static void efi_init_memory_map(void)
                          ACPI_RECLAIM_TABLE_BASE, ACPI_RECLAIM_END,
                          EFI_MEMORY_WB);
     efi_add_memory_range(&index, EfiConventionalMemory, ACPI_RECLAIM_END,
-                         FW_LOW_FREE_BASE, EFI_MEMORY_WB);
-    efi_add_memory_range(&index, EfiConventionalMemory, FW_LOW_FREE_BASE,
+                         FW_EARLY_LOADER_WINDOW_BASE, EFI_MEMORY_WB);
+    efi_add_memory_range(&index, EfiConventionalMemory,
+                         FW_EARLY_LOADER_WINDOW_BASE,
                          FW_LOW_IMAGE_BASE, EFI_MEMORY_WB);
     efi_add_memory_range(&index, EfiConventionalMemory, FW_LOW_IMAGE_BASE,
                          FW_LOW_LEGACY_IMAGE_BASE, EFI_MEMORY_WB);
     efi_add_memory_range(&index, EfiConventionalMemory,
                          FW_LOW_LEGACY_IMAGE_BASE,
-                         FW_LOW_IMAGE_ALIGNED_END, EFI_MEMORY_WB);
-    efi_add_memory_range(&index, EfiConventionalMemory,
-                         FW_LOW_IMAGE_ALIGNED_END,
-                         FW_LOW_IMAGE_END, EFI_MEMORY_WB);
+                         FW_EARLY_LOADER_WINDOW_END, EFI_MEMORY_WB);
     /*
      * SAL reuses each processor's RAM-top stack after ExitBootServices(), so
      * keep the entire stack pool as runtime data.  AllocatePool() uses only
@@ -13307,21 +13587,17 @@ static void efi_init_memory_map(void)
                          IA64_PCI_MMIO_BASE + IA64_PCI_MMIO_SIZE,
                          EFI_MEMORY_UC);
 
-    efi_add_memory_range(&index, EfiMemoryMappedIO,
-                         FW_FIRMWARE_ADDRESS_SPACE_BASE,
-                         FW_RTC_BASE, EFI_MEMORY_UC);
-    efi_add_memory_range(&index, EfiMemoryMappedIO,
-                         FW_RTC_BASE, FW_RTC_BASE + FW_RTC_SIZE,
-                         EFI_MEMORY_UC | EFI_MEMORY_RUNTIME);
-    efi_add_memory_range(&index, EfiMemoryMappedIO,
-                         FW_RTC_BASE + FW_RTC_SIZE,
-                         FW_NVRAM_BASE, EFI_MEMORY_UC);
-    efi_add_memory_range(&index, EfiMemoryMappedIO,
-                         FW_NVRAM_BASE, FW_NVRAM_BASE + FW_NVRAM_SIZE,
-                         EFI_MEMORY_UC | EFI_MEMORY_RUNTIME);
-    efi_add_memory_range(&index, EfiMemoryMappedIO,
-                         FW_NVRAM_BASE + FW_NVRAM_SIZE,
-                         FW_FIRMWARE_ADDRESS_SPACE_END, EFI_MEMORY_UC);
+    /*
+     * This is the SAL-defined firmware address space, including the RTC and
+     * NVRAM windows used by runtime services.  SAL 3.0 Table 3-6 requires a
+     * firmware-address-space MDT range to appear to EFI as runtime-services
+     * data; publishing selected device pages as MMIO would lose that
+     * one-to-one contract.
+     */
+    efi_add_memory_range(
+        &index, EfiRuntimeServicesData,
+        FW_FIRMWARE_ADDRESS_SPACE_BASE, FW_FIRMWARE_ADDRESS_SPACE_END,
+        efi_memory_attribute(EfiRuntimeServicesData, EFI_MEMORY_UC));
 
     /* Reserve both platform UART pages described by HCDP and DBGP. */
     efi_add_memory_range(&index, EfiMemoryMappedIO, IA64_UART_BASE,
@@ -14121,6 +14397,507 @@ static BOOLEAN __attribute__((noinline)) smbios_table_integrity_selftest(void)
            RequiredTypes == 0x3ff;
 }
 
+static BOOLEAN sal_table_append_entry(UINT8 **Cursor, const VOID *Entry,
+                                      UINTN EntrySize)
+{
+    UINT8 *limit = (UINT8 *)&mSalSystemTable + sizeof(mSalSystemTable);
+
+    if (Cursor == NULL || *Cursor > limit ||
+        EntrySize > (UINTN)(limit - *Cursor)) {
+        return 0;
+    }
+    fw_copy_mem(*Cursor, Entry, EntrySize);
+    *Cursor += EntrySize;
+    return 1;
+}
+
+static BOOLEAN sal_efi_memory_attribute(UINT64 EfiAttribute,
+                                        UINT8 *Current,
+                                        UINT8 *Supported)
+{
+    UINT64 cache_attribute = EfiAttribute & (EFI_MEMORY_WB | EFI_MEMORY_UC);
+
+    if (cache_attribute == EFI_MEMORY_WB) {
+        *Current = SAL_MEMORY_ATTRIBUTE_WB;
+        *Supported = SAL_MEMORY_SUPPORTS_WB;
+        return 1;
+    }
+    if (cache_attribute == EFI_MEMORY_UC) {
+        *Current = SAL_MEMORY_ATTRIBUTE_UC;
+        *Supported = SAL_MEMORY_SUPPORTS_UC;
+        return 1;
+    }
+    return 0;
+}
+
+static UINT8 sal_memory_page_access(UINT8 MemoryType, UINT8 MemoryUsage)
+{
+    if (MemoryType == SAL_MEMORY_TYPE_NONEXISTENT) {
+        return SAL_PAGE_ACCESS_READ;
+    }
+    if (MemoryType == SAL_MEMORY_TYPE_REGULAR &&
+        (MemoryUsage == SAL_MEMORY_USAGE_PAL_CODE ||
+         MemoryUsage == SAL_MEMORY_USAGE_BOOT_CODE ||
+         MemoryUsage == SAL_MEMORY_USAGE_RUNTIME_CODE)) {
+        return SAL_PAGE_ACCESS_RX;
+    }
+    return SAL_PAGE_ACCESS_RW;
+}
+
+static void sal_limit_segment_end(UINT64 Start, UINT64 Boundary,
+                                  UINT64 *End)
+{
+    if (Boundary > Start && Boundary < *End) {
+        *End = Boundary;
+    }
+}
+
+static UINT64 sal_memory_segment_end(UINT64 Start, UINT64 End)
+{
+    UINT64 pal_start = (UINTN)pal_proc_entry & ~0xfffULL;
+    UINT64 pal_end = pal_start + EFI_PAGE_SIZE;
+    UINT64 runtime_code_start = (UINTN)&__runtime_code_start;
+    UINT64 runtime_data_start = (UINTN)&__runtime_data_start;
+    UINT64 firmware_end = ((UINTN)&_end + 0x1fffU) & ~0x1fffULL;
+
+    sal_limit_segment_end(Start, pal_start, &End);
+    sal_limit_segment_end(Start, pal_end, &End);
+    sal_limit_segment_end(Start, runtime_code_start, &End);
+    sal_limit_segment_end(Start, runtime_data_start, &End);
+    sal_limit_segment_end(Start, firmware_end, &End);
+    sal_limit_segment_end(Start, FW_LOCAL_SAPIC_BASE, &End);
+    sal_limit_segment_end(Start, FW_LOCAL_SAPIC_BASE +
+                         FW_LOCAL_SAPIC_SIZE, &End);
+    sal_limit_segment_end(Start, FW_FIRMWARE_ADDRESS_SPACE_BASE, &End);
+    sal_limit_segment_end(Start, FW_FIRMWARE_ADDRESS_SPACE_END, &End);
+    return End;
+}
+
+static BOOLEAN sal_memory_segment_metadata(
+    const EFI_MEMORY_DESCRIPTOR *EfiDescriptor, UINT64 Address,
+    UINT8 *NeedVirtualAddress, UINT8 *CurrentMemoryAttribute,
+    UINT8 *PageAccessRights, UINT8 *SupportedMemoryAttributes,
+    UINT8 *MemoryType, UINT8 *MemoryUsage)
+{
+    UINT64 pal_start = (UINTN)pal_proc_entry & ~0xfffULL;
+    UINT64 pal_end = pal_start + EFI_PAGE_SIZE;
+    UINT64 runtime_code_start = (UINTN)&__runtime_code_start;
+    UINT64 runtime_data_start = (UINTN)&__runtime_data_start;
+    UINT64 firmware_end = ((UINTN)&_end + 0x1fffU) & ~0x1fffULL;
+
+    *NeedVirtualAddress =
+        (EfiDescriptor->Attribute & EFI_MEMORY_RUNTIME) != 0;
+    if (!sal_efi_memory_attribute(EfiDescriptor->Attribute,
+                                  CurrentMemoryAttribute,
+                                  SupportedMemoryAttributes)) {
+        return 0;
+    }
+
+    if (Address >= pal_start && Address < pal_end) {
+        *MemoryType = SAL_MEMORY_TYPE_REGULAR;
+        *MemoryUsage = SAL_MEMORY_USAGE_PAL_CODE;
+        *NeedVirtualAddress = 0;
+    } else if (Address >= runtime_code_start &&
+               Address < runtime_data_start) {
+        *MemoryType = SAL_MEMORY_TYPE_REGULAR;
+        *MemoryUsage = SAL_MEMORY_USAGE_RUNTIME_CODE;
+        *NeedVirtualAddress = 1;
+    } else if (Address >= runtime_data_start && Address < firmware_end) {
+        *MemoryType = SAL_MEMORY_TYPE_REGULAR;
+        *MemoryUsage = SAL_MEMORY_USAGE_RUNTIME_DATA;
+        *NeedVirtualAddress = 1;
+    } else if (Address >= FW_LOCAL_SAPIC_BASE &&
+               Address < FW_LOCAL_SAPIC_BASE + FW_LOCAL_SAPIC_SIZE) {
+        *MemoryType = SAL_MEMORY_TYPE_SAPIC;
+        *MemoryUsage = SAL_MEMORY_USAGE_UNSPECIFIED;
+    } else if (Address >= FW_FIRMWARE_ADDRESS_SPACE_BASE &&
+               Address < FW_FIRMWARE_ADDRESS_SPACE_END) {
+        *MemoryType = SAL_MEMORY_TYPE_FIRMWARE;
+        *MemoryUsage = SAL_MEMORY_USAGE_UNSPECIFIED;
+        *NeedVirtualAddress = 1;
+    } else {
+        switch (EfiDescriptor->Type) {
+        case EfiConventionalMemory:
+            *MemoryType = SAL_MEMORY_TYPE_REGULAR;
+            *MemoryUsage = SAL_MEMORY_USAGE_UNSPECIFIED;
+            break;
+        case EfiLoaderCode:
+        case EfiBootServicesCode:
+            *MemoryType = SAL_MEMORY_TYPE_REGULAR;
+            *MemoryUsage = SAL_MEMORY_USAGE_BOOT_CODE;
+            break;
+        case EfiLoaderData:
+        case EfiBootServicesData:
+            *MemoryType = SAL_MEMORY_TYPE_REGULAR;
+            *MemoryUsage = SAL_MEMORY_USAGE_BOOT_DATA;
+            break;
+        case EfiRuntimeServicesCode:
+            *MemoryType = SAL_MEMORY_TYPE_REGULAR;
+            *MemoryUsage = SAL_MEMORY_USAGE_RUNTIME_CODE;
+            break;
+        case EfiRuntimeServicesData:
+            /*
+             * Runtime data outside the linked SAL data image is private
+             * firmware storage (for example, the SAL stacks).  SAL 3.0
+             * Table 3-6 maps both usage 5 and usage 12 to
+             * EfiRuntimeServicesData.  Keeping the distinction here also
+             * leaves exactly one SAL runtime-data image for old consumers
+             * that retain only the last descriptor of each usage.
+             */
+            *MemoryType = SAL_MEMORY_TYPE_REGULAR;
+            *MemoryUsage = SAL_MEMORY_USAGE_RESERVED;
+            break;
+        case EfiACPIReclaimMemory:
+            *MemoryType = SAL_MEMORY_TYPE_REGULAR;
+            *MemoryUsage = SAL_MEMORY_USAGE_ACPI_RECLAIM;
+            break;
+        case EfiACPIMemoryNVS:
+            *MemoryType = SAL_MEMORY_TYPE_REGULAR;
+            *MemoryUsage = SAL_MEMORY_USAGE_ACPI_NVS;
+            break;
+        case EfiReservedMemoryType:
+            *MemoryType = SAL_MEMORY_TYPE_REGULAR;
+            *MemoryUsage = SAL_MEMORY_USAGE_RESERVED;
+            break;
+        case EfiUnusableMemory:
+            *MemoryType = SAL_MEMORY_TYPE_BAD;
+            *MemoryUsage = SAL_MEMORY_USAGE_UNSPECIFIED;
+            break;
+        case EfiMemoryMappedIO:
+            *MemoryType = SAL_MEMORY_TYPE_MMIO;
+            *MemoryUsage = SAL_MEMORY_USAGE_UNSPECIFIED;
+            break;
+        case EfiMemoryMappedIOPortSpace:
+            *MemoryType = SAL_MEMORY_TYPE_IO_PORT;
+            *MemoryUsage = SAL_MEMORY_USAGE_UNSPECIFIED;
+            break;
+        case EfiPalCode:
+            *MemoryType = SAL_MEMORY_TYPE_REGULAR;
+            *MemoryUsage = SAL_MEMORY_USAGE_PAL_CODE;
+            break;
+        default:
+            *MemoryType = SAL_MEMORY_TYPE_REGULAR;
+            *MemoryUsage = SAL_MEMORY_USAGE_RESERVED;
+            break;
+        }
+    }
+
+    *PageAccessRights =
+        sal_memory_page_access(*MemoryType, *MemoryUsage);
+    return 1;
+}
+
+static BOOLEAN sal_memory_descriptor_metadata_equal(
+    const IA64_SAL_MEMORY_DESCRIPTOR *A,
+    const IA64_SAL_MEMORY_DESCRIPTOR *B)
+{
+    return A->NeedVirtualAddress == B->NeedVirtualAddress &&
+           A->CurrentMemoryAttribute == B->CurrentMemoryAttribute &&
+           A->PageAccessRights == B->PageAccessRights &&
+           A->SupportedMemoryAttributes == B->SupportedMemoryAttributes &&
+           A->MemoryType == B->MemoryType &&
+           A->MemoryUsage == B->MemoryUsage;
+}
+
+static BOOLEAN sal_table_append_memory_range(
+    UINT8 **Cursor, UINTN *MemoryDescriptorCount, UINT64 Start, UINT64 End,
+    UINT8 NeedVirtualAddress, UINT8 CurrentMemoryAttribute,
+    UINT8 PageAccessRights, UINT8 SupportedMemoryAttributes,
+    UINT8 MemoryType, UINT8 MemoryUsage)
+{
+    IA64_SAL_MEMORY_DESCRIPTOR descriptor;
+
+    if (End <= Start || (Start & (EFI_PAGE_SIZE - 1U)) != 0 ||
+        (End & (EFI_PAGE_SIZE - 1U)) != 0) {
+        return 0;
+    }
+
+    fw_set_mem(&descriptor, sizeof(descriptor), 0);
+    descriptor.Type = SAL_DESCRIPTOR_MEMORY;
+    descriptor.NeedVirtualAddress = NeedVirtualAddress;
+    descriptor.CurrentMemoryAttribute = CurrentMemoryAttribute;
+    descriptor.PageAccessRights = PageAccessRights;
+    descriptor.SupportedMemoryAttributes = SupportedMemoryAttributes;
+    descriptor.MemoryType = MemoryType;
+    descriptor.MemoryUsage = MemoryUsage;
+
+    while (Start < End) {
+        UINT64 remaining_pages = (End - Start) >> 12;
+        UINT64 pages;
+
+        if (*MemoryDescriptorCount != 0) {
+            IA64_SAL_MEMORY_DESCRIPTOR *previous =
+                (IA64_SAL_MEMORY_DESCRIPTOR *)
+                (*Cursor - sizeof(IA64_SAL_MEMORY_DESCRIPTOR));
+            UINT64 previous_end =
+                previous->PhysicalAddress +
+                ((UINT64)previous->PageCount << 12);
+            UINT64 capacity = 0xffffffffULL - previous->PageCount;
+
+            descriptor.PhysicalAddress = Start;
+            if (previous_end == Start && capacity != 0 &&
+                sal_memory_descriptor_metadata_equal(previous,
+                                                     &descriptor)) {
+                pages = remaining_pages < capacity ?
+                    remaining_pages : capacity;
+                previous->PageCount += (UINT32)pages;
+                Start += pages << 12;
+                continue;
+            }
+        }
+
+        if (*MemoryDescriptorCount >= SAL_MEMORY_DESCRIPTOR_MAX) {
+            return 0;
+        }
+        pages = remaining_pages < 0xffffffffULL ?
+            remaining_pages : 0xffffffffULL;
+        descriptor.PhysicalAddress = Start;
+        descriptor.PageCount = (UINT32)pages;
+        if (!sal_table_append_entry(Cursor, &descriptor,
+                                    sizeof(descriptor))) {
+            return 0;
+        }
+        (*MemoryDescriptorCount)++;
+        Start += pages << 12;
+    }
+    return 1;
+}
+
+static BOOLEAN sal_table_append_nonexistent_range(
+    UINT8 **Cursor, UINTN *MemoryDescriptorCount, UINT64 Start, UINT64 End)
+{
+    return sal_table_append_memory_range(
+        Cursor, MemoryDescriptorCount, Start, End, 0,
+        SAL_MEMORY_ATTRIBUTE_UC, SAL_PAGE_ACCESS_READ,
+        SAL_MEMORY_SUPPORTS_UC, SAL_MEMORY_TYPE_NONEXISTENT,
+        SAL_MEMORY_USAGE_UNSPECIFIED);
+}
+
+static UINT64 sal_processor_version(void)
+{
+    UINT64 version;
+    UINTN index = 3;
+
+    __asm__ volatile ("mov %0 = cpuid[%1]" : "=r"(version) : "r"(index));
+    return version;
+}
+
+static BOOLEAN sal_use_merced_compatibility_mdt(void)
+{
+    /*
+     * CPUID[3].family occupies bits 31:24.  Family 7 identifies Merced;
+     * later processor implementations use different family numbers.
+     */
+    return ((sal_processor_version() >> 24) & 0xffU) == 7U;
+}
+
+static BOOLEAN sal_table_append_merced_compatibility_mdt(
+    UINT8 **Cursor, UINTN *MemoryDescriptorCount)
+{
+    UINT64 pal_start = (UINTN)pal_proc_entry & ~0xfffULL;
+    UINT64 pal_end = pal_start + EFI_PAGE_SIZE;
+    UINT64 runtime_code_start = (UINTN)&__runtime_code_start;
+    UINT64 runtime_data_start = (UINTN)&__runtime_data_start;
+    UINT64 firmware_end = ((UINTN)&_end + 0x1fffU) & ~0x1fffULL;
+
+    /*
+     * SAL 3.0 section 3.2.7.2 reserves the MDT for booting IA-32 operating
+     * systems; an IA-64 operating system obtains this information from EFI.
+     * Released Merced-era IA-64 HALs nevertheless require these five
+     * firmware records, and malfunction if the MDT duplicates EFI's normal
+     * RAM map.  Publish only the historical compatibility records on family
+     * 7 processors while leaving the specification-complete MDT in place for
+     * later processor generations.
+     */
+    return sal_table_append_memory_range(
+               Cursor, MemoryDescriptorCount, pal_start, pal_end, 0,
+               SAL_MEMORY_ATTRIBUTE_WB, SAL_PAGE_ACCESS_RX,
+               SAL_MEMORY_SUPPORTS_WB, SAL_MEMORY_TYPE_REGULAR,
+               SAL_MEMORY_USAGE_PAL_CODE) &&
+           sal_table_append_memory_range(
+               Cursor, MemoryDescriptorCount, pal_end, runtime_code_start, 0,
+               SAL_MEMORY_ATTRIBUTE_WB, SAL_PAGE_ACCESS_RX,
+               SAL_MEMORY_SUPPORTS_WB, SAL_MEMORY_TYPE_REGULAR,
+               SAL_MEMORY_USAGE_BOOT_CODE) &&
+           sal_table_append_memory_range(
+               Cursor, MemoryDescriptorCount, runtime_code_start,
+               runtime_data_start, 1, SAL_MEMORY_ATTRIBUTE_WB,
+               SAL_PAGE_ACCESS_RX, SAL_MEMORY_SUPPORTS_WB,
+               SAL_MEMORY_TYPE_REGULAR, SAL_MEMORY_USAGE_RUNTIME_CODE) &&
+           sal_table_append_memory_range(
+               Cursor, MemoryDescriptorCount, runtime_data_start,
+               firmware_end, 1, SAL_MEMORY_ATTRIBUTE_WB,
+               SAL_PAGE_ACCESS_RW, SAL_MEMORY_SUPPORTS_WB,
+               SAL_MEMORY_TYPE_REGULAR, SAL_MEMORY_USAGE_RUNTIME_DATA) &&
+           sal_table_append_memory_range(
+               Cursor, MemoryDescriptorCount,
+               FW_FIRMWARE_ADDRESS_SPACE_BASE,
+               FW_FIRMWARE_ADDRESS_SPACE_END, 1,
+               SAL_MEMORY_ATTRIBUTE_UC, SAL_PAGE_ACCESS_RW,
+               SAL_MEMORY_SUPPORTS_UC, SAL_MEMORY_TYPE_FIRMWARE,
+               SAL_MEMORY_USAGE_UNSPECIFIED);
+}
+
+static BOOLEAN sal_table_append_memory_descriptors(
+    UINT8 **Cursor, UINTN *MemoryDescriptorCount)
+{
+    UINT64 covered_end = 0;
+    UINTN i;
+
+    if (sal_use_merced_compatibility_mdt()) {
+        return sal_table_append_merced_compatibility_mdt(
+            Cursor, MemoryDescriptorCount);
+    }
+
+    /*
+     * SAL 3.0 section 3.2.7 says Type 1 MDT entries are not required for an
+     * IA-64 operating system.  Nevertheless, an early IA-64 HAL rejects the
+     * SAL table unless it finds PAL code, SAL runtime code/data, and
+     * firmware-address-space MDT records.  No public specification found so
+     * far explains that stricter historical platform expectation.
+     *
+     * Outside the Merced compatibility path above, section 3.2.7.2 requires
+     * an MDT, when present, to cover the entire system address space.
+     * Generate a physically ordered, gap-free 44-bit platform map and
+     * describe every hole explicitly as non-existent memory.
+     */
+    for (i = 0; i < mMemoryMapEntries; i++) {
+        const EFI_MEMORY_DESCRIPTOR *efi = &mMemoryMap[i];
+        UINT64 start = efi->PhysicalStart;
+        UINT64 end;
+
+        if (efi->NumberOfPages == 0 ||
+            start >= SAL_SYSTEM_ADDRESS_LIMIT ||
+            efi->NumberOfPages >
+                (SAL_SYSTEM_ADDRESS_LIMIT - start) / EFI_PAGE_SIZE) {
+            return 0;
+        }
+        end = start + (efi->NumberOfPages << 12);
+        if (start < covered_end || end > SAL_SYSTEM_ADDRESS_LIMIT) {
+            return 0;
+        }
+        if (start > covered_end &&
+            !sal_table_append_nonexistent_range(
+                Cursor, MemoryDescriptorCount, covered_end, start)) {
+            return 0;
+        }
+
+        while (start < end) {
+            UINT64 segment_end = sal_memory_segment_end(start, end);
+            UINT8 need_virtual_address;
+            UINT8 current_memory_attribute;
+            UINT8 page_access_rights;
+            UINT8 supported_memory_attributes;
+            UINT8 memory_type;
+            UINT8 memory_usage;
+
+            if (segment_end <= start ||
+                !sal_memory_segment_metadata(
+                    efi, start, &need_virtual_address,
+                    &current_memory_attribute, &page_access_rights,
+                    &supported_memory_attributes, &memory_type,
+                    &memory_usage) ||
+                !sal_table_append_memory_range(
+                    Cursor, MemoryDescriptorCount, start, segment_end,
+                    need_virtual_address, current_memory_attribute,
+                    page_access_rights, supported_memory_attributes,
+                    memory_type, memory_usage)) {
+                return 0;
+            }
+            start = segment_end;
+        }
+        covered_end = end;
+    }
+
+    return covered_end == SAL_SYSTEM_ADDRESS_LIMIT ||
+           sal_table_append_nonexistent_range(
+               Cursor, MemoryDescriptorCount, covered_end,
+               SAL_SYSTEM_ADDRESS_LIMIT);
+}
+
+static BOOLEAN sal_build_system_table(void)
+{
+    IA64_SAL_SYSTEM_TABLE_HEADER *header = &mSalSystemTable.Header;
+    IA64_SAL_ENTRYPOINT_DESCRIPTOR entrypoint;
+    IA64_SAL_PLATFORM_FEATURES_DESCRIPTOR features;
+    IA64_SAL_TR_DESCRIPTOR translation_register;
+    IA64_SAL_AP_WAKE_DESCRIPTOR ap_wake;
+    UINT8 *cursor = mSalSystemTable.Entries;
+    UINT8 *table_start = (UINT8 *)&mSalSystemTable;
+    UINTN memory_descriptor_count = 0;
+    UINTN i;
+
+    fw_set_mem(&mSalSystemTable, sizeof(mSalSystemTable), 0);
+    header->Signature = EFI_SIGNATURE_32('S', 'S', 'T', '_');
+    header->Revision = SAL_REVISION;
+    header->SalAVersion = 0x0100;
+    header->SalBVersion = 0x0100;
+    header->OemId[0] = 'Q';
+    header->OemId[1] = 'E';
+    header->OemId[2] = 'M';
+    header->OemId[3] = 'U';
+    header->ProductId[0] = 'I';
+    header->ProductId[1] = 'A';
+    header->ProductId[2] = '-';
+    header->ProductId[3] = '6';
+    header->ProductId[4] = '4';
+
+    fw_set_mem(&entrypoint, sizeof(entrypoint), 0);
+    entrypoint.Type = SAL_DESCRIPTOR_ENTRYPOINT;
+    entrypoint.PalProc = (UINTN)pal_proc_entry;
+    /*
+     * sal_proc_entry and sal_proc_gp_anchor are raw assembly symbols, not
+     * IA-64 C function descriptors.  The code-side GP anchor is intentional:
+     * the entry stub uses its relocation to tolerate a released HAL that
+     * applies the runtime-code mapping to the advertised SAL GP.
+     */
+    entrypoint.SalProc = (UINTN)sal_proc_entry;
+    entrypoint.SalGp = (UINTN)sal_proc_gp_anchor;
+    if (!sal_table_append_entry(&cursor, &entrypoint,
+                                sizeof(entrypoint)) ||
+        !sal_table_append_memory_descriptors(
+            &cursor, &memory_descriptor_count)) {
+        return 0;
+    }
+
+    fw_set_mem(&features, sizeof(features), 0);
+    features.Type = SAL_DESCRIPTOR_FEATURES;
+    if (!sal_table_append_entry(&cursor, &features, sizeof(features))) {
+        return 0;
+    }
+
+    fw_set_mem(&translation_register, sizeof(translation_register), 0);
+    translation_register.Type = SAL_DESCRIPTOR_TR;
+    translation_register.RegisterType = 0;
+    translation_register.RegisterNumber = 0;
+    translation_register.VirtualAddress = SAL_TR_VIRTUAL_ADDRESS;
+    translation_register.EncodedPageSize = SAL_TR_ENCODED_PAGE_SIZE;
+    if (!sal_table_append_entry(&cursor, &translation_register,
+                                sizeof(translation_register))) {
+        return 0;
+    }
+
+    fw_set_mem(&ap_wake, sizeof(ap_wake), 0);
+    ap_wake.Type = SAL_DESCRIPTOR_AP_WAKE;
+    ap_wake.Mechanism = 0;
+    ap_wake.Vector = 0xff;
+    if (!sal_table_append_entry(&cursor, &ap_wake, sizeof(ap_wake))) {
+        return 0;
+    }
+
+    header->Length = (UINT32)(cursor - table_start);
+    header->EntryCount = (UINT16)(memory_descriptor_count + 4U);
+    header->Checksum = 0;
+    header->Checksum = table_checksum8(table_start, header->Length);
+
+    for (i = header->Length; i < sizeof(mSalSystemTable); i++) {
+        if (table_start[i] != 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static void efi_init_platform_tables(void)
 {
     UINTN i;
@@ -14133,70 +14910,7 @@ static void efi_init_platform_tables(void)
 
     (void)acpi_assign_reclaim_tables();
 
-    mSalSystemTable.Signature = EFI_SIGNATURE_32('S', 'S', 'T', '_');
-    mSalSystemTable.Length = sizeof(mSalSystemTable);
-    mSalSystemTable.Revision = SAL_REVISION;
-    mSalSystemTable.EntryCount = 4;
-    mSalSystemTable.Checksum = 0;
-    for (i = 0; i < sizeof(mSalSystemTable.Reserved0); i++) {
-        mSalSystemTable.Reserved0[i] = 0;
-    }
-    mSalSystemTable.SalAVersion = 0x0100;
-    mSalSystemTable.SalBVersion = 0x0100;
-    for (i = 0; i < sizeof(mSalSystemTable.OemId); i++) {
-        mSalSystemTable.OemId[i] = 0;
-    }
-    mSalSystemTable.OemId[0] = 'Q';
-    mSalSystemTable.OemId[1] = 'E';
-    mSalSystemTable.OemId[2] = 'M';
-    mSalSystemTable.OemId[3] = 'U';
-    for (i = 0; i < sizeof(mSalSystemTable.ProductId); i++) {
-        mSalSystemTable.ProductId[i] = 0;
-    }
-    mSalSystemTable.ProductId[0] = 'I';
-    mSalSystemTable.ProductId[1] = 'A';
-    mSalSystemTable.ProductId[2] = '-';
-    mSalSystemTable.ProductId[3] = '6';
-    mSalSystemTable.ProductId[4] = '4';
-    for (i = 0; i < sizeof(mSalSystemTable.Reserved1); i++) {
-        mSalSystemTable.Reserved1[i] = 0;
-    }
-    mSalSystemTable.Entrypoint.Type = 0;
-    for (i = 0; i < sizeof(mSalSystemTable.Entrypoint.Reserved0); i++) {
-        mSalSystemTable.Entrypoint.Reserved0[i] = 0;
-    }
-    mSalSystemTable.Entrypoint.PalProc = (UINTN)pal_proc_entry;
-    mSalSystemTable.Entrypoint.SalProc =
-        fw_function_entry((UINTN)sal_proc_entry);
-    mSalSystemTable.Entrypoint.SalGp = fw_current_gp();
-    for (i = 0; i < sizeof(mSalSystemTable.Entrypoint.Reserved1); i++) {
-        mSalSystemTable.Entrypoint.Reserved1[i] = 0;
-    }
-    mSalSystemTable.PlatformFeatures.Type = 2;
-    mSalSystemTable.PlatformFeatures.Features = 0;
-    for (i = 0; i < sizeof(mSalSystemTable.PlatformFeatures.Reserved); i++) {
-        mSalSystemTable.PlatformFeatures.Reserved[i] = 0;
-    }
-    mSalSystemTable.TranslationRegister.Type = 3;
-    mSalSystemTable.TranslationRegister.RegisterType = 0;
-    mSalSystemTable.TranslationRegister.RegisterNumber = 0;
-    for (i = 0;
-         i < sizeof(mSalSystemTable.TranslationRegister.Reserved0); i++) {
-        mSalSystemTable.TranslationRegister.Reserved0[i] = 0;
-    }
-    mSalSystemTable.TranslationRegister.VirtualAddress =
-        SAL_TR_VIRTUAL_ADDRESS;
-    mSalSystemTable.TranslationRegister.EncodedPageSize =
-        SAL_TR_ENCODED_PAGE_SIZE;
-    mSalSystemTable.TranslationRegister.Reserved1 = 0;
-    mSalSystemTable.ApWake.Type = 5;
-    mSalSystemTable.ApWake.Mechanism = 0;
-    for (i = 0; i < sizeof(mSalSystemTable.ApWake.Reserved); i++) {
-        mSalSystemTable.ApWake.Reserved[i] = 0;
-    }
-    mSalSystemTable.ApWake.Vector = 0xff;
-    mSalSystemTable.Checksum =
-        table_checksum8(&mSalSystemTable, sizeof(mSalSystemTable));
+    mSalSystemTableValid = sal_build_system_table();
 
     mFacs.Signature = EFI_SIGNATURE_32('F', 'A', 'C', 'S');
     mFacs.Length = sizeof(mFacs);
@@ -14412,13 +15126,17 @@ static void efi_init_platform_tables(void)
     mHcdp.Uart[0].PciDevice = 0;
     mHcdp.Uart[0].PciFunction = 0;
     mHcdp.Uart[0].Baud = 115200;
-    mHcdp.Uart[0].BaseAddress.SpaceId = 0;
+    /*
+     * Publish the standard PNP0501 COM1 interface.  QEMU also retains the
+     * old MMIO decode used internally by this firmware, but it is intentionally
+     * absent from ACPI/HCDP so an OS sees one coherent console resource.
+     */
+    mHcdp.Uart[0].BaseAddress.SpaceId = ACPI_GAS_SYSTEM_IO;
     mHcdp.Uart[0].BaseAddress.BitWidth = 8;
     mHcdp.Uart[0].BaseAddress.BitOffset = 0;
     mHcdp.Uart[0].BaseAddress.Reserved = 0;
-    mHcdp.Uart[0].BaseAddress.AddressLow = (UINT32)IA64_UART_BASE;
-    mHcdp.Uart[0].BaseAddress.AddressHigh =
-        (UINT32)(IA64_UART_BASE >> 32);
+    mHcdp.Uart[0].BaseAddress.AddressLow = (UINT32)IA64_UART_IO_PORT;
+    mHcdp.Uart[0].BaseAddress.AddressHigh = 0;
     /* With the PCI flag clear, these fields carry ACPI _HID and _UID. */
     mHcdp.Uart[0].PciDeviceId =
         (UINT16)HCDP_UART_ACPI_HID_PNP0501;
@@ -14428,7 +15146,7 @@ static void efi_init_platform_tables(void)
     mHcdp.Uart[0].ClockRate = HCDP_UART_PSEUDO_CLOCK_RATE;
     mHcdp.Uart[0].PciProgrammingInterface = 0x02;
     mHcdp.Uart[0].Flags =
-        HCDP_UART_FLAG_ACTIVE_LOW | HCDP_UART_FLAG_INTERRUPT |
+        HCDP_UART_FLAG_EDGE_SENSITIVE | HCDP_UART_FLAG_INTERRUPT |
         (vga_primary ? 0 : HCDP_UART_FLAG_PRIMARY_CONSOLE);
     mHcdp.Uart[0].ConOutIndex = HCDP_CONOUT_UART_INDEX;
     mHcdp.Uart[0].Reserved = 0;
@@ -14498,7 +15216,8 @@ static void efi_init_platform_tables(void)
         mConfigTables[PLATFORM_TABLE_SAL].VendorGuid[i] =
             gEfiSalSystemTableGuid[i];
     }
-    mConfigTables[PLATFORM_TABLE_SAL].VendorTable = (UINTN)&mSalSystemTable;
+    mConfigTables[PLATFORM_TABLE_SAL].VendorTable =
+        mSalSystemTableValid ? (UINTN)&mSalSystemTable : 0;
     for (i = 0; i < 16; i++) {
         mConfigTables[PLATFORM_TABLE_HCDP].VendorGuid[i] =
             gEfiHcdpTableGuid[i];
@@ -14566,6 +15285,234 @@ static BOOLEAN acpi_ssdt_has_bytes(const UINT8 *Needle, UINTN NeedleLen)
                           Needle, NeedleLen);
 }
 
+static BOOLEAN sal_bytes_are_zero(const UINT8 *Bytes, UINTN Length)
+{
+    UINTN i;
+
+    for (i = 0; i < Length; i++) {
+        if (Bytes[i] != 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static BOOLEAN __attribute__((noinline)) sal_system_table_selftest(void)
+{
+    const IA64_SAL_SYSTEM_TABLE_HEADER *header = &mSalSystemTable.Header;
+    const UINT8 *table_start = (const UINT8 *)&mSalSystemTable;
+    const UINT8 *cursor = mSalSystemTable.Entries;
+    const UINT8 *end;
+    UINT64 pal_start = (UINTN)pal_proc_entry & ~0xfffULL;
+    UINT64 pal_end = pal_start + EFI_PAGE_SIZE;
+    UINT64 runtime_code_start = (UINTN)&__runtime_code_start;
+    UINT64 runtime_data_start = (UINTN)&__runtime_data_start;
+    UINT64 firmware_end = ((UINTN)&_end + 0x1fffU) & ~0x1fffULL;
+    UINT64 covered_end = 0;
+    UINT64 sal_proc = (UINTN)sal_proc_entry;
+    UINT64 sal_gp = (UINTN)sal_proc_gp_anchor;
+    UINT64 sal_data_gp = fw_current_gp();
+    UINT8 previous_type = 0;
+    UINTN entrypoint_count = 0;
+    UINTN memory_count = 0;
+    UINTN features_count = 0;
+    UINTN tr_count = 0;
+    UINTN wake_count = 0;
+    UINTN i;
+    BOOLEAN merced_compatibility_mdt =
+        sal_use_merced_compatibility_mdt();
+    BOOLEAN pal_code_found = 0;
+    BOOLEAN boot_code_found = 0;
+    BOOLEAN runtime_code_found = 0;
+    BOOLEAN runtime_data_found = 0;
+    BOOLEAN firmware_space_found = 0;
+
+    if (!mSalSystemTableValid ||
+        header->Signature != EFI_SIGNATURE_32('S', 'S', 'T', '_') ||
+        header->Revision != SAL_REVISION ||
+        header->Length < sizeof(*header) + SAL_FIXED_DESCRIPTOR_BYTES ||
+        header->Length > sizeof(mSalSystemTable) ||
+        header->EntryCount < 4 ||
+        !sal_bytes_are_zero(header->Reserved0,
+                            sizeof(header->Reserved0)) ||
+        !sal_bytes_are_zero(header->Reserved1,
+                            sizeof(header->Reserved1)) ||
+        table_checksum8(table_start, header->Length) != 0) {
+        return 0;
+    }
+    end = table_start + header->Length;
+
+    for (i = 0; i < header->EntryCount; i++) {
+        UINT8 type;
+        UINTN entry_size;
+
+        if (cursor >= end) {
+            return 0;
+        }
+        type = cursor[0];
+        if ((i != 0 && type < previous_type) ||
+            (i == 0 && type != SAL_DESCRIPTOR_ENTRYPOINT)) {
+            return 0;
+        }
+        previous_type = type;
+
+        switch (type) {
+        case SAL_DESCRIPTOR_ENTRYPOINT: {
+            const IA64_SAL_ENTRYPOINT_DESCRIPTOR *entry =
+                (const IA64_SAL_ENTRYPOINT_DESCRIPTOR *)cursor;
+
+            entry_size = sizeof(*entry);
+            if (entrypoint_count++ != 0 ||
+                entry->PalProc != (UINTN)pal_proc_entry ||
+                entry->SalProc != sal_proc ||
+                entry->SalGp != sal_gp ||
+                !sal_bytes_are_zero(entry->Reserved0,
+                                    sizeof(entry->Reserved0)) ||
+                !sal_bytes_are_zero(entry->Reserved1,
+                                    sizeof(entry->Reserved1))) {
+                return 0;
+            }
+            break;
+        }
+        case SAL_DESCRIPTOR_MEMORY: {
+            const IA64_SAL_MEMORY_DESCRIPTOR *memory =
+                (const IA64_SAL_MEMORY_DESCRIPTOR *)cursor;
+            UINT64 range_end;
+
+            entry_size = sizeof(*memory);
+            if (memory->PageCount == 0 ||
+                (merced_compatibility_mdt ?
+                 memory->PhysicalAddress < covered_end :
+                 memory->PhysicalAddress != covered_end) ||
+                memory->PhysicalAddress >= SAL_SYSTEM_ADDRESS_LIMIT ||
+                memory->PageCount >
+                    (SAL_SYSTEM_ADDRESS_LIMIT -
+                     memory->PhysicalAddress) / EFI_PAGE_SIZE ||
+                memory->NeedVirtualAddress > 1 ||
+                memory->PageAccessRights > 7 ||
+                memory->Reserved0 != 0 ||
+                memory->Reserved1 != 0 ||
+                memory->OemReserved != 0 ||
+                (memory->CurrentMemoryAttribute !=
+                     SAL_MEMORY_ATTRIBUTE_WB &&
+                 memory->CurrentMemoryAttribute !=
+                     SAL_MEMORY_ATTRIBUTE_UC) ||
+                (memory->CurrentMemoryAttribute ==
+                     SAL_MEMORY_ATTRIBUTE_WB &&
+                 (memory->SupportedMemoryAttributes &
+                  SAL_MEMORY_SUPPORTS_WB) == 0) ||
+                (memory->CurrentMemoryAttribute ==
+                     SAL_MEMORY_ATTRIBUTE_UC &&
+                 (memory->SupportedMemoryAttributes &
+                  SAL_MEMORY_SUPPORTS_UC) == 0)) {
+                return 0;
+            }
+            range_end = memory->PhysicalAddress +
+                        ((UINT64)memory->PageCount << 12);
+            covered_end = range_end;
+            memory_count++;
+
+            if (memory->MemoryType == SAL_MEMORY_TYPE_REGULAR &&
+                memory->MemoryUsage == SAL_MEMORY_USAGE_PAL_CODE &&
+                memory->PhysicalAddress == pal_start &&
+                range_end == pal_end) {
+                pal_code_found = 1;
+            }
+            if (memory->MemoryType == SAL_MEMORY_TYPE_REGULAR &&
+                memory->MemoryUsage == SAL_MEMORY_USAGE_BOOT_CODE &&
+                memory->PhysicalAddress == pal_end &&
+                range_end == runtime_code_start) {
+                boot_code_found = 1;
+            }
+            if (memory->MemoryType == SAL_MEMORY_TYPE_REGULAR &&
+                memory->MemoryUsage == SAL_MEMORY_USAGE_RUNTIME_CODE &&
+                memory->PhysicalAddress == runtime_code_start &&
+                range_end == runtime_data_start &&
+                memory->PhysicalAddress <= sal_proc &&
+                range_end > sal_proc) {
+                runtime_code_found = 1;
+            }
+            if (memory->MemoryType == SAL_MEMORY_TYPE_REGULAR &&
+                memory->MemoryUsage == SAL_MEMORY_USAGE_RUNTIME_DATA &&
+                memory->PhysicalAddress == runtime_data_start &&
+                range_end == firmware_end &&
+                memory->PhysicalAddress <= sal_data_gp &&
+                range_end > sal_data_gp) {
+                runtime_data_found = 1;
+            }
+            if (memory->MemoryType == SAL_MEMORY_TYPE_FIRMWARE &&
+                memory->PhysicalAddress ==
+                    FW_FIRMWARE_ADDRESS_SPACE_BASE &&
+                range_end == FW_FIRMWARE_ADDRESS_SPACE_END) {
+                firmware_space_found = 1;
+            }
+            break;
+        }
+        case SAL_DESCRIPTOR_FEATURES: {
+            const IA64_SAL_PLATFORM_FEATURES_DESCRIPTOR *features =
+                (const IA64_SAL_PLATFORM_FEATURES_DESCRIPTOR *)cursor;
+
+            entry_size = sizeof(*features);
+            if (features_count++ != 0 || features->Features != 0 ||
+                !sal_bytes_are_zero(features->Reserved,
+                                    sizeof(features->Reserved))) {
+                return 0;
+            }
+            break;
+        }
+        case SAL_DESCRIPTOR_TR: {
+            const IA64_SAL_TR_DESCRIPTOR *tr =
+                (const IA64_SAL_TR_DESCRIPTOR *)cursor;
+
+            entry_size = sizeof(*tr);
+            if (tr_count++ != 0 || tr->RegisterType != 0 ||
+                tr->RegisterNumber != 0 ||
+                tr->VirtualAddress != SAL_TR_VIRTUAL_ADDRESS ||
+                tr->EncodedPageSize != SAL_TR_ENCODED_PAGE_SIZE ||
+                tr->Reserved1 != 0 ||
+                !sal_bytes_are_zero(tr->Reserved0,
+                                    sizeof(tr->Reserved0))) {
+                return 0;
+            }
+            break;
+        }
+        case SAL_DESCRIPTOR_AP_WAKE: {
+            const IA64_SAL_AP_WAKE_DESCRIPTOR *wake =
+                (const IA64_SAL_AP_WAKE_DESCRIPTOR *)cursor;
+
+            entry_size = sizeof(*wake);
+            if (wake_count++ != 0 || wake->Mechanism != 0 ||
+                wake->Vector != 0xff ||
+                !sal_bytes_are_zero(wake->Reserved,
+                                    sizeof(wake->Reserved))) {
+                return 0;
+            }
+            break;
+        }
+        default:
+            return 0;
+        }
+
+        if (entry_size > (UINTN)(end - cursor)) {
+            return 0;
+        }
+        cursor += entry_size;
+    }
+
+    return cursor == end &&
+           entrypoint_count == 1 &&
+           memory_count != 0 &&
+           features_count == 1 &&
+           tr_count == 1 &&
+           wake_count == 1 &&
+           header->EntryCount == memory_count + 4U &&
+           (merced_compatibility_mdt ?
+            memory_count == 5U :
+            covered_end == SAL_SYSTEM_ADDRESS_LIMIT) &&
+           pal_code_found && boot_code_found && runtime_code_found &&
+           runtime_data_found && firmware_space_found;
+}
+
 static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
 {
     static const UINT8 pci0_name[] = { 'P', 'C', 'I', '0' };
@@ -14592,7 +15539,7 @@ static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
     };
     UINT32 vga_id = (UINT32)pci_config_read_value(0, 0, 5, 0, 0, 4);
     UINT8 hcdp_uart_flags =
-        HCDP_UART_FLAG_ACTIVE_LOW | HCDP_UART_FLAG_INTERRUPT |
+        HCDP_UART_FLAG_EDGE_SENSITIVE | HCDP_UART_FLAG_INTERRUPT |
         (fw_handoff_vga_console_primary() ?
          0 : HCDP_UART_FLAG_PRIMARY_CONSOLE);
     UINTN i;
@@ -14601,24 +15548,7 @@ static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
     UINT32 xsdt_length = 36 + (debug_port_present ? 8U : 7U) * 8U;
     UINT32 rsdt_length = 36 + (debug_port_present ? 8U : 7U) * 4U;
 
-    if (mSalSystemTable.Signature != EFI_SIGNATURE_32('S', 'S', 'T', '_') ||
-        mSalSystemTable.Length != sizeof(mSalSystemTable) ||
-        mSalSystemTable.Revision != SAL_REVISION ||
-        mSalSystemTable.EntryCount != 4 ||
-        mSalSystemTable.Entrypoint.Type != 0 ||
-        mSalSystemTable.PlatformFeatures.Type != 2 ||
-        mSalSystemTable.TranslationRegister.Type != 3 ||
-        mSalSystemTable.TranslationRegister.RegisterType != 0 ||
-        mSalSystemTable.TranslationRegister.RegisterNumber != 0 ||
-        mSalSystemTable.TranslationRegister.VirtualAddress !=
-            SAL_TR_VIRTUAL_ADDRESS ||
-        mSalSystemTable.TranslationRegister.EncodedPageSize !=
-            SAL_TR_ENCODED_PAGE_SIZE ||
-        mSalSystemTable.TranslationRegister.Reserved1 != 0 ||
-        mSalSystemTable.ApWake.Type != 5 ||
-        mSalSystemTable.ApWake.Mechanism != 0 ||
-        mSalSystemTable.ApWake.Vector != 0xff ||
-        table_checksum8(&mSalSystemTable, sizeof(mSalSystemTable)) != 0) {
+    if (!sal_system_table_selftest()) {
         return 0;
     }
 
@@ -14808,7 +15738,7 @@ static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         mAcpiHcdp->Uart[0].PciFunction != 0 ||
         mAcpiHcdp->Uart[0].Baud != 115200 ||
         !acpi_gas_matches(&mAcpiHcdp->Uart[0].BaseAddress,
-                          ACPI_GAS_SYSTEM_MEMORY, 8, IA64_UART_BASE) ||
+                          ACPI_GAS_SYSTEM_IO, 8, IA64_UART_IO_PORT) ||
         mAcpiHcdp->Uart[0].PciDeviceId !=
             (UINT16)HCDP_UART_ACPI_HID_PNP0501 ||
         mAcpiHcdp->Uart[0].PciVendorId !=
@@ -15866,7 +16796,7 @@ static void efi_init_fpswa_loaded_image_proto(void)
 #define IMAGE_DOS_SIGNATURE       0x5A4D    /* "MZ" */
 #define IMAGE_NT_SIGNATURE        0x00004550  /* "PE\0\0" */
 #define IMAGE_FILE_RELOCS_STRIPPED 0x0001U
-#define IA64_EFI_IMAGE_FALLBACK_BASE         FW_LOW_FREE_BASE
+#define IA64_EFI_IMAGE_FALLBACK_BASE         FW_AUTO_ALLOCATION_BASE
 #define IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE FW_LOW_RUNTIME_IMAGE_BASE
 #define IA64_EFI_IMAGE_ALIGN                 0x00010000ULL
 
@@ -17276,8 +18206,8 @@ typedef struct {
 } IDE_CONFIG;
 
 static IDE_CONFIG gIde = {
-    .data_base  = LEGACY_IO_BASE + 0x1F0U,
-    .ctrl_base  = LEGACY_IO_BASE + 0x3F6U,
+    .data_base  = 0x1F0U,
+    .ctrl_base  = 0x3F6U,
     .bmdma_base = 0,
     .has_bmdma  = 0,
 };
@@ -17366,19 +18296,19 @@ typedef struct {
 
 static IDE_BMDMA_PRD mIdeBmdmaPrd[IDE_BMDMA_PRD_MAX];
 
-static volatile UINT8 *ata_reg(UINT64 offset)
+static volatile UINT8 *ata_reg(UINT64 port)
 {
-    return (volatile UINT8 *)(UINTN)offset;
+    return (volatile UINT8 *)(UINTN)IA64_LEGACY_IO_PORT_PA(port);
 }
 
-static volatile UINT16 *ata_reg16(UINT64 offset)
+static volatile UINT16 *ata_reg16(UINT64 port)
 {
-    return (volatile UINT16 *)(UINTN)offset;
+    return (volatile UINT16 *)(UINTN)IA64_LEGACY_IO_PORT_PA(port);
 }
 
-static volatile UINT32 *ata_reg32(UINT64 offset)
+static volatile UINT32 *ata_reg32(UINT64 port)
 {
-    return (volatile UINT32 *)(UINTN)offset;
+    return (volatile UINT32 *)(UINTN)IA64_LEGACY_IO_PORT_PA(port);
 }
 
 static UINT8 ata_pio_read8(UINT64 port)
@@ -17453,19 +18383,19 @@ static void ata_pio_poll_delay(void)
 
 static BOOLEAN ide_io_bar_address(UINT32 Bar, UINT64 *Address)
 {
-    UINT64 io_base;
+    UINT64 port;
 
     if (Address == NULL || Bar == 0 || Bar == 0xffffffffU ||
         (Bar & 1U) == 0 || (Bar & ~(UINT64)3U) == 0) {
         return 0;
     }
 
-    io_base = LEGACY_IO_BASE + (Bar & ~(UINT64)3U);
-    if (io_base < LEGACY_IO_BASE || io_base >= LEGACY_IO_LIMIT) {
+    port = Bar & ~(UINT64)3U;
+    if (port >= PCI_IO_SIZE) {
         return 0;
     }
 
-    *Address = io_base;
+    *Address = port;
     return 1;
 }
 
@@ -17555,8 +18485,8 @@ static BOOLEAN ide_configure_primary_from_pci(void)
                                               PCI_IDE_BAR4_OFFSET, 4);
     if (!ide_io_bar_address(data_bar, &data_base) ||
         !ide_io_bar_address(ctrl_bar, &ctrl_base) ||
-        data_base + 7U >= LEGACY_IO_LIMIT ||
-        ctrl_base + 2U >= LEGACY_IO_LIMIT) {
+        data_base + 7U >= PCI_IO_SIZE ||
+        ctrl_base + 2U >= PCI_IO_SIZE) {
         /*
          * Command-line PCI devices arrive with unassigned BARs.  Allocate the
          * platform's reserved IDE I/O ranges only after an IDE controller has
@@ -17596,7 +18526,7 @@ static BOOLEAN ide_configure_primary_from_pci(void)
     command |= PCI_CFG_COMMAND_IO_SPACE;
     if (fw_handoff_ide_dma_enabled() &&
         ide_io_bar_address(bmdma_bar, &bmdma_base) &&
-        bmdma_base + 7U < LEGACY_IO_LIMIT) {
+        bmdma_base + 7U < PCI_IO_SIZE) {
         gIde.bmdma_base = bmdma_base;
         gIde.has_bmdma = 1;
         command |= PCI_CFG_COMMAND_BUS_MASTER;
@@ -17606,12 +18536,12 @@ static BOOLEAN ide_configure_primary_from_pci(void)
                            command);
 
     uart_puts("IDE controller:       PCI BAR primary data=0x");
-    uart_put_hex64(gIde.data_base);
+    uart_put_hex64(IA64_LEGACY_IO_PORT_PA(gIde.data_base));
     uart_puts(" ctrl=0x");
-    uart_put_hex64(gIde.ctrl_base);
+    uart_put_hex64(IA64_LEGACY_IO_PORT_PA(gIde.ctrl_base));
     if (gIde.has_bmdma) {
         uart_puts(" bmdma=0x");
-        uart_put_hex64(gIde.bmdma_base);
+        uart_put_hex64(IA64_LEGACY_IO_PORT_PA(gIde.bmdma_base));
     }
     uart_puts("\r\n");
     return 1;
@@ -23929,40 +24859,42 @@ static BOOLEAN __attribute__((noinline)) pe_image_base_allocation_selftest(void)
     mMemoryMapEntries = 0;
     mMapKey = 0;
     efi_add_memory_range(&mMemoryMapEntries, EfiConventionalMemory,
-                         FW_LOW_FREE_BASE,
+                         FW_EARLY_LOADER_WINDOW_BASE,
                          IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE + 0x40000ULL,
                          EFI_MEMORY_WB);
 
-    mNextPeImageBase = FW_LOW_FREE_BASE;
+    mNextPeImageBase = IA64_EFI_IMAGE_FALLBACK_BASE;
     base = pe_choose_image_base(FW_LOW_IMAGE_BASE, 0x10000, 0, 0, 0, 0);
-    if (base != FW_LOW_IMAGE_BASE) {
+    if (base != IA64_EFI_IMAGE_FALLBACK_BASE) {
         ok = 0;
         goto out;
     }
 
     /* Conventional page and pool records remain invisible in the map. */
     mPageAllocations[0].in_use = 1;
-    mPageAllocations[0].base = FW_LOW_IMAGE_BASE;
+    mPageAllocations[0].base = IA64_EFI_IMAGE_FALLBACK_BASE;
     mPageAllocations[0].pages = IA64_EFI_IMAGE_ALIGN >> 12;
     mPageAllocations[0].type = EfiConventionalMemory;
     mPoolAllocations[0].in_use = 1;
-    mPoolAllocations[0].base = FW_LOW_IMAGE_BASE + IA64_EFI_IMAGE_ALIGN;
+    mPoolAllocations[0].base =
+        IA64_EFI_IMAGE_FALLBACK_BASE + IA64_EFI_IMAGE_ALIGN;
     mPoolAllocations[0].size = IA64_EFI_IMAGE_ALIGN;
     mPoolAllocations[0].backing_base = mPoolAllocations[0].base;
     mPoolAllocations[0].backing_pages = IA64_EFI_IMAGE_ALIGN >> 12;
     mPoolAllocations[0].type = EfiConventionalMemory;
-    mNextPeImageBase = FW_LOW_IMAGE_BASE;
+    mNextPeImageBase = IA64_EFI_IMAGE_FALLBACK_BASE;
     base = pe_choose_image_base(FW_LOW_IMAGE_BASE, 0x10000, 0, 0, 0, 0);
-    if (base != FW_LOW_IMAGE_BASE + 2U * IA64_EFI_IMAGE_ALIGN ||
+    if (base !=
+            IA64_EFI_IMAGE_FALLBACK_BASE + 2U * IA64_EFI_IMAGE_ALIGN ||
         mNextPeImageBase !=
-        FW_LOW_IMAGE_BASE + 3U * IA64_EFI_IMAGE_ALIGN) {
+            IA64_EFI_IMAGE_FALLBACK_BASE + 3U * IA64_EFI_IMAGE_ALIGN) {
         ok = 0;
         goto out;
     }
     fw_set_mem(mPageAllocations, sizeof(mPageAllocations), 0);
     fw_set_mem(mPoolAllocations, sizeof(mPoolAllocations), 0);
 
-    mNextPeImageBase = FW_LOW_FREE_BASE;
+    mNextPeImageBase = IA64_EFI_IMAGE_FALLBACK_BASE;
     base = pe_choose_image_base(FW_LOW_IMAGE_BASE, 0x10000, 1, 0, 0, 0);
     if (base != IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE ||
         mNextPeImageBase !=
@@ -23990,21 +24922,26 @@ static BOOLEAN __attribute__((noinline)) pe_image_base_allocation_selftest(void)
     efi_add_memory_range(&mMemoryMapEntries, EfiConventionalMemory,
                          FW_LOW_RECLAIM_BASE, FW_LOW_IMAGE_BASE,
                          EFI_MEMORY_WB);
-    mNextPeImageBase = FW_LOW_FREE_BASE;
+    efi_add_memory_range(&mMemoryMapEntries, EfiConventionalMemory,
+                         IA64_EFI_IMAGE_FALLBACK_BASE,
+                         IA64_EFI_IMAGE_FALLBACK_BASE + 0x100000ULL,
+                         EFI_MEMORY_WB);
+    mNextPeImageBase = IA64_EFI_IMAGE_FALLBACK_BASE;
 
     /*
      * Images without relocations must load where they were linked even below
      * the staging floor; 0x1040000 is a common IA-64 default link address.
      */
     base = pe_choose_image_base(0x1040000ULL, 0x34000, 0, 1, 0, 0);
-    if (base != 0x1040000ULL || mNextPeImageBase != FW_LOW_FREE_BASE) {
+    if (base != 0x1040000ULL ||
+        mNextPeImageBase != IA64_EFI_IMAGE_FALLBACK_BASE) {
         ok = 0;
         goto out;
     }
 
     /* The same base still loses to the floor when the image can move. */
     if (pe_choose_image_base(0x1040000ULL, 0x34000, 0, 0, 0, 0) <
-        FW_LOW_FREE_BASE) {
+        IA64_EFI_IMAGE_FALLBACK_BASE) {
         ok = 0;
         goto out;
     }
@@ -28223,12 +29160,19 @@ static UINT64 pci_mem_cpu_addr(UINT64 Address)
     return IA64_PCI_MMIO_BASE + Address;
 }
 
-static UINT64 pci_io_cpu_addr(UINT64 Address)
+static UINT64 pci_io_port_number(UINT64 Address)
 {
-    if (Address >= LEGACY_IO_BASE) {
-        return Address;
+    if (Address >= LEGACY_IO_BASE && Address < LEGACY_IO_SPARSE_LIMIT) {
+        UINT64 offset = Address - LEGACY_IO_BASE;
+
+        return ((offset >> 12) << 2) | (offset & 3U);
     }
-    return LEGACY_IO_BASE + Address;
+    return Address;
+}
+
+static UINT64 pci_io_cpu_addr(UINT64 Port)
+{
+    return IA64_LEGACY_IO_PORT_PA(Port);
 }
 
 static UINT64 pci_mmio_read(UINT64 Address, UINTN Size)
@@ -28299,15 +29243,26 @@ static EFI_STATUS pci_root_transfer(BOOLEAN IsWrite, BOOLEAN IsIo,
     fifo = Width >= EfiPciWidthFifoUint8 && Width <= EfiPciWidthFifoUint64;
     fill = Width >= EfiPciWidthFillUint8 && Width <= EfiPciWidthFillUint64;
     buf = (UINT8 *)Buffer;
-    Address = IsIo ? pci_io_cpu_addr(Address) : pci_mem_cpu_addr(Address);
+    if (IsIo) {
+        Address = pci_io_port_number(Address);
+        if (Address >= PCI_IO_SIZE ||
+            size > PCI_IO_SIZE - Address ||
+            (!fifo && Count > (PCI_IO_SIZE - Address) / size)) {
+            return EFI_INVALID_PARAMETER;
+        }
+    } else {
+        Address = pci_mem_cpu_addr(Address);
+    }
 
     for (i = 0; i < Count; i++) {
+        UINT64 cpu_address = IsIo ? pci_io_cpu_addr(Address) : Address;
+
         if (IsWrite) {
             UINT64 value = 0;
             fw_copy_mem(&value, buf, size);
-            pci_mmio_write(Address, size, value);
+            pci_mmio_write(cpu_address, size, value);
         } else {
-            UINT64 value = pci_mmio_read(Address, size);
+            UINT64 value = pci_mmio_read(cpu_address, size);
             fw_copy_mem(buf, &value, size);
         }
 
@@ -32193,6 +33148,34 @@ static EFI_STATUS rs_convert_runtime_tables(void)
         }
     }
 
+    /*
+     * HalpCallEfiVirtual dereferences the descriptor and branches to the raw
+     * entry point, so a fault or an unexpected device access inside a runtime
+     * service reports an address that belongs to no loaded guest module.
+     * Publish the post-conversion entry points once, while the descriptors
+     * are still reachable physically, so such an address can be attributed.
+     */
+    {
+        static const char *const service_names[] = {
+            "GetTime", "SetTime", "GetWakeupTime", "SetWakeupTime",
+            "GetVariable", "GetNextVariableName", "SetVariable",
+            "GetNextHighMonotonicCount", "ResetSystem", "QueryVariableInfo",
+            "Fpswa",
+        };
+
+        for (i = 0; i < FW_ARRAY_SIZE(function_descriptors); i++) {
+            const UINTN *descriptor = (const UINTN *)function_descriptors[i];
+
+            uart_puts("EFI runtime ");
+            uart_puts(service_names[i]);
+            uart_puts(" entry=0x");
+            uart_put_hex64(descriptor[0]);
+            uart_puts(" gp=0x");
+            uart_put_hex64(descriptor[1]);
+            uart_puts("\r\n");
+        }
+    }
+
     mRuntimeServices.GetTime = get_time;
     mRuntimeServices.SetTime = set_time;
     mRuntimeServices.GetWakeupTime = get_wakeup_time;
@@ -32466,7 +33449,7 @@ static EFI_STATUS rs_get_boot0000_variable(UINT32 *Attributes,
      * standard EFI removable-media boot.  Report the option without any
      * OptionalData so the loader receives no injected payload.  (An OS's own
      * NVRAM Boot#### entry still carries its load options verbatim; only this
-     * synthetic firmware entry drops the previously Windows-specific blob.)
+     * synthetic firmware entry drops the previously guest-specific blob.)
      */
     return rs_copy_variable(
         EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS |
@@ -33785,6 +34768,19 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
 
     (void)gp;
     (void)boot_b0;
+
+    if (fw_pal_platform_addr(LEGACY_IO_BASE) != 0) {
+        uart_puts("PAL platform I/O configuration failed\r\n");
+        for (;;) {
+            fw_pal_halt_light();
+        }
+    }
+    if (!fw_init_itc_frequency()) {
+        uart_puts("PAL interval timer configuration failed\r\n");
+        for (;;) {
+            fw_pal_halt_light();
+        }
+    }
 
     uart_puts("\r\n"
               "=============================\r\n"

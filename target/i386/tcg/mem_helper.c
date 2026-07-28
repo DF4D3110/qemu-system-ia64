@@ -19,6 +19,9 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
+#ifdef TARGET_IA64
+#include "target/ia64/ia32/mem-helper-adapter.h"
+#endif
 #include "exec/helper-proto.h"
 #include "accel/tcg/cpu-ldst.h"
 #include "qemu/int128.h"

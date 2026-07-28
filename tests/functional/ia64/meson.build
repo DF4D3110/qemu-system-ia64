@@ -12,7 +12,10 @@ ia64_services_header = files('apps/common/services.h')
 ia64_app_sh = find_program('sh')
 ia64_functional_test_apps = []
 
-foreach app : ['smoke', 'services', 'tables', 'exitbs', 'storage', 'input', 'smp']
+foreach app : [
+  'smoke', 'services', 'tables', 'exitbs', 'storage', 'input', 'smp',
+  'smp-merced',
+]
   app_source = files('apps/' + app + '-app.c')
   app_depend_files = [
     ia64_app_builder,
@@ -57,7 +60,10 @@ ia64_start_image_child = custom_target(
     '@OUTPUT@',
     '@INPUT@',
     ia64_child_linker_script,
-    '0x5000000',
+    # Keep this fixed-address child immediately above the early loader window.
+    # It verifies that an image with stripped relocations may still request an
+    # exact address below the automatic allocation floor.
+    '0x5002000',
   ],
   build_by_default: false,
 )
@@ -78,6 +84,7 @@ tests_ia64_system_quick = [
   'services',
   'tables',
   'smp',
+  'smp_merced',
 ]
 
 tests_ia64_system_thorough = [
@@ -92,6 +99,7 @@ test_ia64_timeouts = {
   'services': 90,
   'tables': 90,
   'smp': 120,
+  'smp_merced': 120,
   'storage': 300,
   'input': 120,
 }

@@ -60,6 +60,7 @@ def run_checks(binary: str, elf: str):
 
     sym = symbols(elf)
     required = ("_start", "_end", "__gp", "pal_proc_entry",
+                "sal_proc_gp_anchor", "sal_proc_entry", "sal_proc_dispatch",
                 "__runtime_code_start", "__runtime_data_start")
     missing = [name for name in required if name not in sym]
     if missing:
@@ -96,6 +97,35 @@ def run_checks(binary: str, elf: str):
         raise RuntimeError("runtime section boundary/alignment is invalid")
     yield "PAL and runtime boundaries are valid"
 
+    if not (sym["__runtime_code_start"] <= sym["sal_proc_gp_anchor"] <
+            sym["__runtime_data_start"] and
+            sym["__runtime_code_start"] <= sym["sal_proc_entry"] <
+            sym["__runtime_data_start"] and
+            sym["__runtime_code_start"] <= sym["sal_proc_dispatch"] <
+            sym["__runtime_data_start"] and
+            sym["__runtime_data_start"] <= sym["__gp"] < sym["_end"]):
+        raise RuntimeError("SAL entry, dispatcher, or GP has the wrong usage")
+    sal_entry = re.search(
+        r"<sal_proc_entry>:(.*?)(?=\n[0-9a-fA-F]{16} "
+        r"<fpswa_emulation_entry>:|\Z)",
+        disassembly, re.DOTALL)
+    sal_entry_text = sal_entry.group(1) if sal_entry else ""
+    required_sal_entry_ops = (
+        r"\bflushrs\b",
+        r"\binvala\b",
+        r"\bmov(?:\.[a-z]+)*\s+ar\.bspstore\s*=",
+        r"\bmov(?:\.[a-z]+)*\s+ar\.rnat\s*=",
+        r"\bmov(?:\.[a-z]+)*\s+ar\.rsc\s*=",
+        r"\brfi\b",
+        r"\bbr\.call(?:\.[a-z]+)*\s+(?:b0\s*=\s*)?"
+        r"[0-9a-f]+\s+<sal_proc_dispatch>",
+    )
+    if any(not re.search(pattern, sal_entry_text)
+           for pattern in required_sal_entry_ops):
+        raise RuntimeError(
+            "SAL entry does not isolate and restore the caller's RSE state")
+    yield "SAL entry isolates and restores caller RSE state"
+
     sections = sorted(allocated_sections(elf), key=lambda item: item[1])
     if not sections:
         raise RuntimeError("firmware ELF has no allocated sections")
@@ -114,7 +144,7 @@ def main() -> int:
         print("Bail out! usage: test-ia64-firmware-layout.py BIN ELF")
         return 1
     print("TAP version 13")
-    print("1..6")
+    print("1..7")
     try:
         for index, name in enumerate(run_checks(sys.argv[1], sys.argv[2]), 1):
             print(f"ok {index} - {name}")
@@ -123,7 +153,7 @@ def main() -> int:
         print(f"not ok {index} - firmware layout")
         for line in str(exc).splitlines():
             print(f"# {line}")
-        for rest in range(index + 1, 7):
+        for rest in range(index + 1, 8):
             print(f"not ok {rest} - skipped after layout failure")
         return 1
     return 0

@@ -25,6 +25,23 @@
 #define IA64_PCI_MMIO_BASE            0x00000000c1000000ULL
 #define IA64_PCI_MMIO_SIZE            0x0000000010000000ULL
 
+#define IA64_LEGACY_IO_BASE           0x00000ffffc000000ULL
+#define IA64_LEGACY_IO_PORTS_SIZE     0x0000000000010000ULL
+#define IA64_LEGACY_IO_BLOCK_SIZE     0x0000000004000000ULL
+#define IA64_LEGACY_IO_PORT_OFFSET(port) \
+    ((((unsigned long long)(port) >> 2) << 12) | \
+     ((unsigned long long)(port) & 0xfffULL))
+#define IA64_LEGACY_IO_PORT_PA(port) \
+    (IA64_LEGACY_IO_BASE + IA64_LEGACY_IO_PORT_OFFSET(port))
+
+/*
+ * The architected console resource is the conventional COM1 I/O range.
+ * IA64_UART_BASE remains a private MMIO decode for firmware and compatibility
+ * with older guests; ACPI and HCDP must advertise IA64_UART_IO_PORT instead.
+ */
+#define IA64_UART_IO_PORT             0x00000000000003f8ULL
+#define IA64_UART_IO_SIZE             0x0000000000000008ULL
+
 typedef struct __attribute__((packed)) IA64VpcHandoff {
     unsigned long long Magic;
     unsigned long long Version;

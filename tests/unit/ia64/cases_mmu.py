@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .case import (CaseMetadata, CaseObservation, bind_cases)
+from .case import (CaseEvidence, CaseMetadata, CaseObservation, bind_cases)
 from .encoding import (
     DTR_PTE_NATPAGE,
     DTR_PTE_UC,
@@ -56,7 +56,9 @@ from .encoding import (
     IA64_PSR_IT,
     IA64_PSR_PK,
     IA64_TLB_MAX,
-    IA64_TR_COUNT,
+    MADISON_TR_COUNT,
+    MERCED_DTLB_ENTRIES,
+    MONTECITO_TR_COUNT,
     IA64_UNALIGNED_VECTOR,
     KERNEL_TR_ITIR,
     KEY_TEST_KEY,
@@ -1511,10 +1513,46 @@ test_itr_i_slot_uses_low_8_bits = require_registers(
 test_itr_i_reserved_slot_faults = require_exception(
     "itr_i_reserved_slot_faults", [
         (0x10, *movl_mlx(18, 0x0010000004000661)),
-        (0x20, 0x00, adds(5, IA64_TR_COUNT, 0), nop_i(), nop_i()),
+        (0x20, 0x00, adds(5, MONTECITO_TR_COUNT, 0), nop_i(), nop_i()),
         (0x30, 0x00, itr_i(5, 18), nop_i(),
          nop_i()),
     ], IA64_EXCP_RESERVED_REG_FIELD, fault_ip=0x30, entry=0x10)
+
+test_itr_i_madison_last_slot = require_registers(
+    "itr_i_madison_last_slot", [
+        (0x10, *movl_mlx(18, 0x0010000004000661)),
+        (0x20, *movl_mlx(19, 1 << 36)),
+        (0x30, 0x00, adds(7, 0x68, 0), nop_i(), nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(7, 21),
+         adds(5, MADISON_TR_COUNT - 1, 0), nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(0, 20), nop_i(), nop_i()),
+        (0x60, 0x00, itr_i(5, 18), addl(31, 0x8430, 0), nop_i()),
+        *rfi_to_gr(0x70, 19, 31),
+        (0x4008430, 0x10, nop_m(), adds(31, 0x7b, 0),
+         br_cond(0x4008430, 0x8440)),
+        (0x4008440, 0x10, nop_m(), nop_i(),
+         br_cond(0x4008440, 0x8440)),
+    ], {
+        "ip": 0x8440,
+        "exception": IA64_EXCP_NONE,
+        "r31": 0x7b,
+    }, entry=0x10, cpu="madison")
+
+test_itr_i_madison_first_invalid_slot_faults = require_exception(
+    "itr_i_madison_first_invalid_slot_faults", [
+        (0x10, *movl_mlx(18, 0x0010000004000661)),
+        (0x20, 0x00, adds(5, MADISON_TR_COUNT, 0), nop_i(), nop_i()),
+        (0x30, 0x00, itr_i(5, 18), nop_i(), nop_i()),
+    ], IA64_EXCP_RESERVED_REG_FIELD, fault_ip=0x30,
+    entry=0x10, cpu="madison")
+
+test_itr_i_merced_first_invalid_slot_faults = require_exception(
+    "itr_i_merced_first_invalid_slot_faults", [
+        (0x10, *movl_mlx(18, 0x0010000004000661)),
+        (0x20, 0x00, adds(5, 8, 0), nop_i(), nop_i()),
+        (0x30, 0x00, itr_i(5, 18), nop_i(), nop_i()),
+    ], IA64_EXCP_RESERVED_REG_FIELD, fault_ip=0x30,
+    entry=0x10, cpu="merced")
 
 test_itr_i_resumes_next_slot_after_tb_exit = require_registers(
     "itr_i_resumes_next_slot_after_tb_exit", [
@@ -1719,6 +1757,20 @@ ITC_DATA_BUNDLE = (0x4009000, 0x00, 0x123456789a, 0, 0)
 ITC_DATA_LOW, _ = bundle_words(*ITC_DATA_BUNDLE[1:])
 KEY_TEST_DATA_BUNDLE = (0x4001000, *ITC_DATA_BUNDLE[1:])
 
+
+def _dumped_tlb_vas(register_output, name):
+    prefix = f"{name}["
+    result = set()
+
+    for line in register_output.splitlines():
+        if not line.startswith(prefix):
+            continue
+        marker = " va=0x"
+        if marker not in line:
+            continue
+        result.add(int(line.split(marker, 1)[1].split()[0], 16))
+    return result
+
 test_itc_d_uses_source_pte_and_cr_ifa = require_registers(
     "itc_d_uses_source_pte_and_cr_ifa", [
         (0x10, *movl_mlx(18, 0x4009661)),
@@ -1893,6 +1945,60 @@ def test_itc_d_replaces_full_tc(qemu):
         "r31": ITC_DATA_LOW,
     }, name="itc_d_replaces_full_tc")
 
+
+def test_itc_d_merced_main_tlb_capacity(qemu):
+    fill_base = 0x100000
+    page_size = 0x4000
+    # Keep this microprogram outside the loader-owned IVA value, whose
+    # narrowly gated boot mappings would intentionally bypass an ordinary
+    # translated data access.
+    ivt_base = IA64_FIRMWARE_IVT_BASE + 0x10000
+    fault_ip = ivt_base + IA64_ALT_DTLB_VECTOR
+    cursor = 0x60
+    bundles = [
+        (0x10, *movl_mlx(16, ivt_base)),
+        (0x20, *movl_mlx(18, 0x4009661)),
+        (0x30, 0x00, mov_m_gr_cr(16, 2), adds(7, 0x38, 0),
+         nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+        (0x50, 0x00, adds(31, 0, 0), nop_i(), nop_i()),
+    ]
+
+    # The hardware reference defines 96 main data-TLB entries but leaves TC
+    # victim selection implementation-specific.  The model therefore uses
+    # its pre-existing deterministic circular policy; after 97 insertions,
+    # the first entry is the observable victim.
+    for index in range(MERCED_DTLB_ENTRIES + 1):
+        va = fill_base + index * page_size
+        bundles.extend([
+            (cursor, *movl_mlx(19, va)),
+            (cursor + 0x10, 0x00, mov_m_gr_cr(19, 20), nop_i(),
+             nop_i()),
+            (cursor + 0x20, 0x00, itc_d(18), nop_i(), nop_i()),
+        ])
+        cursor += 0x30
+
+    bundles.extend([
+        (cursor, *movl_mlx(2, fill_base)),
+        (cursor + 0x10, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_DT)),
+        (cursor + 0x20, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (cursor + 0x30, 0x00, srlz_d(), nop_i(), nop_i()),
+        (cursor + 0x40, 0x00, ld8(31, 2), nop_i(), nop_i()),
+        (cursor + 0x50, 0x10, nop_m(), nop_i(),
+         br_cond(cursor + 0x50, cursor + 0x50)),
+        (fault_ip, 0x00, mov_m_cr_gr(30, 20), nop_i(), nop_i()),
+        (fault_ip + 0x10, 0x10, nop_m(), adds(31, 0x6d, 0),
+         br_cond(fault_ip + 0x10, fault_ip + 0x10)),
+    ])
+
+    run_program(qemu, bundles, entry=0x10, expected={
+        "ip": fault_ip + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r30": fill_base,
+        "r31": 0x6d,
+    }, name="itc_d_merced_main_tlb_capacity", cpu="merced")
+
+
 def test_itc_d_full_tc_replacement_rotates(qemu):
     tc_fill_count = IA64_TLB_MAX
     fill_base = 0x100000
@@ -2022,13 +2128,13 @@ def test_itr_d_all_tr_slots_survive_tc_churn(qemu):
     target_tc_pa_b = target_tc_pa_a + page_size
     target_tc_value_a = 0x0123456789abcdef
     target_tc_value_b = 0xfedcba9876543210
-    tc_fill_count = IA64_TLB_MAX + IA64_TR_COUNT
+    tc_fill_count = IA64_TLB_MAX + MONTECITO_TR_COUNT
     cursor = 0x10
     bundles = []
     data_bundles = []
     mappings = []
 
-    for slot in range(IA64_TR_COUNT):
+    for slot in range(MONTECITO_TR_COUNT):
         va = tr_va_base + slot * page_size
         pa = tr_pa_base + slot * page_size
         value = 0xa5a5000000000000 | (slot << 8) | (slot ^ 0x5a)
@@ -2085,7 +2191,7 @@ def test_itr_d_all_tr_slots_survive_tc_churn(qemu):
     ])
     cursor += 0x50
 
-    # The DTRs share the TLB array with the TC, so IA64_TR_COUNT
+    # The DTRs share the TLB array with the TC, so MONTECITO_TR_COUNT
     # pinned entries leave IA64_TLB_MAX minus that many ordinary data-TC
     # slots.  Insert enough unique translations to fill those slots and
     # rotate through replacement.
@@ -3537,10 +3643,78 @@ test_itr_d_slot_uses_low_8_bits = require_registers(
 test_itr_d_reserved_slot_faults = require_exception(
     "itr_d_reserved_slot_faults", [
         (0x10, *movl_mlx(18, 0x0010000004000661)),
-        (0x20, 0x00, adds(5, IA64_TR_COUNT, 0), nop_i(), nop_i()),
+        (0x20, 0x00, adds(5, MONTECITO_TR_COUNT, 0), nop_i(), nop_i()),
         (0x30, 0x00, itr_d(5, 18), nop_i(),
          nop_i()),
     ], IA64_EXCP_RESERVED_REG_FIELD, fault_ip=0x30, entry=0x10)
+
+test_itr_d_madison_last_slot = require_registers(
+    "itr_d_madison_last_slot", [
+        (0x10, *movl_mlx(18, 0x0010000004000661)),
+        (0x20, 0x00, adds(7, 12 << 2, 0),
+         adds(5, MADISON_TR_COUNT - 1, 0), nop_i()),
+        (0x30, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(0, 20), nop_i(), nop_i()),
+        (0x50, 0x00, itr_d(5, 18), nop_i(), nop_i()),
+        (0x60, 0x00, addl(2, 0x430, 0), nop_i(), nop_i()),
+        (0x70, 0x00, ssm(1 << 17), nop_i(), nop_i()),
+        (0x80, 0x00, tpa(31, 2), nop_i(), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+    ], {
+        "ip": 0x90,
+        "exception": IA64_EXCP_NONE,
+        "r31": 0x4000430,
+    }, entry=0x10, cpu="madison")
+
+test_itr_d_madison_first_invalid_slot_faults = require_exception(
+    "itr_d_madison_first_invalid_slot_faults", [
+        (0x10, *movl_mlx(18, 0x0010000004000661)),
+        (0x20, 0x00, adds(5, MADISON_TR_COUNT, 0), nop_i(), nop_i()),
+        (0x30, 0x00, itr_d(5, 18), nop_i(), nop_i()),
+    ], IA64_EXCP_RESERVED_REG_FIELD, fault_ip=0x30,
+    entry=0x10, cpu="madison")
+
+test_itr_d_merced_last_slot = require_registers(
+    "itr_d_merced_last_slot", [
+        (0x10, *movl_mlx(18, 0x0010000004000661)),
+        (0x20, 0x00, adds(7, 12 << 2, 0), adds(5, 47, 0), nop_i()),
+        (0x30, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(0, 20), nop_i(), nop_i()),
+        (0x50, 0x00, itr_d(5, 18), nop_i(), nop_i()),
+        (0x60, 0x00, addl(2, 0x430, 0), nop_i(), nop_i()),
+        (0x70, 0x00, ssm(1 << 17), nop_i(), nop_i()),
+        (0x80, 0x00, tpa(31, 2), nop_i(), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+    ], {
+        "ip": 0x90,
+        "exception": IA64_EXCP_NONE,
+        "r31": 0x4000430,
+    }, entry=0x10, cpu="merced")
+
+test_itr_d_merced_64m_page_size = require_registers(
+    "itr_d_merced_64m_page_size", [
+        (0x10, *movl_mlx(18, 0x00100ffffc000671)),
+        (0x20, *movl_mlx(19, 0xe0000000f0000000)),
+        (0x30, 0x00, adds(7, 26 << 2, 0), adds(5, 5, 0), nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(19, 20), nop_i(), nop_i()),
+        (0x60, 0x00, itr_d(5, 18), nop_i(), nop_i()),
+        (0x70, *movl_mlx(2, 0xe0000000f0000430)),
+        (0x80, 0x00, tpa(31, 2), nop_i(), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+    ], {
+        "ip": 0x90,
+        "exception": IA64_EXCP_NONE,
+        "r31": 0x00000ffffc000430,
+    }, entry=0x10, cpu="merced")
+
+test_itr_d_merced_first_invalid_slot_faults = require_exception(
+    "itr_d_merced_first_invalid_slot_faults", [
+        (0x10, *movl_mlx(18, 0x0010000004000661)),
+        (0x20, 0x00, adds(5, 48, 0), nop_i(), nop_i()),
+        (0x30, 0x00, itr_d(5, 18), nop_i(), nop_i()),
+    ], IA64_EXCP_RESERVED_REG_FIELD, fault_ip=0x30,
+    entry=0x10, cpu="merced")
 
 test_tpa_dt_disabled_uses_dtlb_entry = require_registers(
     "tpa_dt_disabled_uses_dtlb_entry", [
@@ -4498,6 +4672,23 @@ test_translation_hash_m_unit_decode = require_registers(
         "r19": 0x12345,
     }, entry=0x10)
 
+test_translation_hash_merced_long_format = require_registers(
+    "translation_hash_merced_long_format", [
+        (0x10, *movl_mlx(16, 0x10013d)),
+        (0x20, *movl_mlx(17, 0x12345000)),
+        (0x30, *movl_mlx(18, (0x135 << 8) | (12 << 2) | 1)),
+        (0x40, 0x00, mov_m_gr_cr(16, 8), nop_i(), nop_i()),
+        (0x50, 0x00, mov_rr_write(18, 17), nop_i(), nop_i()),
+        (0x60, 0x00, thash(20, 17), nop_i(), nop_i()),
+        (0x70, 0x00, ttag(21, 17), nop_i(), nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+    ], {
+        "ip": 0x80,
+        "exception": IA64_EXCP_NONE,
+        "r20": 0x104e00,
+        "r21": 0x9a8000012345,
+    }, entry=0x10, cpu="merced")
+
 test_translation_hash_m46_ignored_bits_decode = require_registers(
     "translation_hash_m46_ignored_bits_decode", [
         (0x10, *movl_mlx(16, 0x12345000)),
@@ -5204,6 +5395,7 @@ test_ptr_d_purge_completes_on_srlz_d = require_registers(
         "r31": ITC_DATA_LOW,
     }, entry=0x10)
 
+
 test_ptr_d_purge_invalidates_advanced_load = require_registers(
     "ptr_d_purge_invalidates_advanced_load", [
         (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
@@ -5385,6 +5577,14 @@ test_mov_pkr_indexed_decode = require_registers("mov_pkr_indexed_decode", [
     "r5": 0x5501,
 }, entry=0x10)
 
+test_mov_pkr_merced_unimplemented_key_bit_faults = require_exception(
+    "mov_pkr_merced_unimplemented_key_bit_faults", [
+        (0x10, *movl_mlx(2, 1 << (8 + 21))),
+        (0x20, 0x00, adds(3, 0, 0), nop_i(), nop_i()),
+        (0x30, 0x00, mov_pkr_indexed(3, 2, bit36=1), nop_i(), nop_i()),
+    ], IA64_EXCP_RESERVED_REG_FIELD, fault_ip=0x30,
+    entry=0x10, cpu="merced")
+
 test_mov_pkr_duplicate_key_invalidates_old_slot = require_registers(
     "mov_pkr_duplicate_key_invalidates_old_slot", [
         (0x10, 0x00, addl(2, 0x101, 0), addl(3, 0x101, 0),
@@ -5547,15 +5747,52 @@ test_sal_boot_identity_handles_nonzero_region7_rid = require_registers(
         "r31": REGION7_DATA,
     }, entry=0x10)
 
-test_sal_boot_identity_does_not_override_explicit_rid_miss = \
+test_sal_boot_nonstandard_direct_tc_is_purgeable_after_iva_handoff = \
     require_registers(
-        "sal_boot_identity_does_not_override_explicit_rid_miss", [
-            (0x10, *movl_mlx(17, 0xe000000083009af8)),
-            (0x20, *movl_mlx(18, (1 << 8) | (24 << 2))),
+        "sal_boot_nonstandard_direct_tc_is_purgeable_after_iva_handoff", [
+            (0x10, *movl_mlx(17, 0xe000000080200430)),
+            (0x20, *movl_mlx(18, (1 << 8) | (13 << 2) | 1)),
+            (0x30, *movl_mlx(2, IA64_FIRMWARE_IVT_BASE)),
+            (0x40, 0x00, mov_rr_write(18, 17), nop_i(), nop_i()),
+            (0x50, 0x00, mov_m_gr_cr(2, 2), nop_i(), nop_i()),
+            (0x60, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_DT)),
+            (0x70, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+            (0x80, 0x00, srlz_d(), nop_i(), nop_i()),
+            (0x90, 0x08, ld8(29, 17), nop_i(), nop_i()),
+            (0xa0, *movl_mlx(2, 0x04000000)),
+            (0xb0, 0x00, mov_m_gr_cr(2, 2), nop_i(), nop_i()),
+            (0xc0, 0x00, srlz_i(), nop_i(), nop_i()),
+            (0xd0, 0x08, ld8(30, 17), nop_i(), nop_i()),
+            (0xe0, *movl_mlx(18, 13 << 2)),
+            (0xf0, 0x08, nop_m(), ptc_l(17, 18), nop_i()),
+            (0x100, 0x00, srlz_d(), nop_i(), nop_i()),
+            (0x110, 0x08, ld8(31, 17), nop_i(), nop_i()),
+            (0x120, 0x10, nop_m(), nop_i(), br_cond(0x120, 0x120)),
+            (0x04000000 + IA64_ALT_DTLB_VECTOR, 0x00,
+             mov_m_cr_gr(28, 17), nop_i(), nop_i()),
+            (0x04000000 + IA64_ALT_DTLB_VECTOR + 0x10, 0x10,
+             nop_m(), nop_i(),
+             br_cond(0x04000000 + IA64_ALT_DTLB_VECTOR + 0x10,
+                     0x04000000 + IA64_ALT_DTLB_VECTOR + 0x10)),
+            raw_bundle(0x00200430, 0x1122334455667788,
+                       0x8877665544332211),
+        ], {
+            "ip": 0x04000000 + IA64_ALT_DTLB_VECTOR + 0x10,
+            "exception": IA64_EXCP_NONE,
+            "r28": IA64_ISR_R,
+            "r29": 0x1122334455667788,
+            "r30": 0x1122334455667788,
+        }, entry=0x10)
+
+test_sal_boot_identity_coexists_with_explicit_rid_mapping = \
+    require_registers(
+        "sal_boot_identity_coexists_with_explicit_rid_mapping", [
+            (0x10, *movl_mlx(17, 0xe000000000200430)),
+            (0x20, *movl_mlx(18, (1 << 8) | (12 << 2))),
             (0x30, 0x00, mov_rr_write(18, 17), nop_i(),
              nop_i()),
-            *dtr_setup_bundles(0x40, 0xe000000083000000,
-                               0x03000000, page_shift=24, slot=1),
+            *dtr_setup_bundles(0x40, 0xe000000000200430,
+                               0x00400430, page_shift=12, slot=1),
             (0xa0, *movl_mlx(18, 0x100730)),
             (0xb0, *movl_mlx(2, IA64_FIRMWARE_IVT_BASE)),
             (0xc0, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_DT)),
@@ -5565,22 +5802,28 @@ test_sal_boot_identity_does_not_override_explicit_rid_miss = \
              nop_i()),
             (0xf0, 0x00, mov_gr_psr_full(19), nop_i(),
              nop_i()),
-            (0x100, 0x08, ld8(31, 17), nop_i(),
+            (0x100, 0x00, srlz_d(), nop_i(), nop_i()),
+            (0x110, 0x08, ld8(30, 17), nop_i(),
              nop_i()),
-            (0x110, 0x10, nop_m(), nop_i(),
-             br_cond(0x110, 0x110)),
-            (IA64_FIRMWARE_IVT_BASE + IA64_ALT_DTLB_VECTOR, 0x10,
-             nop_m(), adds(31, 0x6f, 0),
-             br_cond(IA64_FIRMWARE_IVT_BASE + IA64_ALT_DTLB_VECTOR,
-                     IA64_FIRMWARE_IVT_BASE + IA64_ALT_DTLB_VECTOR + 0x10)),
-            (IA64_FIRMWARE_IVT_BASE + IA64_ALT_DTLB_VECTOR + 0x10, 0x10,
-             nop_m(), nop_i(),
-             br_cond(IA64_FIRMWARE_IVT_BASE + IA64_ALT_DTLB_VECTOR + 0x10,
-                     IA64_FIRMWARE_IVT_BASE + IA64_ALT_DTLB_VECTOR + 0x10)),
+            (0x120, 0x00, rsm(IA64_PSR_DT), nop_i(), nop_i()),
+            (0x130, 0x00, srlz_d(), nop_i(), nop_i()),
+            (0x140, *movl_mlx(18, (1 << 8) | (12 << 2))),
+            (0x150, 0x00, mov_rr_write(18, 17), nop_i(), nop_i()),
+            (0x160, 0x00, srlz_d(), nop_i(), nop_i()),
+            (0x170, 0x00, ssm(IA64_PSR_DT), nop_i(), nop_i()),
+            (0x180, 0x00, srlz_d(), nop_i(), nop_i()),
+            (0x190, 0x08, ld8(31, 17), nop_i(), nop_i()),
+            (0x1a0, 0x10, nop_m(), nop_i(),
+             br_cond(0x1a0, 0x1a0)),
+            raw_bundle(0x00200430, 0x1122334455667788,
+                       0x8877665544332211),
+            raw_bundle(0x00400430, 0x0123456789abcdef,
+                       0xfedcba9876543210),
         ], {
-            "ip": IA64_FIRMWARE_IVT_BASE + IA64_ALT_DTLB_VECTOR + 0x10,
+            "ip": 0x1a0,
             "exception": IA64_EXCP_NONE,
-            "r31": 0x6f,
+            "r30": 0x1122334455667788,
+            "r31": 0x0123456789abcdef,
         }, entry=0x10)
 
 test_region7_untranslated_high_va_faults = require_registers(
@@ -5853,8 +6096,42 @@ test_mov_rr_indexed_decode = require_registers("mov_rr_indexed_decode", [
     (0x40, 0x00, mov_rr_read(29, 17, ignored36=1), nop_i(),
      nop_i()),
     (0x50, 0x10, nop_m(), nop_i(),
-     br_cond(0x50, 0x50)),
+    br_cond(0x50, 0x50)),
 ], {"ip": 0x50, "r29": 0x539}, entry=0x10)
+
+test_mov_rr_merced_256m_page_size = require_registers(
+    "mov_rr_merced_256m_page_size", [
+        (0x10, *movl_mlx(17, 0xa000000000000000)),
+        (0x20, 0x00, adds(16, (28 << 2) | 1, 0), nop_i(), nop_i()),
+        (0x30, 0x00, mov_rr_write(16, 17), nop_i(), nop_i()),
+        (0x40, 0x00, mov_rr_read(29, 17), nop_i(), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
+    ], {
+        "ip": 0x50,
+        "exception": IA64_EXCP_NONE,
+        "r29": (28 << 2) | 1,
+    }, entry=0x10, cpu="merced")
+
+test_mov_rr_merced_64m_page_size = require_registers(
+    "mov_rr_merced_64m_page_size", [
+        (0x10, *movl_mlx(17, 0xa000000000000000)),
+        (0x20, 0x00, adds(16, (26 << 2) | 1, 0), nop_i(), nop_i()),
+        (0x30, 0x00, mov_rr_write(16, 17), nop_i(), nop_i()),
+        (0x40, 0x00, mov_rr_read(29, 17), nop_i(), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
+    ], {
+        "ip": 0x50,
+        "exception": IA64_EXCP_NONE,
+        "r29": (26 << 2) | 1,
+    }, entry=0x10, cpu="merced")
+
+test_mov_rr_merced_unimplemented_rid_bit_faults = require_exception(
+    "mov_rr_merced_unimplemented_rid_bit_faults", [
+        (0x10, *movl_mlx(17, 0xa000000000000000)),
+        (0x20, *movl_mlx(16, (1 << (8 + 18)) | (12 << 2) | 1)),
+        (0x30, 0x00, mov_rr_write(16, 17), nop_i(), nop_i()),
+    ], IA64_EXCP_RESERVED_REG_FIELD, fault_ip=0x30,
+    entry=0x10, cpu="merced")
 
 test_ptc_e_purges_data_tc_on_srlz_i = require_registers(
     "ptc_e_purges_data_tc_on_srlz_i", [
@@ -6141,6 +6418,7 @@ CASE_NAMES = (
     'itc_d_evicted_refill_flushes_host_tlb',
     'itc_d_key_permission_store_raises_permission_vector',
     'itc_d_matching_pkr_allows_keyed_load',
+    'itc_d_merced_main_tlb_capacity',
     'itc_d_nat_pte_consumes',
     'itc_d_not_present_raises_page_fault',
     'itc_d_not_present_rejects_low_itir_reserved_field',
@@ -6162,6 +6440,11 @@ CASE_NAMES = (
     'itr_d_8k_translation_uses_unrounded_paddr',
     'itr_d_all_tr_slots_survive_tc_churn',
     'itr_d_cached_translation_survives_region_register_write',
+    'itr_d_madison_first_invalid_slot_faults',
+    'itr_d_madison_last_slot',
+    'itr_d_merced_64m_page_size',
+    'itr_d_merced_first_invalid_slot_faults',
+    'itr_d_merced_last_slot',
     'itr_d_nat_slot_consumes',
     'itr_d_not_present_raises_page_fault',
     'itr_d_reserved_slot_faults',
@@ -6174,6 +6457,9 @@ CASE_NAMES = (
     'itr_i_indexed_decode',
     'itr_i_instruction_key_miss_raises_key_vector',
     'itr_i_match_ignores_vrn',
+    'itr_i_madison_first_invalid_slot_faults',
+    'itr_i_madison_last_slot',
+    'itr_i_merced_first_invalid_slot_faults',
     'itr_i_reserved_slot_faults',
     'itr_i_resumes_next_slot_after_tb_exit',
     'itr_i_slot_uses_low_8_bits',
@@ -6200,7 +6486,11 @@ CASE_NAMES = (
     'unaligned_store_reports_unaligned_when_mapped',
     'mov_pkr_duplicate_key_invalidates_old_slot',
     'mov_pkr_indexed_decode',
+    'mov_pkr_merced_unimplemented_key_bit_faults',
     'mov_rr_indexed_decode',
+    'mov_rr_merced_256m_page_size',
+    'mov_rr_merced_64m_page_size',
+    'mov_rr_merced_unimplemented_rid_bit_faults',
     'no_ic_data_access_enters_vector_with_ni',
     'percpu_alt_dtlb_uses_updated_kr3_after_ptc_e',
     'probe_dt_disabled_maintenance_bits_grant',
@@ -6264,7 +6554,8 @@ CASE_NAMES = (
     'rfi_serializes_pending_ptr_i',
     'rsm_ic_inflight_dtlb_not_data_nested',
     'rsm_ic_serialized_data_nested_tlb',
-    'sal_boot_identity_does_not_override_explicit_rid_miss',
+    'sal_boot_nonstandard_direct_tc_is_purgeable_after_iva_handoff',
+    'sal_boot_identity_coexists_with_explicit_rid_mapping',
     'sal_boot_identity_handles_nonzero_region7_rid',
     'short_vhpt_entry_not_present_aborts_to_dtlb_miss',
     'short_vhpt_ifetch_read_only_raises_inst_access',
@@ -6299,6 +6590,7 @@ CASE_NAMES = (
     'tpa_region5_kernel_dtr_large_page',
     'tpa_uses_short_vhpt_walk',
     'translation_hash_m46_ignored_bits_decode',
+    'translation_hash_merced_long_format',
     'translation_hash_m_unit_decode',
     'translation_hash_nat_source_rules',
     'translation_hash_ops_clear_dest_nat',
@@ -6307,6 +6599,15 @@ CASE_NAMES = (
 CASE_METADATA = {
     'interruption_serializes_pending_ptr_d': CaseMetadata(nonterminal_effect_loop=True),
     'itc_d_not_present_rejects_low_itir_reserved_field': CaseMetadata(terminal_is_fault_ip=True),
+    'itc_d_merced_main_tlb_capacity': CaseMetadata(
+        expectation_evidence=CaseEvidence.PAL_OR_PLATFORM_ABI,
+        tags=frozenset({'cpu-model:merced', 'model-specific-tlb'}),
+        spec_refs=(
+            'Itanium-hardware-developer-manual-248701-002.pdf: '
+            'sections 2.5.6.1 and 2.5.6.2',
+        ),
+        required_features=frozenset({'cpu-model:merced'}),
+    ),
     'itc_d_present_reserved_itir_field_fault': CaseMetadata(terminal_is_fault_ip=True),
     'itc_d_present_reserved_ma_field_fault': CaseMetadata(terminal_is_fault_ip=True),
     'itc_d_present_reserved_pte_field_fault': CaseMetadata(terminal_is_fault_ip=True),
@@ -6315,6 +6616,22 @@ CASE_METADATA = {
     'itr_i_clear_accessed_raises_inst_access_bit': CaseMetadata(nonterminal_effect_loop=True),
     'ptr_i_purges_matching_itr_by_address': CaseMetadata(nonterminal_effect_loop=True),
     'rsm_ic_inflight_dtlb_not_data_nested': CaseMetadata(nonterminal_effect_loop=True),
+    'sal_boot_nonstandard_direct_tc_is_purgeable_after_iva_handoff':
+        CaseMetadata(
+            expectation_evidence=CaseEvidence.EXTERNAL_GUEST_REGRESSION,
+            tags=frozenset({
+                'external-guest-regression',
+                'firmware-loader-compatibility',
+                'nonstandard-platform-behavior',
+            }),
+            spec_refs=(
+                'itanium-system-abstraction-layer-specification.pdf: '
+                'sections 3.3.2.1 and 3.3.2.2 specify identity mappings only',
+                'IA-64 build 2600 setup-loader trace: RR7=0x135, '
+                '8 KiB pages, VA=PA+0x80000000',
+            ),
+            required_features=frozenset({'firmware-sal-loader-compatibility'}),
+        ),
     'short_vhpt_walker_rejects_pending_table_purge': CaseMetadata(nonterminal_effect_loop=True),
     'ssm_ic_inflight_dtlb_sets_ni': CaseMetadata(nonterminal_effect_loop=True),
     'ssm_ic_inflight_short_vhpt_entry_miss_raises_vhpt': CaseMetadata(nonterminal_effect_loop=True),

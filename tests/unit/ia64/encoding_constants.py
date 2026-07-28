@@ -128,11 +128,14 @@ IA64_PKR_VALID = 1 << 0
 IA64_PKR_WD = 1 << 1
 IA64_PKR_RD = 1 << 2
 IA64_PKR_XD = 1 << 3
-# Per translation-register bank.  Both supported CPU models implement 64.
-IA64_TR_COUNT = 64
+MONTECITO_TR_COUNT = 32
+MADISON_TR_COUNT = 64
 IA64_TLB_MAX = 128
+MERCED_ITLB_ENTRIES = 64
+MERCED_DTLB_ENTRIES = 96
 IA64_REGION_BITS = 3
 IA64_IMPL_PA_BITS = 50
+MERCED_IMPL_PA_BITS = 44
 IA64_IMPL_VA_MSB = 60
 IA64_IMPL_VA_BITS = IA64_IMPL_VA_MSB + 1 + IA64_REGION_BITS
 IA64_PAL_IMPL_VA_MSB = IA64_IMPL_VA_MSB
@@ -186,8 +189,10 @@ PAL_HALT_INFO = 0x0101
 PAL_TEST_PROC = 0x0102
 PAL_VM_TR_READ = 0x0105
 PAL_BRAND_INFO = 0x0112
-PAL_VERSION_VALUE = ((2 << 40) | (0x23 << 32) | (1 << 24) |
-                     (2 << 8) | 0x23)
+PAL_VERSION_VALUE = ((0x0968 << 32) | (1 << 24) | 0x0968)
+MADISON_PAL_VERSION_VALUE = ((0x0573 << 32) | (1 << 24) | 0x0573)
+MERCED_PAL_VERSION_VALUE = ((0x8830 << 32) | (1 << 24) | 0x8830)
+MERCED_PAL_PERF_MON_INFO_VALUE = 0x08122004
 PAL_INSERTABLE_PAGE_SIZE_MASK = ((1 << 12) | (1 << 13) | (1 << 14) |
                                  (1 << 16) | (1 << 18) | (1 << 20) |
                                  (1 << 22) | (1 << 24) | (1 << 26) |
@@ -195,39 +200,82 @@ PAL_INSERTABLE_PAGE_SIZE_MASK = ((1 << 12) | (1 << 13) | (1 << 14) |
 PAL_PURGE_PAGE_SIZE_MASK = PAL_INSERTABLE_PAGE_SIZE_MASK
 PAL_VM_SUMMARY_INFO_1 = (1 | (IA64_IMPL_PA_BITS << 1) | (24 << 8) |
                          ((IA64_PKR_COUNT - 1) << 16) |
-                         (8 << 24) | ((IA64_TR_COUNT - 1) << 32) |
-                         ((IA64_TR_COUNT - 1) << 40) | (4 << 48) |
+                         (8 << 24) | ((MONTECITO_TR_COUNT - 1) << 32) |
+                         ((MONTECITO_TR_COUNT - 1) << 40) | (4 << 48) |
                          (2 << 56))
 PAL_VM_SUMMARY_INFO_2 = IA64_PAL_IMPL_VA_MSB | (24 << 8)
+MADISON_PAL_VM_SUMMARY_INFO_1 = (
+    1 | (IA64_IMPL_PA_BITS << 1) | (24 << 8) |
+    ((IA64_PKR_COUNT - 1) << 16) | (8 << 24) |
+    ((MADISON_TR_COUNT - 1) << 32) |
+    ((MADISON_TR_COUNT - 1) << 40) | (4 << 48) | (2 << 56))
 PAL_RATIO_16_1 = (16 << 32) | 1
 PAL_RATIO_16_3 = (16 << 32) | 3
+PAL_RATIO_8_1 = (8 << 32) | 1
+PAL_RATIO_4_3 = (4 << 32) | 3
 PAL_RATIO_4_1 = (4 << 32) | 1
-PAL_RATIO_2_1 = (2 << 32) | 1
-PAL_MEM_ATTRIB_WB_UC = (1 << 0) | (1 << 4)
+PAL_MEM_ATTRIB_ITANIUM2 = (1 << 0) | (1 << 4) | (1 << 5) | (1 << 6)
+MERCED_PAL_MEM_ATTRIB = ((1 << 0) | (1 << 4) | (1 << 6) | (1 << 7))
 PAL_CACHE_INFO_L0_I_1 = ((4 << 8) | (6 << 16) |
                          (6 << 24) | (0xff << 32) | (1 << 40))
 PAL_CACHE_INFO_L0_D_1 = ((4 << 8) | (6 << 16) |
                          (6 << 24) | (1 << 32) | (1 << 40))
-PAL_CACHE_INFO_L0_2 = 16384 | (6 << 32) | (12 << 40) | (49 << 48)
+PAL_CACHE_INFO_L0_2 = 16384 | (12 << 32) | (12 << 40) | (49 << 48)
 PAL_CACHE_INFO_L1_I_1 = ((8 << 8) | (7 << 16) | (7 << 24) |
                          (0xff << 32) | (7 << 40))
-PAL_CACHE_INFO_L1_I_2 = (1048576 | (7 << 32) | (17 << 40) | (49 << 48))
+PAL_CACHE_INFO_L1_I_2 = (1048576 | (12 << 32) | (17 << 40) | (49 << 48))
 PAL_CACHE_INFO_L1_D_1 = ((1 << 1) | (8 << 8) | (7 << 16) |
                          (7 << 24) | (1 << 32) | (5 << 40))
-PAL_CACHE_INFO_L1_D_2 = (262144 | (7 << 32) | (15 << 40) | (49 << 48))
+PAL_CACHE_INFO_L1_D_2 = (262144 | (12 << 32) | (15 << 40) | (49 << 48))
 PAL_CACHE_INFO_L2_U_1 = (1 | (1 << 1) | (12 << 8) | (7 << 16) |
                          (7 << 24) | (1 << 32) | (14 << 40))
-PAL_CACHE_INFO_L2_U_2 = (12 * 1024 * 1024 | (7 << 32) | (20 << 40) |
-                         (49 << 48))
+PAL_CACHE_INFO_L2_U_2 = (12 * 1024 * 1024 | (12 << 32) | (20 << 40) |
+                          (49 << 48))
 PAL_VM_INFO_L0 = 1 | (32 << 8) | (32 << 16)
 PAL_VM_INFO_L1 = (1 | (128 << 8) | (128 << 16) |
                   (1 << 32) | (1 << 34))
+MERCED_INSERTABLE_PAGE_SIZE_MASK = (
+    (1 << 12) | (1 << 13) | (1 << 14) | (1 << 16) | (1 << 18) |
+    (1 << 20) | (1 << 22) | (1 << 24) | (1 << 26) | (1 << 28))
+MERCED_PURGEABLE_PAGE_SIZE_MASK = (
+    (1 << 12) | (1 << 13) | (1 << 14) | (1 << 16) | (1 << 18) |
+    (1 << 20) | (1 << 22) | (1 << 24) | (1 << 26) | (1 << 28) |
+    (1 << 32))
+MERCED_PAL_VM_SUMMARY_INFO_1 = (
+    1 | (44 << 1) | (21 << 8) | (15 << 16) | (47 << 32) |
+    (7 << 40) | (3 << 48) | (2 << 56))
+MERCED_PAL_VM_SUMMARY_INFO_2 = 50 | (18 << 8)
+MERCED_PAL_VM_INFO_L0_I = (
+    1 | (MERCED_ITLB_ENTRIES << 8) | (MERCED_ITLB_ENTRIES << 16) |
+    (1 << 34))
+MERCED_PAL_VM_INFO_L0_D = 1 | (32 << 8) | (32 << 16)
+MERCED_PAL_VM_INFO_L1_D = (
+    1 | (MERCED_DTLB_ENTRIES << 8) | (MERCED_DTLB_ENTRIES << 16) |
+    (1 << 34))
+MERCED_PAL_CACHE_INFO_L0_I_1 = (
+    (4 << 8) | (5 << 16) | (5 << 24) | (0xff << 32) | (1 << 40))
+MERCED_PAL_CACHE_INFO_L0_D_1 = (
+    (4 << 8) | (5 << 16) | (5 << 24) | (1 << 32) | (2 << 40) |
+    (0x09 << 48) | (0x0b << 56))
+MERCED_PAL_CACHE_INFO_L0_2 = (
+    16384 | (12 << 32) | (12 << 40) | (43 << 48))
+MERCED_PAL_CACHE_INFO_L1_U_1 = (
+    1 | (1 << 1) | (6 << 8) | (6 << 16) | (6 << 24) |
+    (1 << 32) | (6 << 40) | (0x09 << 48) | (0x0b << 56))
+MERCED_PAL_CACHE_INFO_L1_U_2 = (
+    96 * 1024 | (12 << 32) | (14 << 40) | (43 << 48))
+MERCED_PAL_CACHE_INFO_L2_U_1 = (
+    1 | (1 << 1) | (4 << 8) | (6 << 16) | (6 << 24) |
+    (1 << 32) | (21 << 40) | (0x09 << 48) | (0x0b << 56))
+MERCED_PAL_CACHE_INFO_L2_U_2 = (
+    4 * 1024 * 1024 | (12 << 32) | (20 << 40) | (43 << 48))
 PAL_CACHE_PROT_DATA_NONE = 64
 PAL_CACHE_PROT_TAG_NONE_L0 = (1 << 30) | (12 << 8) | (49 << 14)
 PAL_PLATFORM_INTERRUPT_BLOCK = 0
 PAL_PLATFORM_IO_BLOCK = 1
 PAL_INTERRUPT_BLOCK_DEFAULT = 0xfee00000
-PAL_IO_BLOCK_DEFAULT = 0x80000c000000
+PAL_IO_BLOCK_DEFAULT = (1 << IA64_IMPL_PA_BITS) - (64 << 20)
+MERCED_PAL_IO_BLOCK_DEFAULT = (1 << 44) - (64 << 20)
 PAL_TR_VALID_ALL = 0xf
 PAL_TR_TEST_PTE = 0x4009661
 PAL_TR_TEST_ITIR = 12 << 2
@@ -258,7 +306,7 @@ PAL_HALT_LIGHT_INFO = ((1 << 61) | (1 << 60) | (1000 << 32) |
                        (1 << 16) | 1)
 PAL_HALT_STATE1_INFO = ((1 << 60) | (1000 << 32) | (1 << 16) | 1)
 PAL_SELF_TEST_STATE_TESTED = 1 << 2
-IA64_ITC_TICKS_PER_MILLISECOND = 200000
+IA64_ITC_TICKS_PER_MILLISECOND = 400000
 
 __all__ = (
     'IA64_EXCP_NONE',
@@ -389,10 +437,14 @@ __all__ = (
     'IA64_PKR_WD',
     'IA64_PKR_RD',
     'IA64_PKR_XD',
-    'IA64_TR_COUNT',
+    'MONTECITO_TR_COUNT',
+    'MADISON_TR_COUNT',
     'IA64_TLB_MAX',
+    'MERCED_ITLB_ENTRIES',
+    'MERCED_DTLB_ENTRIES',
     'IA64_REGION_BITS',
     'IA64_IMPL_PA_BITS',
+    'MERCED_IMPL_PA_BITS',
     'IA64_IMPL_VA_MSB',
     'IA64_IMPL_VA_BITS',
     'IA64_PAL_IMPL_VA_MSB',
@@ -446,15 +498,21 @@ __all__ = (
     'PAL_VM_TR_READ',
     'PAL_BRAND_INFO',
     'PAL_VERSION_VALUE',
+    'MADISON_PAL_VERSION_VALUE',
+    'MERCED_PAL_VERSION_VALUE',
+    'MERCED_PAL_PERF_MON_INFO_VALUE',
     'PAL_INSERTABLE_PAGE_SIZE_MASK',
     'PAL_PURGE_PAGE_SIZE_MASK',
     'PAL_VM_SUMMARY_INFO_1',
     'PAL_VM_SUMMARY_INFO_2',
+    'MADISON_PAL_VM_SUMMARY_INFO_1',
     'PAL_RATIO_16_1',
     'PAL_RATIO_16_3',
+    'PAL_RATIO_8_1',
+    'PAL_RATIO_4_3',
     'PAL_RATIO_4_1',
-    'PAL_RATIO_2_1',
-    'PAL_MEM_ATTRIB_WB_UC',
+    'PAL_MEM_ATTRIB_ITANIUM2',
+    'MERCED_PAL_MEM_ATTRIB',
     'PAL_CACHE_INFO_L0_I_1',
     'PAL_CACHE_INFO_L0_D_1',
     'PAL_CACHE_INFO_L0_2',
@@ -466,12 +524,27 @@ __all__ = (
     'PAL_CACHE_INFO_L2_U_2',
     'PAL_VM_INFO_L0',
     'PAL_VM_INFO_L1',
+    'MERCED_INSERTABLE_PAGE_SIZE_MASK',
+    'MERCED_PURGEABLE_PAGE_SIZE_MASK',
+    'MERCED_PAL_VM_SUMMARY_INFO_1',
+    'MERCED_PAL_VM_SUMMARY_INFO_2',
+    'MERCED_PAL_VM_INFO_L0_I',
+    'MERCED_PAL_VM_INFO_L0_D',
+    'MERCED_PAL_VM_INFO_L1_D',
+    'MERCED_PAL_CACHE_INFO_L0_I_1',
+    'MERCED_PAL_CACHE_INFO_L0_D_1',
+    'MERCED_PAL_CACHE_INFO_L0_2',
+    'MERCED_PAL_CACHE_INFO_L1_U_1',
+    'MERCED_PAL_CACHE_INFO_L1_U_2',
+    'MERCED_PAL_CACHE_INFO_L2_U_1',
+    'MERCED_PAL_CACHE_INFO_L2_U_2',
     'PAL_CACHE_PROT_DATA_NONE',
     'PAL_CACHE_PROT_TAG_NONE_L0',
     'PAL_PLATFORM_INTERRUPT_BLOCK',
     'PAL_PLATFORM_IO_BLOCK',
     'PAL_INTERRUPT_BLOCK_DEFAULT',
     'PAL_IO_BLOCK_DEFAULT',
+    'MERCED_PAL_IO_BLOCK_DEFAULT',
     'PAL_TR_VALID_ALL',
     'PAL_TR_TEST_PTE',
     'PAL_TR_TEST_ITIR',

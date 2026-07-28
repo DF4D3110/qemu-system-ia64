@@ -180,7 +180,7 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
     case IA64_OP_MOV_GRPKR:
         ia64_gen_check_nat_register(insn, op->destination);
         ia64_gen_check_reserved_bits(insn, ia64_gr_src(op->destination),
-                                     IA64_PKR_MASK);
+                                     ia64_pkr_mask(ctx->env));
         gen_helper_mov_grpkr_write(tcg_env, tcg_constant_i32(op->source),
                                    ia64_gr_src(op->destination));
         ctx->restart.exit_after_bundle = true;
@@ -191,7 +191,7 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
         ia64_gen_check_register_index(insn, ia64_gr_src(op->register_index),
                                       IA64_PKR_COUNT);
         ia64_gen_check_reserved_bits(insn, ia64_gr_src(op->destination),
-                                     IA64_PKR_MASK);
+                                     ia64_pkr_mask(ctx->env));
         gen_helper_mov_grpkr_indexed_write(
             tcg_env, ia64_gr_src(op->register_index),
             ia64_gr_src(op->destination));
@@ -456,7 +456,7 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
         ia64_gen_check_nat_register(insn, op->register_index);
         ia64_gen_check_register_index(
             insn, ia64_gr_src(op->register_index),
-            ia64_env_cpu_class(ctx->env)->tr_count);
+            ia64_env_cpu_class(ctx->env)->dtr_count);
         ia64_gen_sync_ip_for_helper(insn);
         gen_helper_itr_insert(tcg_env, ia64_gr_src(op->source),
                                ia64_gr_src(op->register_index),
@@ -470,7 +470,7 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
         ia64_gen_check_nat_register(insn, op->register_index);
         ia64_gen_check_register_index(
             insn, ia64_gr_src(op->register_index),
-            ia64_env_cpu_class(ctx->env)->tr_count);
+            ia64_env_cpu_class(ctx->env)->itr_count);
         ia64_gen_sync_ip_for_helper(insn);
         gen_helper_itr_insert(tcg_env, ia64_gr_src(op->source),
                                ia64_gr_src(op->register_index),
@@ -781,14 +781,16 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
             if (op->destination != 0) {
                 tcg_gen_mov_i64(cpu_gr[op->destination], result);
                 ia64_gen_gr_nat_from_1_or_unimplemented_va(op->destination,
-                                                           op->register_index);
+                    op->register_index,
+                    ia64_env_cpu_class(ctx->env)->impl_va_msb);
             }
         } else {
             gen_helper_ttag(result, tcg_env, ia64_gr_src(op->register_index));
             if (op->destination != 0) {
                 tcg_gen_mov_i64(cpu_gr[op->destination], result);
                 ia64_gen_gr_nat_from_1_or_unimplemented_va(op->destination,
-                                                           op->register_index);
+                    op->register_index,
+                    ia64_env_cpu_class(ctx->env)->impl_va_msb);
             }
         }
         break;

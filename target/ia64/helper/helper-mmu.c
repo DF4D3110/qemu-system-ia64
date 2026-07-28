@@ -11,6 +11,12 @@ void helper_tlb_serialize(CPUIA64State *env, uint32_t include_data,
     ia64_tlb_serialize(env, include_data, include_inst);
 }
 
+void helper_merced_dtlb1_touch(CPUIA64State *env, uint64_t va, uint32_t size,
+                               uint32_t translated)
+{
+    ia64_mmu_data_access(env, va, size, translated);
+}
+
 void helper_fc(CPUIA64State *env, uint64_t addr)
 {
     ia64_mmu_fc(env, addr);

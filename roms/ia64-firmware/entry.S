@@ -50,6 +50,277 @@ pal_proc_entry:
     .size pal_proc_entry, . - pal_proc_entry
 
     /*
+     * SAL 3.0 requires a virtual-mode caller to put the virtual SAL GP in
+     * r1.  One released IA-64 HAL instead relocates the advertised GP with
+     * the runtime-code mapping even when the MDT gives runtime data a
+     * different mapping.  The public SAL and EFI specifications found so
+     * far do not describe that historical mapping rule.
+     *
+     * Keep this non-standard compatibility boundary in a small RX-only
+     * entry stub.  The advertised GP is the anchor below, so the value from
+     * either a conforming physical caller or that HAL identifies the SAL
+     * code relocation.  The stub then runs the ordinary linked C image with
+     * instruction, data, and RSE translation disabled and its real physical
+     * GP.
+     *
+     * A physical SAL call must not retain the caller's virtual RSE as the
+     * previous bridge did: alloc or br.ret can otherwise raise an RSE TLB
+     * miss after PSR.ic/it/dt no longer describe the OS exception context.
+     * Follow SDM Vol. 2 section 6.11.3 instead.  Flush the caller's dirty
+     * partition while its translations are live, enter enforced-lazy mode,
+     * and switch BSPSTORE/RNAT to a private physical backing store.  The
+     * reverse sequence restores the caller's backing store before its
+     * translation state and RSC are reinstated.
+     *
+     * The machine supports at most four processors.  Each gets a 32 KiB
+     * reserved low-memory slot below 0x80000: 16 KiB for the RSE backing
+     * store followed by a 16 KiB memory stack.  Interrupts and interruption
+     * collection stay disabled while the private physical context is active.
+     */
+    .equ SAL_PSR_I,                         (1 << 14)
+    .equ SAL_PSR_IC,                        (1 << 13)
+    .equ SAL_PSR_DT,                        (1 << 17)
+    .equ SAL_PSR_RT,                        (1 << 27)
+    .equ SAL_PSR_IT,                        (1 << 36)
+    .equ SAL_PSR_TRANSLATION_MASK,          (SAL_PSR_DT | SAL_PSR_RT | SAL_PSR_IT)
+    .equ SAL_PSR_PHYSICAL_ENTRY_CLEAR,      (SAL_PSR_I | SAL_PSR_IC | SAL_PSR_TRANSLATION_MASK)
+    .equ SAL_RUNTIME_AREA_TOP,              0x80000
+    .equ SAL_RUNTIME_AREA_SHIFT,            15
+    .equ SAL_RUNTIME_BACKING_SIZE,          0x4000
+    .equ SAL_RUNTIME_STACK_FRAME_SIZE,      0x100
+    .equ SAL_RUNTIME_RSC_EAGER_PL0,         3
+
+    .section .text.sal_proc_entry, "ax"
+    .align 16
+    .global sal_proc_gp_anchor
+    .type sal_proc_gp_anchor, @object
+sal_proc_gp_anchor:
+    .quad 0
+    .quad 0
+    .size sal_proc_gp_anchor, . - sal_proc_gp_anchor
+
+    .align 16
+    .global sal_proc_entry
+    .type sal_proc_entry, @function
+    .proc sal_proc_entry
+    .explicit
+sal_proc_entry:
+    /*
+     * Preserve every value needed across the RSE switch in static GRs.
+     * r4-r7 are left untouched so the C ABI preserves their values and NaT
+     * bits without an unsafe ordinary store.
+     */
+    mov r14 = r32
+    mov r15 = r33
+    mov r16 = r34
+    mov r17 = r35
+    ;;
+    mov r18 = r36
+    mov r19 = r37
+    mov r20 = r38
+    mov r21 = r39
+    ;;
+    mov r22 = b0
+    mov r23 = r1
+    mov r24 = r12
+    mov r25 = psr
+    ;;
+    movl r26 = sal_proc_gp_anchor
+    mov r27 = ar.rsc
+    ;;
+    sub r26 = r23, r26
+
+    /*
+     * SAL permits fully physical or fully virtual calls.  Do not attempt a
+     * privileged mode transition from a mixed translation context.
+     */
+    movl r31 = SAL_PSR_TRANSLATION_MASK
+    ;;
+    and r30 = r25, r31
+    ;;
+    cmp.eq p6, p7 = r30, r0
+    cmp.eq p8, p9 = r30, r31
+    ;;
+(p6) br.cond.sptk.few sal_proc_mode_valid
+(p8) br.cond.sptk.few sal_proc_mode_valid
+    ;;
+    mov r8 = -3
+    mov r9 = r0
+    mov r10 = r0
+    mov r11 = r0
+    ;;
+    br.ret.sptk.many b0
+    ;;
+
+sal_proc_mode_valid:
+    /*
+     * Explicit flushrs may fault on the caller's backing store.  Perform it
+     * before changing translation or interruption-collection state.
+     */
+    rsm psr.i
+    ;;
+    mov ar.rsc = r0
+    ;;
+    flushrs
+    ;;
+    mov r28 = ar.bsp
+    mov r29 = ar.rnat
+    mov r31 = cr.lid
+    ;;
+    extr.u r31 = r31, 24, 8
+    ;;
+    shl r31 = r31, SAL_RUNTIME_AREA_SHIFT
+    movl r2 = SAL_RUNTIME_AREA_TOP
+    ;;
+    sub r2 = r2, r31
+    movl r3 = (SAL_RUNTIME_BACKING_SIZE * 2)
+    ;;
+    sub r30 = r2, r3
+    ;;
+
+    /*
+     * Start an empty physical RSE context.  mov-to-BSPSTORE makes RNAT
+     * undefined, so initialize it before enabling eager RSE operation.
+     * Interruption collection is disabled before BSPSTORE changes; until
+     * that point both the caller's SP and RSE context remain intact.
+     */
+    rsm psr.ic
+    ;;
+    srlz.d
+    ;;
+    srlz.i
+    ;;
+    invala
+    mov ar.bspstore = r30
+    ;;
+    mov ar.rnat = r0
+    movl r31 = SAL_PSR_PHYSICAL_ENTRY_CLEAR
+    ;;
+    andcm r31 = r25, r31
+    movl r3 = sal_proc_physical
+    ;;
+    mov cr.ipsr = r31
+    mov cr.iip = r3
+    mov cr.ifs = r0
+    ;;
+    rfi
+    ;;
+
+sal_proc_physical:
+    adds r12 = -SAL_RUNTIME_STACK_FRAME_SIZE, r2
+    mov ar.rsc = SAL_RUNTIME_RSC_EAGER_PL0
+    movl r1 = __gp
+    ;;
+
+    /*
+     * The bridge owns the fixed frame above the C stack.  All stored values
+     * originate in non-NaT-capable special/static state; SAL arguments stay
+     * in registers until they are copied into the new output frame.
+     */
+    mov r2 = r12
+    ;;
+    st8 [r2] = r22, 8
+    ;;
+    st8 [r2] = r23, 8
+    ;;
+    st8 [r2] = r24, 8
+    ;;
+    st8 [r2] = r25, 8
+    ;;
+    st8 [r2] = r26, 8
+    ;;
+    st8 [r2] = r27, 8
+    ;;
+    st8 [r2] = r28, 8
+    ;;
+    st8 [r2] = r29, 8
+    ;;
+
+    alloc r31 = ar.pfs, 0, 0, 8, 0
+    ;;
+    st8 [r2] = r31
+    mov r32 = r14
+    mov r33 = r15
+    ;;
+    mov r34 = r16
+    mov r35 = r17
+    mov r36 = r18
+    mov r37 = r19
+    ;;
+    mov r38 = r20
+    mov r39 = r21
+    ;;
+    br.call.sptk.many b0 = sal_proc_dispatch
+    ;;
+
+    mov r23 = r8
+    mov r24 = r9
+    mov r25 = r10
+    mov r26 = r11
+    ;;
+    mov r2 = r12
+    ;;
+    ld8 r14 = [r2], 8
+    ;;
+    ld8 r15 = [r2], 8
+    ;;
+    ld8 r16 = [r2], 8
+    ;;
+    ld8 r17 = [r2], 8
+    ;;
+    ld8 r18 = [r2], 8
+    ;;
+    ld8 r19 = [r2], 8
+    ;;
+    ld8 r20 = [r2], 8
+    ;;
+    ld8 r21 = [r2], 8
+    ;;
+    ld8 r22 = [r2]
+    ;;
+
+    /*
+     * Flush the private context before rebasing BSPSTORE.  No stacked
+     * register is used after the switch until the caller's RT and RSC have
+     * been restored.
+     */
+    mov ar.rsc = r0
+    ;;
+    flushrs
+    ;;
+    invala
+    movl r31 = sal_proc_return
+    ;;
+    add r31 = r31, r18
+    mov ar.bspstore = r20
+    ;;
+    mov ar.rnat = r21
+    mov ar.pfs = r22
+    mov cr.ipsr = r17
+    ;;
+    mov cr.iip = r31
+    mov cr.ifs = r0
+    mov ar.rsc = r19
+    ;;
+    rfi
+    ;;
+
+sal_proc_return:
+    mov b0 = r14
+    mov r1 = r15
+    mov r12 = r16
+    ;;
+    mov r8 = r23
+    mov r9 = r24
+    mov r10 = r25
+    mov r11 = r26
+    ;;
+    br.ret.sptk.many b0
+    ;;
+    .endp sal_proc_entry
+    .size sal_proc_entry, . - sal_proc_entry
+
+    /*
      * The machine implements the arithmetic behind this architected
      * firmware ABI.  Keeping the bridge as a leaf preserves all eight input
      * registers and returns the four-word result directly in r8-r11.
@@ -249,6 +520,79 @@ fw_pal_halt_light:
     ;;
     .endp fw_pal_halt_light
     .size fw_pal_halt_light, . - fw_pal_halt_light
+
+    .section .text.fw_pal_platform_addr, "ax"
+    .global fw_pal_platform_addr
+    .type fw_pal_platform_addr, @function
+    .proc fw_pal_platform_addr
+    .explicit
+fw_pal_platform_addr:
+    alloc r34 = ar.pfs, 1, 2, 0, 0
+    ;;
+    mov r33 = b0
+    mov r30 = r32
+    movl r28 = 0x10
+    ;;
+    adds r29 = 1, r0
+    mov r31 = r0
+    movl r14 = pal_proc_entry
+    ;;
+    mov b6 = r14
+    movl r14 = 1f
+    ;;
+    mov b0 = r14
+    ;;
+    br.sptk.many b6
+    ;;
+1:
+    cmp.eq p6, p7 = r8, r0
+    ;;
+(p6) mov ar.k0 = r32
+    ;;
+    mov b0 = r33
+    mov ar.pfs = r34
+    ;;
+    br.ret.sptk.many b0
+    ;;
+    .endp fw_pal_platform_addr
+    .size fw_pal_platform_addr, . - fw_pal_platform_addr
+
+    .section .text.fw_pal_itc_ratio, "ax"
+    .global fw_pal_itc_ratio
+    .type fw_pal_itc_ratio, @function
+    .proc fw_pal_itc_ratio
+    .explicit
+fw_pal_itc_ratio:
+    alloc r33 = ar.pfs, 0, 2, 0, 0
+    ;;
+    mov r32 = b0
+    movl r28 = 0xe
+    ;;
+    mov r29 = r0
+    mov r30 = r0
+    mov r31 = r0
+    movl r14 = pal_proc_entry
+    ;;
+    mov b6 = r14
+    movl r14 = 1f
+    ;;
+    mov b0 = r14
+    ;;
+    br.sptk.many b6
+    ;;
+1:
+    cmp.eq p6, p7 = r8, r0
+    ;;
+(p6) mov r8 = r11
+(p7) mov r8 = r0
+    ;;
+    mov b0 = r32
+    mov ar.pfs = r33
+    ;;
+    br.ret.sptk.many b0
+    ;;
+    .endp fw_pal_itc_ratio
+    .size fw_pal_itc_ratio, . - fw_pal_itc_ratio
 
     .section .text.fw_ebc_bridge, "ax"
 

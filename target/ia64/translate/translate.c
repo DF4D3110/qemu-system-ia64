@@ -38,6 +38,61 @@ static TCGv_i64 cpu_rse_gr_dirty[2];
 #define IA64_COUNTED_SELF_BUDGET 4096
 #define IA64_CLOOP_ZERO_ST1_MAX IA64_COUNTED_SELF_BUDGET
 
+static void ia64_gen_merced_dtlb1_touch(DisasContext *ctx, TCGv_i64 addr,
+                                        int mmu_idx, MemOp memop)
+{
+    if (ia64_env_cpu_class(ctx->env)->model == IA64_CPU_MODEL_MERCED) {
+        gen_helper_merced_dtlb1_touch(
+            tcg_env, addr,
+            tcg_constant_i32(ia64_memop_size(memop)),
+            tcg_constant_i32(mmu_idx != MMU_PHYS_IDX));
+    }
+}
+
+void ia64_gen_qemu_ld_i64(DisasContext *ctx, TCGv_i64 value, TCGv_i64 addr,
+                          int mmu_idx, MemOp memop)
+{
+    ia64_gen_merced_dtlb1_touch(ctx, addr, mmu_idx, memop);
+    tcg_gen_qemu_ld_i64(value, addr, mmu_idx, memop);
+}
+
+void ia64_gen_qemu_st_i64(DisasContext *ctx, TCGv_i64 value, TCGv_i64 addr,
+                          int mmu_idx, MemOp memop)
+{
+    ia64_gen_merced_dtlb1_touch(ctx, addr, mmu_idx, memop);
+    tcg_gen_qemu_st_i64(value, addr, mmu_idx, memop);
+}
+
+void ia64_gen_qemu_ld_i128(DisasContext *ctx, TCGv_i128 value, TCGv_i64 addr,
+                           int mmu_idx, MemOp memop)
+{
+    ia64_gen_merced_dtlb1_touch(ctx, addr, mmu_idx, memop);
+    tcg_gen_qemu_ld_i128(value, addr, mmu_idx, memop);
+}
+
+void ia64_gen_qemu_st_i128(DisasContext *ctx, TCGv_i128 value, TCGv_i64 addr,
+                           int mmu_idx, MemOp memop)
+{
+    ia64_gen_merced_dtlb1_touch(ctx, addr, mmu_idx, memop);
+    tcg_gen_qemu_st_i128(value, addr, mmu_idx, memop);
+}
+
+void ia64_gen_atomic_xchg_i64(DisasContext *ctx, TCGv_i64 result,
+                              TCGv_i64 addr, TCGv_i64 value, int mmu_idx,
+                              MemOp memop)
+{
+    ia64_gen_merced_dtlb1_touch(ctx, addr, mmu_idx, memop);
+    tcg_gen_atomic_xchg_i64(result, addr, value, mmu_idx, memop);
+}
+
+void ia64_gen_atomic_fetch_add_i64(DisasContext *ctx, TCGv_i64 result,
+                                   TCGv_i64 addr, TCGv_i64 value, int mmu_idx,
+                                   MemOp memop)
+{
+    ia64_gen_merced_dtlb1_touch(ctx, addr, mmu_idx, memop);
+    tcg_gen_atomic_fetch_add_i64(result, addr, value, mmu_idx, memop);
+}
+
 static bool ia64_insn_may_set_fault_suppression(const Ia64Instruction *insn)
 {
     switch (insn->opcode) {
@@ -108,8 +163,7 @@ static bool ia64_instruction_address_matches_physical_entry(CPUIA64State *env,
     }
 
     if (ia64_firmware_identity_pa(env->cr_iva, address, env->psr,
-                                  address, &pa) ||
-        ia64_sal_boot_virtual_pa(env, address, &pa)) {
+                                  address, &pa)) {
         return pa == entry_pa;
     }
 
@@ -120,10 +174,6 @@ static bool ia64_instruction_address_matches_physical_entry(CPUIA64State *env,
                                  &pa, &perm);
     }
     if (entry && (perm & IA64_TLB_X)) {
-        return pa == entry_pa;
-    }
-
-    if (ia64_sal_boot_identity_pa(env, address, &pa)) {
         return pa == entry_pa;
     }
 
@@ -798,11 +848,12 @@ void ia64_gen_fr_mov_sig(uint8_t reg, TCGv_i64 value)
     }
 }
 
-static void ia64_gen_fr_ld(uint8_t reg, TCGv_i64 addr, int mmu_idx, MemOp memop)
+static void ia64_gen_fr_ld(DisasContext *ctx, uint8_t reg, TCGv_i64 addr,
+                           int mmu_idx, MemOp memop)
 {
     TCGv_i64 dst = ia64_fr_is_writable(reg) ? cpu_fr[reg] : tcg_temp_new_i64();
 
-    tcg_gen_qemu_ld_i64(dst, addr, mmu_idx, memop);
+    ia64_gen_qemu_ld_i64(ctx, dst, addr, mmu_idx, memop);
     if (ia64_fr_is_writable(reg)) {
         ia64_gen_fr_nat_clear(reg);
         ia64_gen_fr_sig_clear(reg);
@@ -811,21 +862,21 @@ static void ia64_gen_fr_ld(uint8_t reg, TCGv_i64 addr, int mmu_idx, MemOp memop)
     }
 }
 
-static void ia64_gen_fr_ld_s(uint8_t reg, TCGv_i64 addr, int mmu_idx,
-                             MemOp memop)
+static void ia64_gen_fr_ld_s(DisasContext *ctx, uint8_t reg, TCGv_i64 addr,
+                             int mmu_idx, MemOp memop)
 {
     TCGv_i64 value = tcg_temp_new_i64();
 
-    tcg_gen_qemu_ld_i64(value, addr, mmu_idx, memop);
+    ia64_gen_qemu_ld_i64(ctx, value, addr, mmu_idx, memop);
     gen_helper_setf_s(tcg_env, tcg_constant_i32(reg), value);
 }
 
-static void ia64_gen_fr_ld_sig(uint8_t reg, TCGv_i64 addr, int mmu_idx,
-                               MemOp memop)
+static void ia64_gen_fr_ld_sig(DisasContext *ctx, uint8_t reg, TCGv_i64 addr,
+                               int mmu_idx, MemOp memop)
 {
     TCGv_i64 dst = ia64_fr_is_writable(reg) ? cpu_fr[reg] : tcg_temp_new_i64();
 
-    tcg_gen_qemu_ld_i64(dst, addr, mmu_idx, memop);
+    ia64_gen_qemu_ld_i64(ctx, dst, addr, mmu_idx, memop);
     if (ia64_fr_is_writable(reg)) {
         ia64_gen_fr_nat_clear(reg);
         ia64_gen_fr_sig_set(reg);
@@ -834,18 +885,19 @@ static void ia64_gen_fr_ld_sig(uint8_t reg, TCGv_i64 addr, int mmu_idx,
     }
 }
 
-void ia64_gen_fr_load(uint8_t reg, TCGv_i64 addr, int mmu_idx, MemOp memop,
+void ia64_gen_fr_load(DisasContext *ctx, uint8_t reg, TCGv_i64 addr,
+                      int mmu_idx, MemOp memop,
                       IA64FPRegisterLoadFormat format)
 {
     switch (format) {
     case IA64_FP_REGISTER_LOAD_DOUBLE:
-        ia64_gen_fr_ld(reg, addr, mmu_idx, memop);
+        ia64_gen_fr_ld(ctx, reg, addr, mmu_idx, memop);
         break;
     case IA64_FP_REGISTER_LOAD_SINGLE:
-        ia64_gen_fr_ld_s(reg, addr, mmu_idx, memop);
+        ia64_gen_fr_ld_s(ctx, reg, addr, mmu_idx, memop);
         break;
     case IA64_FP_REGISTER_LOAD_SIGNIFICAND:
-        ia64_gen_fr_ld_sig(reg, addr, mmu_idx, memop);
+        ia64_gen_fr_ld_sig(ctx, reg, addr, mmu_idx, memop);
         break;
     default:
         g_assert_not_reached();
@@ -1645,23 +1697,23 @@ void ia64_gen_gr_nat_from_1(uint8_t dst, uint8_t src)
     ia64_gen_gr_nat_assign(dst, ia64_gen_gr_nat_read(src));
 }
 
-static TCGv_i64 ia64_gen_va_unimplemented(TCGv_i64 va)
+static TCGv_i64 ia64_gen_va_unimplemented(TCGv_i64 va, uint8_t impl_va_msb)
 {
     TCGv_i64 result = tcg_temp_new_i64();
 
-    if (IA64_IMPL_VA_MSB >= 60) {
+    if (impl_va_msb >= 60) {
         tcg_gen_movi_i64(result, 0);
     } else {
         TCGv_i64 sign = tcg_temp_new_i64();
         TCGv_i64 expected = tcg_temp_new_i64();
-        uint64_t count = 60 - IA64_IMPL_VA_MSB;
+        uint64_t count = 60 - impl_va_msb;
         uint64_t mask = (1ULL << count) - 1;
 
-        tcg_gen_shri_i64(sign, va, IA64_IMPL_VA_MSB);
+        tcg_gen_shri_i64(sign, va, impl_va_msb);
         tcg_gen_andi_i64(sign, sign, 1);
         tcg_gen_neg_i64(expected, sign);
         tcg_gen_andi_i64(expected, expected, mask);
-        tcg_gen_shri_i64(result, va, IA64_IMPL_VA_MSB + 1);
+        tcg_gen_shri_i64(result, va, impl_va_msb + 1);
         tcg_gen_andi_i64(result, result, mask);
         tcg_gen_xor_i64(result, result, expected);
         tcg_gen_setcondi_i64(TCG_COND_NE, result, result, 0);
@@ -1670,7 +1722,8 @@ static TCGv_i64 ia64_gen_va_unimplemented(TCGv_i64 va)
     return result;
 }
 
-void ia64_gen_gr_nat_from_1_or_unimplemented_va(uint8_t dst, uint8_t src)
+void ia64_gen_gr_nat_from_1_or_unimplemented_va(uint8_t dst, uint8_t src,
+                                                uint8_t impl_va_msb)
 {
     TCGv_i64 nat;
     TCGv_i64 unimplemented;
@@ -1680,7 +1733,8 @@ void ia64_gen_gr_nat_from_1_or_unimplemented_va(uint8_t dst, uint8_t src)
     }
 
     nat = ia64_gen_gr_nat_read(src);
-    unimplemented = ia64_gen_va_unimplemented(ia64_gr_src(src));
+    unimplemented = ia64_gen_va_unimplemented(ia64_gr_src(src),
+                                              impl_va_msb);
     tcg_gen_or_i64(nat, nat, unimplemented);
     ia64_gen_gr_nat_assign(dst, nat);
 }
@@ -2392,6 +2446,17 @@ static IA64PrepareResult ia64_gen_prepare_insn(
                        offsetof(CPUIA64State, cr_isr));
         ia64_gen_raise_exception(IA64_EXCP_RESERVED_REG_FIELD,
                                   insn->address, insn->raw, insn->slot);
+        if (skip == NULL) {
+            return IA64_PREPARE_NORETURN;
+        }
+        ia64_gen_predicate_end(skip);
+        return IA64_PREPARE_COMPLETE;
+    }
+    if ((insn->opcode == IA64_OP_BRL_COND ||
+         insn->opcode == IA64_OP_BRL_CALL) &&
+        !(ia64_env_cpu_class(ctx->env)->cpuid_features & IA64_CPUID4_LB)) {
+        ia64_gen_raise_exception(IA64_EXCP_ILLEGAL, insn->address,
+                                  insn->raw, insn->slot);
         if (skip == NULL) {
             return IA64_PREPARE_NORETURN;
         }

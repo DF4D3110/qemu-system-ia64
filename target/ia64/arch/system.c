@@ -18,6 +18,8 @@
 #define IA64_CPUID_VENDOR1           0x000000006c65746eULL /* "ntel" */
 #define IA64_CPUID_SERIAL            0x0000000000000000ULL
 
+#define IA64_MERCED_PMD_ADDR_IGNORED_MASK 0x1ff8000000000000ULL
+
 
 static void ia64_swap_banked_gr(CPUIA64State *env);
 uint64_t ia64_system_read_pr(CPUIA64State *env)
@@ -138,6 +140,9 @@ uint64_t ia64_system_read_ar(CPUIA64State *env, uint32_t ar_num)
     if (ar_num == 17) {
         return env->ar_bsp;
     }
+    if (ar_num == IA64_AR_RNAT) {
+        return ia64_rse_read_rnat(env);
+    }
     if (ar_num == 44) {
         return ia64_itc_read(env);
     }
@@ -219,8 +224,6 @@ void ia64_system_validate_ar_access(CPUIA64State *env, uint64_t value,
 
 void ia64_system_write_ar(CPUIA64State *env, uint32_t ar_num, uint64_t value)
 {
-    uint64_t old_bspstore;
-
     if (ar_num >= IA64_AR_COUNT) {
         return;
     }
@@ -257,7 +260,6 @@ void ia64_system_write_ar(CPUIA64State *env, uint32_t ar_num, uint64_t value)
     } else if (ar_num == 66) {
         value &= 0x3f;
     }
-    old_bspstore = env->ar_bspstore;
     env->ar[ar_num] = value;
     if (ar_num == 19) {
         /* Software supplies the whole NaT collection of BSPSTORE's group. */
@@ -269,13 +271,13 @@ void ia64_system_write_ar(CPUIA64State *env, uint32_t ar_num, uint64_t value)
          * empties and the dirty partition is preserved by rebasing
          * AR.BSP to the new address plus the dirty registers and their
          * intervening NaT collections.  No memory traffic occurs.
-         * RNAT becomes architecturally undefined; this implementation
-         * keeps its previous contents but stops treating them as the
-         * collection of a group they no longer describe.
+         * RNAT becomes architecturally undefined.  The RSE documents this
+         * target's deterministic compatibility choices for readback and a
+         * later spill; software still must restore RNAT before relying on it.
          */
         int32_t dirty = MAX(env->rse.rse_dirty, 0);
 
-        ia64_rse_rnat_bspstore_moved(env, old_bspstore);
+        ia64_rse_rnat_undefined(env);
         env->rse.rse_dirty_nat = ia64_rse_nat_words_grow(value, dirty);
         env->ar_bsp = value +
             (uint64_t)(env->rse.rse_dirty + env->rse.rse_dirty_nat) * 8;
@@ -556,16 +558,81 @@ void ia64_write_cr(CPUIA64State *env, uint32_t cr_num, uint64_t value)
 
 uint64_t ia64_system_read_pmc(CPUIA64State *env, uint32_t index)
 {
-    if (index >= IA64_PMC_COUNT) {
+    IA64CPUClass *icc = ia64_env_cpu_class(env);
+    uint64_t value;
+
+    if (index >= IA64_PMC_COUNT ||
+        !(icc->implemented_pmc_mask & (1ULL << index))) {
         return 0;
     }
-    return env->pmc[index];
+    value = env->pmc[index];
+    if (icc->model != IA64_CPU_MODEL_MERCED) {
+        return value;
+    }
+
+    switch (index) {
+    case 0:
+        return value & 0xf1;
+    case 1 ... 3:
+        return 0;
+    case 4 ... 5:
+        return value & 0x037f7f7f;
+    case 6 ... 7:
+        return value & 0x033f7f7f;
+    case 8 ... 9:
+        return value & 0xfffffffe3ffffff8ULL;
+    case 10:
+        return value & 0x030f00cf;
+    case 11:
+        return value & 0x130f00cf;
+    case 12:
+        return value & 0x0000ffcf;
+    case 13:
+        return value & 1;
+    default:
+        return 0;
+    }
 }
 
 void ia64_system_write_pmc(CPUIA64State *env, uint32_t index, uint64_t value)
 {
-    if (index >= IA64_PMC_COUNT) {
+    IA64CPUClass *icc = ia64_env_cpu_class(env);
+
+    if (index >= IA64_PMC_COUNT ||
+        !(icc->implemented_pmc_mask & (1ULL << index))) {
         return;
+    }
+    if (icc->model == IA64_CPU_MODEL_MERCED) {
+        switch (index) {
+        case 0:
+            value &= 0xf1;
+            break;
+        case 1 ... 3:
+            return;
+        case 4 ... 5:
+            value &= 0x037f7f7f;
+            break;
+        case 6 ... 7:
+            value &= 0x033f7f7f;
+            break;
+        case 8 ... 9:
+            value &= 0xfffffffe3ffffff8ULL;
+            break;
+        case 10:
+            value &= 0x030f00cf;
+            break;
+        case 11:
+            value &= 0x130f00cf;
+            break;
+        case 12:
+            value &= 0x0000ffcf;
+            break;
+        case 13:
+            value &= 1;
+            break;
+        default:
+            return;
+        }
     }
     env->pmc[index] = value;
 }
@@ -573,28 +640,68 @@ void ia64_system_write_pmc(CPUIA64State *env, uint32_t index, uint64_t value)
 uint64_t ia64_system_read_pmc_indexed(CPUIA64State *env, uint64_t index)
 {
     index &= 0xff;
-    if (index >= IA64_PMC_COUNT) {
-        return 0;
-    }
-    return env->pmc[index];
+    return ia64_system_read_pmc(env, index);
 }
 
 void ia64_system_write_pmc_indexed(CPUIA64State *env, uint64_t index,
                               uint64_t value)
 {
     index &= 0xff;
-    if (index >= IA64_PMC_COUNT) {
-        return;
-    }
-    env->pmc[index] = value;
+    ia64_system_write_pmc(env, index, value);
 }
 
 uint64_t ia64_system_read_pmd(CPUIA64State *env, uint32_t index)
 {
-    if (index >= IA64_PMD_COUNT) {
+    IA64CPUClass *icc = ia64_env_cpu_class(env);
+    uint64_t value;
+
+    if (index >= IA64_PMD_COUNT ||
+        !(icc->implemented_pmd_mask & (1ULL << index))) {
         return 0;
     }
-    return env->pmd[index];
+    value = env->pmd[index];
+    if (icc->model == IA64_CPU_MODEL_MERCED) {
+        switch (index) {
+        case 0:
+            value &= ~(IA64_MERCED_PMD_ADDR_IGNORED_MASK | 0x1c);
+            break;
+        case 1:
+            value &= 0xfff;
+            break;
+        case 2:
+            value &= ~IA64_MERCED_PMD_ADDR_IGNORED_MASK;
+            break;
+        case 3:
+            value &= 0xc000000000000fffULL;
+            break;
+        case 16:
+            value &= 0xf;
+            break;
+        case 17:
+            value &= ~(IA64_MERCED_PMD_ADDR_IGNORED_MASK | 0x2);
+            break;
+        default:
+            break;
+        }
+        if (index == 0 || index == 2 || index == 17) {
+            if (value & (1ULL << 50)) {
+                value |= IA64_MERCED_PMD_ADDR_IGNORED_MASK;
+            }
+        }
+    }
+    if (index >= 4 && index <= 7) {
+        uint32_t width = icc->perf_counter_width;
+
+        g_assert(width > 0 && width <= 64);
+        if (width < 64) {
+            uint64_t sign = 1ULL << (width - 1);
+            uint64_t mask = (sign << 1) - 1;
+
+            value &= mask;
+            return (value ^ sign) - sign;
+        }
+    }
+    return value;
 }
 
 uint64_t ia64_system_read_pmd_checked(CPUIA64State *env, uint64_t index,
@@ -607,19 +714,55 @@ uint64_t ia64_system_read_pmd_checked(CPUIA64State *env, uint64_t index,
         ia64_raise_exception(env, IA64_EXCP_RESERVED_REG_FIELD,
                                fault_ip, raw, slot);
     }
-    if ((env->pmc[index] & (1ULL << 6)) &&
+    if ((ia64_system_read_pmc(env, index) & (1ULL << 6)) &&
         ia64_psr_cpl(env->psr) != 0) {
         env->cr_isr = 0x20;
         ia64_raise_exception(env, IA64_EXCP_PRIVILEGED_REG,
                                fault_ip, raw, slot);
     }
-    return (env->psr & IA64_PSR_SP) ? 0 : env->pmd[index];
+    return (env->psr & IA64_PSR_SP) ? 0 :
+           ia64_system_read_pmd(env, index);
 }
 
 void ia64_system_write_pmd(CPUIA64State *env, uint32_t index, uint64_t value)
 {
-    if (index >= IA64_PMD_COUNT) {
+    IA64CPUClass *icc = ia64_env_cpu_class(env);
+
+    if (index >= IA64_PMD_COUNT ||
+        !(icc->implemented_pmd_mask & (1ULL << index))) {
         return;
+    }
+    if (icc->model == IA64_CPU_MODEL_MERCED) {
+        switch (index) {
+        case 0:
+            value &= ~(IA64_MERCED_PMD_ADDR_IGNORED_MASK | 0x1c);
+            break;
+        case 1:
+            value &= 0xfff;
+            break;
+        case 2:
+            value &= ~IA64_MERCED_PMD_ADDR_IGNORED_MASK;
+            break;
+        case 3:
+            value &= 0xc000000000000fffULL;
+            break;
+        case 16:
+            value &= 0xf;
+            break;
+        case 17:
+            value &= ~(IA64_MERCED_PMD_ADDR_IGNORED_MASK | 0x2);
+            break;
+        default:
+            break;
+        }
+    }
+    if (index >= 4 && index <= 7) {
+        uint32_t width = icc->perf_counter_width;
+
+        g_assert(width > 0 && width <= 64);
+        if (width < 64) {
+            value &= (1ULL << width) - 1;
+        }
     }
     env->pmd[index] = value;
 }
@@ -630,7 +773,7 @@ uint64_t ia64_system_read_pmd_indexed(CPUIA64State *env, uint64_t index)
     if (index >= IA64_PMD_COUNT) {
         return 0;
     }
-    return env->pmd[index];
+    return ia64_system_read_pmd(env, index);
 }
 
 void ia64_system_write_pmd_indexed(CPUIA64State *env, uint64_t index,
@@ -640,7 +783,7 @@ void ia64_system_write_pmd_indexed(CPUIA64State *env, uint64_t index,
     if (index >= IA64_PMD_COUNT) {
         return;
     }
-    env->pmd[index] = value;
+    ia64_system_write_pmd(env, index, value);
 }
 
 
@@ -805,10 +948,11 @@ uint64_t ia64_system_validate_rr_value(CPUIA64State *env, uint64_t value,
                                   uint32_t slot)
 {
     uint8_t ps = (value >> 2) & 0x3f;
+    uint8_t rid_bits = ia64_env_cpu_class(env)->rid_bits;
     uint64_t allowed = 1ULL | (0x3fULL << 2) |
-                       (((1ULL << IA64_IMPL_RID_BITS) - 1) << 8);
+                       (((1ULL << rid_bits) - 1) << 8);
 
-    if ((value & ~allowed) || !ia64_page_shift_insertable(ps)) {
+    if ((value & ~allowed) || !ia64_page_shift_insertable(env, ps)) {
         env->cr_isr = 0x30;
         ia64_raise_exception(env, IA64_EXCP_RESERVED_REG_FIELD,
                                fault_ip, raw, slot);
@@ -864,8 +1008,9 @@ uint64_t ia64_system_mov_pkrgr_indexed_read(CPUIA64State *env, uint64_t pkr_num)
 static void ia64_pkr_write(CPUIA64State *env, uint32_t pkr_num,
                            uint64_t value)
 {
-    uint64_t masked = value & IA64_PKR_MASK;
-    uint64_t key = masked & IA64_PKR_KEY_MASK;
+    uint64_t key_mask = ia64_pkr_key_mask(env);
+    uint64_t masked = value & ia64_pkr_mask(env);
+    uint64_t key = masked & key_mask;
     bool changed;
 
     if (pkr_num >= IA64_PKR_COUNT) {
@@ -876,7 +1021,7 @@ static void ia64_pkr_write(CPUIA64State *env, uint32_t pkr_num,
     if (masked & IA64_PKR_VALID) {
         for (uint32_t i = 0; i < IA64_PKR_COUNT; i++) {
             if (i != pkr_num && (env->pkr[i] & IA64_PKR_VALID) &&
-                (env->pkr[i] & IA64_PKR_KEY_MASK) == key) {
+                (env->pkr[i] & key_mask) == key) {
                 env->pkr[i] &= ~IA64_PKR_VALID;
                 changed = true;
             }

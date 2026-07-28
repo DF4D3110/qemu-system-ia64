@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .case import (CaseMetadata, CaseObservation, bind_cases)
+from .case import (CaseEvidence, CaseMetadata, CaseObservation, bind_cases)
 from .encoding import (
     ADV_UC_LOAD_BUNDLE,
     ADV_UC_LOAD_DATA,
@@ -17,6 +17,7 @@ from .encoding import (
     IA64_EXCP_NONE,
     IA64_EXCP_UNALIGNED,
     IA64_EXCP_UNSUPPORTED_DATA_REFERENCE,
+    IA64_FIRMWARE_IVT_BASE,
     IA64_GENERAL_VECTOR,
     IA64_GENEX_UNIMPL_DATA_ADDR,
     IA64_IMPL_PA_BITS,
@@ -1207,6 +1208,70 @@ test_speculative_load_handler_psr_ed_defers_retry = require_registers(
         "r10": 0,
     }, entry=0x10)
 
+test_firmware_alt_dtlb_speculative_load_defers = require_registers(
+    "firmware_alt_dtlb_speculative_load_defers", [
+        (0x10, *movl_mlx(3, 0x0000101e18001880)),
+        (0x20, *movl_mlx(2, IA64_FIRMWARE_IVT_BASE)),
+        (0x30, 0x00, mov_m_gr_cr(2, 2), nop_i(), nop_i()),
+        (0x40, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_DT)),
+        (0x50, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x60, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x70, 0x00, ld8_s_postinc(4, 3, 8), nop_i(), nop_i()),
+        (0x80, 0x00, mov_m_psr_gr(8), nop_i(), nop_i()),
+        (0x90, 0x00, nop_m(), nop_i(), nop_i()),
+        (0xa0, 0x00, nop_m(), tbit_z(3, 4, 8, 43), nop_i()),
+        (0xb0, 0x00, nop_m(), addl(9, 1, 0, qp=3),
+         addl(10, 1, 0, qp=4)),
+        (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, 0xc0)),
+    ], {
+        "ip": 0xc0,
+        "exception": IA64_EXCP_NONE,
+        "r3": 0x0000101e18001888,
+        "r4_nat": 1,
+        "r9": 1,
+        "r10": 0,
+    }, entry=0x10)
+
+test_firmware_alt_dtlb_nonspeculative_load_installs_identity_tc = \
+    require_registers(
+        "firmware_alt_dtlb_nonspeculative_load_installs_identity_tc", [
+            (0x10, *movl_mlx(3, 0x3000)),
+            (0x20, *movl_mlx(2, IA64_FIRMWARE_IVT_BASE)),
+            (0x30, 0x00, mov_m_gr_cr(2, 2), nop_i(), nop_i()),
+            (0x40, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_DT)),
+            (0x50, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+            (0x60, 0x00, srlz_d(), nop_i(), nop_i()),
+            (0x70, 0x00, ld8(4, 3), nop_i(), nop_i()),
+            (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+            raw_bundle(0x3000, 0x1122334455667788,
+                       0x8877665544332211),
+        ], {
+            "ip": 0x80,
+            "exception": IA64_EXCP_NONE,
+            "r4": 0x1122334455667788,
+        }, entry=0x10)
+
+test_firmware_alt_dtlb_nonspeculative_load_faults = require_registers(
+    "firmware_alt_dtlb_nonspeculative_load_faults", [
+        (0x10, *movl_mlx(3, 1 << IA64_IMPL_PA_BITS)),
+        (0x20, *movl_mlx(2, IA64_FIRMWARE_IVT_BASE)),
+        (0x30, 0x00, mov_m_gr_cr(2, 2), nop_i(), nop_i()),
+        (0x40, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_DT)),
+        (0x50, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x60, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x70, 0x00, ld8(4, 3), nop_i(), nop_i()),
+        (IA64_FIRMWARE_IVT_BASE | IA64_ALT_DTLB_VECTOR, 0x00,
+         mov_m_cr_gr(31, 17), nop_i(), nop_i()),
+        (IA64_FIRMWARE_IVT_BASE | IA64_ALT_DTLB_VECTOR | 0x10, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_FIRMWARE_IVT_BASE | IA64_ALT_DTLB_VECTOR | 0x10,
+                 IA64_FIRMWARE_IVT_BASE | IA64_ALT_DTLB_VECTOR | 0x10)),
+    ], {
+        "ip": IA64_FIRMWARE_IVT_BASE | IA64_ALT_DTLB_VECTOR | 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r31": IA64_ISR_R,
+    }, entry=0x10)
+
 test_speculative_unaligned_no_recovery_faults = require_registers(
     "speculative_unaligned_no_recovery_faults", [
         (0x10, 0x00, nop_m(), addl(3, 0x104, 0),
@@ -1265,6 +1330,52 @@ test_unimplemented_physical_load_faults = require_registers(
         "r9": IA64_GENEX_UNIMPL_DATA_ADDR | IA64_ISR_R,
         "r10": 1 << IA64_IMPL_PA_BITS,
     }, entry=0x10)
+
+test_unimplemented_physical_load_merced_44bit = require_registers(
+    "unimplemented_physical_load_merced_44bit", [
+        (0x10, *movl_mlx(3, 1 << 44)),
+        (0x20, *movl_mlx(19, IA64_PSR_IC)),
+        (0x30, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x40, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x50, 0x00, ld8(4, 3), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR, 0x00, mov_m_cr_gr(8, 19), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x10, 0x00, mov_m_cr_gr(9, 17),
+         nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x20, 0x00, mov_m_cr_gr(10, 20),
+         nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x30, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_GENERAL_VECTOR + 0x30,
+                 IA64_GENERAL_VECTOR + 0x30)),
+    ], {
+        "ip": IA64_GENERAL_VECTOR + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x50,
+        "r9": IA64_GENEX_UNIMPL_DATA_ADDR | IA64_ISR_R,
+        "r10": 1 << 44,
+    }, entry=0x10, cpu="merced")
+
+test_unimplemented_virtual_load_merced_54bit = require_registers(
+    "unimplemented_virtual_load_merced_54bit", [
+        (0x10, *movl_mlx(3, 1 << 51)),
+        (0x20, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_DT)),
+        (0x30, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x40, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x50, 0x00, ld8(4, 3), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR, 0x00, mov_m_cr_gr(8, 19), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x10, 0x00, mov_m_cr_gr(9, 17),
+         nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x20, 0x00, mov_m_cr_gr(10, 20),
+         nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x30, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_GENERAL_VECTOR + 0x30,
+                 IA64_GENERAL_VECTOR + 0x30)),
+    ], {
+        "ip": IA64_GENERAL_VECTOR + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x50,
+        "r9": IA64_GENEX_UNIMPL_DATA_ADDR | IA64_ISR_R,
+        "r10": 1 << 51,
+    }, entry=0x10, cpu="merced")
 
 test_unimplemented_physical_precludes_unaligned = require_registers(
     "unimplemented_physical_precludes_unaligned", [
@@ -2529,6 +2640,9 @@ CASE_NAMES = (
     'fetchadd4_nat_base_sets_read_write_isr',
     'fetchadd4_result_base_alias_invalidates_alat',
     'fetchadd4_unaligned_sets_read_write_isr',
+    'firmware_alt_dtlb_nonspeculative_load_installs_identity_tc',
+    'firmware_alt_dtlb_nonspeculative_load_faults',
+    'firmware_alt_dtlb_speculative_load_defers',
     'firmware_unaligned_load_assist',
     'firmware_unaligned_speculative_load_assist',
     'firmware_unaligned_store_assist',
@@ -2626,7 +2740,9 @@ CASE_NAMES = (
     'tnat_nz_or_decode',
     'tnat_unc_same_pred_pred_false_illegal',
     'unimplemented_physical_load_faults',
+    'unimplemented_physical_load_merced_44bit',
     'unimplemented_physical_precludes_unaligned',
+    'unimplemented_virtual_load_merced_54bit',
     'ws2003_cmd646_unaligned_check_load_sets_ed',
     'xchg4_decode',
     'xchg4_result_base_alias_invalidates_alat',
@@ -2635,6 +2751,34 @@ CASE_NAMES = (
 )
 
 CASE_METADATA = {
+    'firmware_alt_dtlb_nonspeculative_load_installs_identity_tc':
+        CaseMetadata(
+            expectation_evidence=CaseEvidence.PAL_OR_PLATFORM_ABI,
+            tags=frozenset({'firmware-sal'}),
+            spec_refs=(
+                'itanium-system-abstraction-layer-specification.pdf: '
+                'sections 3.3.2.1 and 3.3.2.2',
+            ),
+            required_features=frozenset({'firmware-sal'}),
+        ),
+    'firmware_alt_dtlb_nonspeculative_load_faults': CaseMetadata(
+        expectation_evidence=CaseEvidence.PAL_OR_PLATFORM_ABI,
+        tags=frozenset({'firmware-sal'}),
+        spec_refs=(
+            'itanium-system-abstraction-layer-specification.pdf: '
+            'section 3.3.1',
+        ),
+        required_features=frozenset({'firmware-sal'}),
+    ),
+    'firmware_alt_dtlb_speculative_load_defers': CaseMetadata(
+        expectation_evidence=CaseEvidence.PAL_OR_PLATFORM_ABI,
+        tags=frozenset({'firmware-sal'}),
+        spec_refs=(
+            'itanium-system-abstraction-layer-specification.pdf: '
+            'section 3.3.1',
+        ),
+        required_features=frozenset({'firmware-sal'}),
+    ),
     'tnat_nz_and_ignored_bits_decode': CaseMetadata(observation=CaseObservation.TNAT_PREDICATE),
     'tnat_nz_or_decode': CaseMetadata(observation=CaseObservation.TNAT_PREDICATE),
     'tnat_unc_same_pred_pred_false_illegal': CaseMetadata(observation=CaseObservation.TNAT_PREDICATE),

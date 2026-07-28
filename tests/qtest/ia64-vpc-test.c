@@ -22,7 +22,6 @@
 #include "hw/ia64/ia64_vpc_abi.h"
 #include "hw/net/e1000_regs.h"
 
-#define IA64_LEGACY_IO_BASE          0x000000800010000000ULL
 #define IA64_PCI_CONFIG_BASE         0x0000007ff0000000ULL
 #define IA64_ACPI_PM_IO_BASE         0x00002000ULL
 #define IA64_ACPI_PM1_CNT_OFFSET     0x04ULL
@@ -42,6 +41,7 @@
 #define IA64_IOSAPIC_RTE_DELIVERY    BIT(12)
 #define IA64_IOSAPIC_RTE_REMOTE_IRR  BIT(14)
 #define IA64_IOSAPIC_RTE_LEVEL       BIT(15)
+#define IA64_IOSAPIC_RTE_MASKED      BIT(16)
 #define IA64_TEST_RAM_SIZE           (256 * MiB)
 #define IA64_INT10_ROM_BASE          0x000c0000ULL
 #define IA64_INT10_ROM_SIZE          0x00000200U
@@ -162,14 +162,12 @@ static uint64_t ia64_sparse_io_offset(uint32_t port)
 
 static void int10_outw(QTestState *qts, uint16_t port, uint16_t value)
 {
-    qtest_writew(qts, IA64_LEGACY_IO_BASE +
-                 ia64_sparse_io_offset(port), value);
+    qtest_writew(qts, IA64_LEGACY_IO_PORT_PA(port), value);
 }
 
 static uint16_t int10_inw(QTestState *qts, uint16_t port)
 {
-    return qtest_readw(qts, IA64_LEGACY_IO_BASE +
-                       ia64_sparse_io_offset(port));
+    return qtest_readw(qts, IA64_LEGACY_IO_PORT_PA(port));
 }
 
 static size_t int10_call(QTestState *qts, TestInt10Registers *regs,
@@ -225,15 +223,15 @@ static uint32_t int10_far_to_linear(uint32_t pointer)
 
 static uint16_t test_vbe_read(QTestState *qts, uint16_t index)
 {
-    qtest_writew(qts, IA64_LEGACY_IO_BASE + IA64_VBE_IO_INDEX, index);
-    return qtest_readw(qts, IA64_LEGACY_IO_BASE + IA64_VBE_IO_DATA);
+    qtest_writew(qts, IA64_LEGACY_IO_PORT_PA(IA64_VBE_IO_INDEX), index);
+    return qtest_readw(qts, IA64_LEGACY_IO_PORT_PA(IA64_VBE_IO_DATA));
 }
 
 static uint8_t test_vga_indexed_read(QTestState *qts, uint16_t index_port,
                                      uint16_t data_port, uint8_t index)
 {
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + index_port, index);
-    return qtest_readb(qts, IA64_LEGACY_IO_BASE + data_port);
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(index_port), index);
+    return qtest_readb(qts, IA64_LEGACY_IO_PORT_PA(data_port));
 }
 
 static void test_assert_ppm_pixel(const char *filename, unsigned width,
@@ -580,8 +578,8 @@ static void test_acpi_reset_register(void)
     QTestState *qts = ia64_vpc_start(NULL);
 
     qtest_writeb(qts,
-                 IA64_LEGACY_IO_BASE + IA64_ACPI_PM_IO_BASE +
-                 IA64_ACPI_PM_RESET_OFFSET,
+                 IA64_LEGACY_IO_PORT_PA(IA64_ACPI_PM_IO_BASE +
+                                        IA64_ACPI_PM_RESET_OFFSET),
                  IA64_ACPI_PM_RESET_VALUE);
     qtest_qmp_eventwait(qts, "RESET");
     qtest_quit(qts);
@@ -1254,6 +1252,94 @@ static void test_iosapic_level_remote_irr(void)
     qtest_quit(qts);
 }
 
+static void test_iosapic_shared_vector_eoi(void)
+{
+    const unsigned first_pin = 22;
+    const unsigned second_pin = 23;
+    const uint8_t vector = 0x52;
+    const uint32_t first_rte =
+        IA64_IOSAPIC_RTE_BASE + first_pin * 2;
+    const uint32_t second_rte =
+        IA64_IOSAPIC_RTE_BASE + second_pin * 2;
+    QTestState *qts = ia64_vpc_start(NULL);
+    g_autofree char *iosapic_path =
+        find_unattached_child(qts, "ia64-iosapic");
+
+    /*
+     * One EOI vector identifies every matching level-triggered RTE.  Shared
+     * vectors must not leave a later pin's Remote IRR permanently set.
+     */
+    iosapic_write(qts, first_rte, vector | IA64_IOSAPIC_RTE_LEVEL);
+    iosapic_write(qts, second_rte, vector | IA64_IOSAPIC_RTE_LEVEL);
+    qtest_set_irq_in(qts, iosapic_path, NULL, first_pin, 1);
+    qtest_set_irq_in(qts, iosapic_path, NULL, second_pin, 1);
+    g_assert_cmphex(iosapic_read(qts, first_rte) &
+                    IA64_IOSAPIC_RTE_REMOTE_IRR, !=, 0);
+    g_assert_cmphex(iosapic_read(qts, second_rte) &
+                    IA64_IOSAPIC_RTE_REMOTE_IRR, !=, 0);
+
+    qtest_set_irq_in(qts, iosapic_path, NULL, first_pin, 0);
+    qtest_set_irq_in(qts, iosapic_path, NULL, second_pin, 0);
+    qtest_writel(qts, IA64_IOSAPIC_BASE + IA64_IOSAPIC_EOI, vector);
+    g_assert_cmphex(iosapic_read(qts, first_rte) &
+                    IA64_IOSAPIC_RTE_REMOTE_IRR, ==, 0);
+    g_assert_cmphex(iosapic_read(qts, second_rte) &
+                    IA64_IOSAPIC_RTE_REMOTE_IRR, ==, 0);
+    qtest_quit(qts);
+}
+
+static bool sapic_irr_has_vector(QTestState *qts, uint8_t vector)
+{
+    g_autofree char *registers = qtest_hmp(qts, "info registers");
+    const char *line = strstr(registers, "SAPIC IRR:");
+    uint64_t irr[4];
+
+    g_assert_nonnull(line);
+    g_assert_cmpint(sscanf(line, "SAPIC IRR: %" SCNx64 " %" SCNx64
+                          " %" SCNx64 " %" SCNx64,
+                          &irr[0], &irr[1], &irr[2], &irr[3]), ==, 4);
+    return (irr[vector / 64] & BIT_ULL(vector % 64)) != 0;
+}
+
+static void test_iosapic_edge_requires_input(void)
+{
+    const unsigned pin = 21;
+    const uint8_t vector = 0x53;
+    const uint32_t rte_low = IA64_IOSAPIC_RTE_BASE + pin * 2;
+    QTestState *qts = ia64_vpc_start(NULL);
+    g_autofree char *iosapic_path =
+        find_unattached_child(qts, "ia64-iosapic");
+
+    /*
+     * Programming an unmasked edge RTE is configuration, not an interrupt
+     * request.  Only an input edge may set the destination Local SAPIC IRR.
+     */
+    g_assert_false(sapic_irr_has_vector(qts, vector));
+    iosapic_write(qts, rte_low, vector);
+    g_assert_false(sapic_irr_has_vector(qts, vector));
+
+    qtest_set_irq_in(qts, iosapic_path, NULL, pin, 1);
+    g_assert_true(sapic_irr_has_vector(qts, vector));
+    qtest_quit(qts);
+}
+
+static void test_iosapic_masked_edge_is_ignored(void)
+{
+    const unsigned pin = 20;
+    const uint8_t vector = 0x54;
+    const uint32_t rte_low = IA64_IOSAPIC_RTE_BASE + pin * 2;
+    QTestState *qts = ia64_vpc_start(NULL);
+    g_autofree char *iosapic_path =
+        find_unattached_child(qts, "ia64-iosapic");
+
+    iosapic_write(qts, rte_low, vector | IA64_IOSAPIC_RTE_MASKED);
+    qtest_set_irq_in(qts, iosapic_path, NULL, pin, 1);
+    qtest_set_irq_in(qts, iosapic_path, NULL, pin, 0);
+    iosapic_write(qts, rte_low, vector);
+    g_assert_false(sapic_irr_has_vector(qts, vector));
+    qtest_quit(qts);
+}
+
 static void test_iosapic_lowest_priority(void)
 {
     const unsigned pin = 22;
@@ -1278,22 +1364,21 @@ static void test_iosapic_lowest_priority(void)
 static void test_sparse_io_pm_register(void)
 {
     const uint32_t port = IA64_ACPI_PM_IO_BASE + IA64_ACPI_PM1_CNT_OFFSET;
-    const uint64_t dense = IA64_LEGACY_IO_BASE + port;
     const uint64_t sparse = IA64_LEGACY_IO_BASE +
                             ia64_sparse_io_offset(port);
+    const uint64_t alias = sparse ^ 0x400;
     QTestState *qts = ia64_vpc_start(NULL);
 
-    g_assert_cmphex(sparse, ==, 0x000000800010801004ULL);
-
-    qtest_writew(qts, dense, 0);
-    g_assert_cmphex(qtest_readw(qts, sparse) & 1, ==, 0);
-
-    qtest_writew(qts, sparse, 1);
-    g_assert_cmphex(qtest_readw(qts, sparse) & 1, ==, 1);
-    g_assert_cmphex(qtest_readw(qts, dense) & 1, ==, 1);
+    g_assert_cmphex(sparse, ==, 0x00000ffffc801004ULL);
 
     qtest_writew(qts, sparse, 0);
-    g_assert_cmphex(qtest_readw(qts, dense) & 1, ==, 0);
+    g_assert_cmphex(qtest_readw(qts, sparse) & 1, ==, 0);
+
+    qtest_writew(qts, alias, 1);
+    g_assert_cmphex(qtest_readw(qts, sparse) & 1, ==, 1);
+
+    qtest_writew(qts, sparse, 0);
+    g_assert_cmphex(qtest_readw(qts, alias) & 1, ==, 0);
     qtest_quit(qts);
 }
 
@@ -1342,6 +1427,12 @@ int main(int argc, char **argv)
                    test_lsi_async_nodata_command);
     qtest_add_func("/ia64-vpc/iosapic/level-remote-irr",
                    test_iosapic_level_remote_irr);
+    qtest_add_func("/ia64-vpc/iosapic/shared-vector-eoi",
+                   test_iosapic_shared_vector_eoi);
+    qtest_add_func("/ia64-vpc/iosapic/edge-requires-input",
+                   test_iosapic_edge_requires_input);
+    qtest_add_func("/ia64-vpc/iosapic/masked-edge-is-ignored",
+                   test_iosapic_masked_edge_is_ignored);
     qtest_add_func("/ia64-vpc/iosapic/lowest-priority",
                    test_iosapic_lowest_priority);
     qtest_add_func("/ia64-vpc/sparse-io/pm-register",

@@ -20,6 +20,9 @@
 #include "qemu/osdep.h"
 #include <math.h>
 #include "cpu.h"
+#ifdef TARGET_IA64
+#include "target/ia64/ia32/fpu-helper-adapter.h"
+#endif
 #include "tcg-cpu.h"
 #include "exec/cputlb.h"
 #include "accel/tcg/cpu-ldst.h"

@@ -113,7 +113,14 @@ static void iosapic_rte_write(IA64IOSapicState *s, int pin, uint32_t val,
 
     s->rte[pin] = (s->rte[pin] & ~RTE_RO_BITS) | ro_bits;
     iosapic_fix_edge_remote_irr(s, pin);
-    iosapic_update(s, pin);
+    /*
+     * A redirection-table write is not an edge request.  Re-evaluate an
+     * asserted level input after unmasking or rerouting it, but wait for a
+     * new input transition for an edge-triggered route.
+     */
+    if (s->rte[pin] & RTE_TRIGGER_LEVEL) {
+        iosapic_update(s, pin);
+    }
 }
 
 static void iosapic_eoi(IA64IOSapicState *s, uint8_t vector)
@@ -130,20 +137,25 @@ static void iosapic_eoi(IA64IOSapicState *s, uint8_t vector)
         }
         s->rte[pin] &= ~RTE_REMOTE_IRR;
         iosapic_update(s, pin);
-        return;
     }
 }
 
 static void iosapic_irq_handler(void *opaque, int pin, int level)
 {
     IA64IOSapicState *s = opaque;
+    bool old_level;
+    bool level_triggered;
 
     if (pin < 0 || pin >= IA64_IOSAPIC_NUM_PINS) {
         return;
     }
 
-    s->irq_level[pin] = (uint8_t)level;
-    if (level) {
+    old_level = s->irq_level[pin] != 0;
+    level = !!level;
+    s->irq_level[pin] = level;
+    level_triggered = (s->rte[pin] & RTE_TRIGGER_LEVEL) != 0;
+
+    if (level && (level_triggered || !old_level)) {
         iosapic_update(s, pin);
     }
 }

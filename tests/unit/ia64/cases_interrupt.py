@@ -92,9 +92,11 @@ from .encoding import (
     bsw1,
     cmp4_eq_imm,
     cmp4_eq_unc_imm,
+    cmp_eq_imm,
     cmp_eq_and,
     cover_b,
     dep,
+    depz_reg,
     dtr_setup_bundles,
     extr_u,
     getf_sig,
@@ -108,9 +110,11 @@ from .encoding import (
     ld2_c_clr,
     ld2_sa,
     ld8,
+    loadrs_enc,
     mov_ar,
     mov_ar_lc,
     mov_br_gr,
+    mov_gr_b,
     mov_gr_psr_full,
     mov_lc_gr,
     mov_m_ar_gr,
@@ -142,9 +146,14 @@ from .encoding import (
     st2,
     st8,
     st8_postinc,
+    sub_reg,
 )
 
 FOUR_K_ITIR = 12 << 2
+# addl has a signed 22-bit immediate.  Five model milliseconds remain within
+# that range for the default 400 MHz ITC while leaving enough setup margin for
+# tests that need to reach a steady translated loop before the interrupt.
+IA64_ITC_ADDL_DELAY_TICKS = 5 * IA64_ITC_TICKS_PER_MILLISECOND
 
 test_rfi_target_rse_fill_fault_uses_restored_psr = require_registers(
     "rfi_target_rse_fill_fault_uses_restored_psr", [
@@ -263,7 +272,7 @@ def test_cloop_zero_st1_timer_interrupts_batched_loop(qemu):
          nop_i()),
         (0x40, 0x02, mov_m_ar_gr(3, 44), nop_i(),
          nop_i()),
-        (0x50, 0x00, addl(4, 10 * IA64_ITC_TICKS_PER_MILLISECOND, 3),
+        (0x50, 0x00, addl(4, IA64_ITC_ADDL_DELAY_TICKS, 3),
          nop_i(), nop_i()),
         (0x60, 0x00, mov_m_gr_cr(4, IA64_CR_ITM), nop_i(),
          nop_i()),
@@ -375,7 +384,7 @@ def test_async_timer_interrupt_never_resumes_mlx_slot2(qemu):
     program = [
         (0x10, 0x02, mov_m_ar_gr(3, 44), nop_i(), nop_i()),
         (0x20, 0x00,
-         addl(4, 10 * IA64_ITC_TICKS_PER_MILLISECOND, 3),
+         addl(4, IA64_ITC_ADDL_DELAY_TICKS, 3),
          nop_i(), nop_i()),
         (0x30, 0x00, mov_m_gr_cr(4, IA64_CR_ITM), nop_i(), nop_i()),
         (0x40, 0x00, adds(3, 0xef, 0), nop_i(), nop_i()),
@@ -556,7 +565,7 @@ def test_timer_cover_rfi_preserves_large_frame_halfword_rmw(qemu):
         (0xa0, 0x00, st8(5, 0), nop_i(), nop_i()),
         (0xb0, 0x02, mov_m_ar_gr(3, 44), nop_i(), nop_i()),
         (0xc0, 0x00,
-         addl(4, 10 * IA64_ITC_TICKS_PER_MILLISECOND, 3),
+         addl(4, IA64_ITC_ADDL_DELAY_TICKS, 3),
          nop_i(), nop_i()),
         (0xd0, 0x00, mov_m_gr_cr(4, IA64_CR_ITM), nop_i(), nop_i()),
         (0xe0, 0x00, adds(3, 0xef, 0), nop_i(), nop_i()),
@@ -731,11 +740,132 @@ def test_rse_large_frame_timer_rfi_preserves_high_caller_local(qemu):
             f"sol={state.cfm.get('sol')!r} ip={state.ip!r} "
             f"exception={state.exception!r}\n{result.register_output}")
 
+
+test_nested_timer_rfi_preserves_leaf_saved_return_branch = require_registers(
+    "nested_timer_rfi_preserves_leaf_saved_return_branch", [
+        # Put r37 of the SOF=9/SOL=8 frame at RNAT bit 29, matching the
+        # externally observed failure.  The architectural result must not
+        # depend on this alignment; it makes a partial-RNAT regression exact.
+        (0x10, *movl_mlx(2, 0x1000a0)),
+        (0x20, 0x00, mov_ar(2, 18), nop_i(), nop_i()),
+        (0x30, *movl_mlx(2, 1 << 29)),
+        (0x40, 0x00, mov_m_gr_ar(2, 19), nop_i(), nop_i()),
+        (0x50, 0x00, adds(3, 0xe0, 0), nop_i(), nop_i()),
+        (0x60, 0x00, mov_m_gr_cr(3, IA64_CR_ITV), nop_i(), nop_i()),
+        (0x70, 0x02, mov_m_ar_gr(3, 44), nop_i(), nop_i()),
+        (0x80, 0x00,
+         addl(4, IA64_ITC_TICKS_PER_MILLISECOND, 3), nop_i(), nop_i()),
+        (0x90, 0x00, mov_m_gr_cr(4, IA64_CR_ITM), nop_i(), nop_i()),
+        (0xa0, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_I)),
+        (0xb0, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, 0xc0)),
+        (0xd0, 0x00, rsm(IA64_PSR_I), adds(9, 0x5a, 0), nop_i()),
+        (0xe0, 0x10, nop_m(), nop_i(), br_cond(0xe0, 0xe0)),
+
+        # Both timer vectors share the architectural external-interrupt
+        # entry.  The second vector has the higher class and can therefore
+        # preempt the first handler while its in-service entry remains live.
+        (0x3000, 0x00, mov_m_cr_gr(3, IA64_CR_SAPIC_IVR), nop_i(), nop_i()),
+        (0x3010, 0x00, nop_m(), adds(4, -0xf0, 3), nop_i()),
+        (0x3020, 0x00, nop_m(), cmp_eq_imm(6, 7, 0, 4), nop_i()),
+        (0x3030, 0x10, nop_m(), nop_i(),
+         br_cond(0x3030, 0x3400, qp=6)),
+
+        # The outer handler preserves its interruption frame explicitly
+        # because nested interruption delivery reuses CR.IFS.
+        (0x3040, 0x18, nop_m(), nop_m(), cover_b()),
+        (0x3050, 0x00, mov_m_cr_gr(21, 23), alloc(20, 6, 4, 0, 0),
+         nop_i()),
+        (0x3060, 0x00, adds(3, 0xf0, 0), nop_i(), nop_i()),
+        (0x3070, 0x00, mov_m_gr_cr(3, IA64_CR_ITV), nop_i(), nop_i()),
+        (0x3080, 0x02, mov_m_ar_gr(3, 44), nop_i(), nop_i()),
+        (0x3090, 0x00, addl(4, 0x100, 3), nop_i(), nop_i()),
+        (0x30a0, 0x00, mov_m_gr_cr(4, IA64_CR_ITM), nop_i(), nop_i()),
+        (0x30b0, *movl_mlx(5, IA64_TPR_MMI)),
+        (0x30c0, 0x00, mov_m_gr_cr(5, IA64_CR_SAPIC_TPR),
+         nop_i(), nop_i()),
+        (0x30d0, 0x00, ssm(IA64_PSR_IC | IA64_PSR_I),
+         nop_i(), nop_i()),
+        (0x30e0, 0x00, mov_m_cr_gr(7, IA64_CR_SAPIC_IRR3),
+         nop_i(), nop_i()),
+        (0x30f0, 0x00, nop_m(), cmp_eq_imm(6, 7, 0, 7), nop_i()),
+        (0x3100, 0x10, nop_m(), nop_i(),
+         br_cond(0x3100, 0x30e0, qp=6)),
+        (0x3110, 0x00, rsm(IA64_PSR_I), nop_i(), nop_i()),
+        (0x3120, 0x00, mov_m_gr_cr(0, IA64_CR_SAPIC_TPR),
+         nop_i(), nop_i()),
+        (0x3130, 0x10, nop_m(), nop_i(), br_call(0, 0x3130, 0x4000)),
+        (0x3140, 0x00, rsm(IA64_PSR_I | IA64_PSR_IC), nop_i(), nop_i()),
+        (0x3150, *movl_mlx(4, 0xd0)),
+        (0x3160, 0x00, mov_m_gr_ar(20, 64),
+         mov_m_gr_cr(21, 23), nop_i()),
+        (0x3170, 0x00, mov_m_gr_cr(4, 19),
+         adds(8, 1, 0), nop_i()),
+        (0x3180, 0x10, mov_m_gr_cr(0, IA64_CR_SAPIC_EOI), nop_i(),
+         rfi_b()),
+
+        # Follow the architectural interrupted-context backing-store switch:
+        # preserve the partial RNAT, use a temporary store, reload the dirty
+        # partition there, then restore BSPSTORE and RNAT before rfi.
+        (0x3400, 0x18, nop_m(), nop_m(), cover_b()),
+        (0x3410, 0x00, nop_m(), mov_m_ar_gr(22, 64),
+         adds(10, 1, 10)),
+        (0x3420, 0x00, mov_m_ar_gr(24, 18), nop_i(), nop_i()),
+        (0x3430, 0x00, mov_m_ar_gr(25, 19), nop_i(), nop_i()),
+        (0x3440, 0x00, mov_m_ar_gr(28, 16), nop_i(), nop_i()),
+        (0x3450, *movl_mlx(23, 0x2000a0)),
+        (0x3460, 0x00, mov_m_gr_ar(23, 18), nop_i(), nop_i()),
+        (0x3470, 0x00, mov_m_ar_gr(26, 17), nop_i(), nop_i()),
+        (0x3480, 0x10, nop_m(), nop_i(), br_call(7, 0x3480, 0x5000)),
+        (0x3490, 0x00, nop_m(), sub_reg(27, 26, 23), nop_i()),
+        (0x34a0, 0x00, nop_m(), depz_reg(27, 27, 16, 14), nop_i()),
+        (0x34b0, 0x00, mov_m_gr_ar(27, 16), nop_i(), nop_i()),
+        (0x34c0, 0x00, loadrs_enc(), nop_i(), nop_i()),
+        (0x34d0, 0x00, mov_m_gr_ar(24, 18), nop_i(), nop_i()),
+        (0x34e0, 0x00, mov_m_gr_ar(25, 19), nop_i(), nop_i()),
+        (0x34f0, 0x00, mov_m_gr_ar(28, 16),
+         mov_m_gr_ar(22, 64), nop_i()),
+        (0x3500, 0x00, mov_m_cr_gr(15, 23), nop_i(), nop_i()),
+        (0x3510, 0x10, mov_m_gr_cr(0, IA64_CR_SAPIC_EOI), nop_i(),
+         rfi_b()),
+
+        # This is the relevant kernel shape: r37 saves b0 in a
+        # SOF=9/SOL=8 frame and all three calls are frame-less leaves.
+        (0x4000, 0x00, nop_m(), alloc(38, 9, 8, 0, 0), nop_i()),
+        (0x4010, 0x00, nop_m(), mov_gr_b(37, 0), nop_i()),
+        (0x4020, 0x10, nop_m(), nop_i(), br_call(0, 0x4020, 0x4100)),
+        (0x4030, 0x10, nop_m(), nop_i(), br_call(0, 0x4030, 0x4120)),
+        (0x4040, 0x10, nop_m(), nop_i(), br_call(0, 0x4040, 0x4140)),
+        (0x4050, 0x00, nop_m(), mov_br_gr(0, 37), nop_i()),
+        (0x4060, 0x00, mov_m_gr_ar(38, 64), nop_i(), nop_i()),
+        (0x4070, 0x10, nop_m(), nop_i(), br_ret(0)),
+
+        (0x4100, 0x10, nop_m(), nop_i(), br_ret(0)),
+        (0x4120, 0x10, nop_m(), nop_i(), br_ret(0)),
+        (0x4140, 0x00, ssm(IA64_PSR_I), nop_i(), nop_i()),
+        (0x4150, 0x10, nop_m(), nop_i(), br_ret(0)),
+
+        (0x5000, 0x00, nop_m(), alloc(14, 96, 88, 0, 0), nop_i()),
+        (0x5010, *movl_mlx(127, 0x127127127127127)),
+        (0x5020, 0x00, mov_m_gr_ar(14, 64), nop_i(), nop_i()),
+        (0x5030, 0x10, nop_m(), nop_i(), br_ret(7)),
+    ], {
+        "ip": 0xe0,
+        "exception": IA64_EXCP_NONE,
+        "r8": 1,
+        "r9": 0x5a,
+        "r10": 1,
+        "r15": (1 << 63) | 1,
+        "cfm_sof": 1,
+        "cfm_sol": 0,
+    }, entry=0x10, cpu="merced")
+
+
 def test_timer_interrupt_exits_chained_loop_after_virtual_deadline(qemu):
     result = run_program(qemu, [
         (0x10, 0x02, mov_m_ar_gr(3, 44), nop_i(),
          nop_i()),
-        (0x20, 0x00, addl(4, 10 * IA64_ITC_TICKS_PER_MILLISECOND, 3),
+        (0x20, 0x00, addl(4, IA64_ITC_ADDL_DELAY_TICKS, 3),
          nop_i(), nop_i()),
         (0x30, 0x00, mov_m_gr_cr(4, IA64_CR_ITM), nop_i(),
          nop_i()),
@@ -768,6 +898,42 @@ def test_timer_interrupt_exits_chained_loop_after_virtual_deadline(qemu):
             f"failed: itm={state.gr[30]!r} itc={state.gr[31]!r} "
             f"delta={delta!r} polls={result.polls} ip={state.ip!r} "
             f"exception={state.exception!r}\n{result.register_output}")
+
+
+def _check_itc_model_rate(qemu, cpu, ticks_per_millisecond):
+    result = run_program(qemu, [
+        (0x10, 0x00, mov_m_gr_ar(0, 44), nop_i(), nop_i()),
+        (0x20, *movl_mlx(4, 50 * ticks_per_millisecond)),
+        (0x30, 0x00, mov_m_gr_cr(4, IA64_CR_ITM), nop_i(), nop_i()),
+        (0x40, 0x00, adds(4, 0xef, 0), nop_i(), nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(4, IA64_CR_ITV), nop_i(), nop_i()),
+        (0x60, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_I)),
+        (0x70, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+        (0x3000, 0x10, nop_m(), adds(8, 0x55, 0),
+         br_cond(0x3000, 0x3010)),
+        (0x3010, 0x10, nop_m(), nop_i(), br_cond(0x3010, 0x3010)),
+    ], entry=0x10, terminal_ip=0x3010, cpu=cpu,
+       poll_initial_s=0.020, poll_max_s=0.020,
+       name=f"itc-rate-{cpu}")
+    if not 2 <= result.polls <= 4:
+        raise RuntimeError(
+            f"itc_rate_tracks_{cpu}_pal_ratio failed: "
+            f"50ms deadline completed after {result.polls} polls "
+            f"(elapsed={result.elapsed_s:.6f}s)\n{result.register_output}")
+
+
+def test_itc_rate_tracks_merced_pal_ratio(qemu):
+    _check_itc_model_rate(qemu, "merced", 800000)
+
+
+def test_itc_rate_tracks_madison_pal_ratio(qemu):
+    _check_itc_model_rate(qemu, "madison", 1600000)
+
+
+def test_itc_rate_tracks_montecito_pal_ratio(qemu):
+    _check_itc_model_rate(qemu, "montecito", 400000)
+
 
 test_async_timer_interrupt_preserves_bank1_grs = require_registers(
     "async_timer_interrupt_preserves_bank1_grs", [
@@ -4588,6 +4754,9 @@ CASE_NAMES = (
     'ia32_fxsave_checks_entire_512_byte_segment_operand',
     'ia32_bound_checks_second_element_against_segment_limit',
     'invalid_itv_vector_is_ignored',
+    'itc_rate_tracks_madison_pal_ratio',
+    'itc_rate_tracks_merced_pal_ratio',
+    'itc_rate_tracks_montecito_pal_ratio',
     'masked_itv_discards_due_timer',
     'masking_itv_preserves_pended_timer_irr',
     'mov_from_psr_does_not_copy_execution_slot_to_rfi',
@@ -4610,6 +4779,7 @@ CASE_NAMES = (
     'rfi_to_ia32_taken_branch_trap_records_byte_ips',
     'rfi_to_ia32_unimplemented_target_preserves_64bit_iip',
     'rse_large_frame_timer_rfi_preserves_high_caller_local',
+    'nested_timer_rfi_preserves_leaf_saved_return_branch',
     'repeated_timer_rfi_preserves_word_rmw',
     'timer_cover_rfi_preserves_large_frame_halfword_rmw',
     'timer_interrupt_preserves_banked_word_rmw',

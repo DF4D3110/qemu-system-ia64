@@ -9,6 +9,7 @@
 
 #include "qemu/osdep.h"
 #include "libqtest.h"
+#include "hw/ia64/ia64_vpc_abi.h"
 
 #define VBE_DISPI_IOPORT_INDEX 0x1ce
 #define VBE_DISPI_IOPORT_DATA  0x1cf
@@ -22,7 +23,6 @@
 #define VBE_DISPI_ENABLED      0x01
 #define VBE_DISPI_LFB_ENABLED  0x40
 #define VBE_DISPI_NOCLEARMEM   0x80
-#define IA64_LEGACY_IO_BASE    0x000000800010000000ULL
 #define IA64_ATI_FB_BASE       0x00000000c4000000ULL
 #define IA64_ATI_MMIO_BASE     0x00000000c8000000ULL
 #define IA64_VGA_LEGACY_BASE   0x00000000000a0000ULL
@@ -113,28 +113,25 @@ static void vbe_legacy_data_port(void)
 
     if (g_str_equal(qtest_get_arch(), "ia64")) {
         qts = qtest_init("-machine ia64-vpc -vga std");
-        qtest_writew(qts, IA64_LEGACY_IO_BASE + VBE_DISPI_IOPORT_INDEX,
+        qtest_writew(qts, IA64_LEGACY_IO_PORT_PA(VBE_DISPI_IOPORT_INDEX),
                      VBE_DISPI_INDEX_ID);
-        id = qtest_readw(qts,
-                         IA64_LEGACY_IO_BASE + VBE_DISPI_IOPORT_INDEX + 2);
+        id = qtest_readw(
+            qts, IA64_LEGACY_IO_PORT_PA(VBE_DISPI_IOPORT_INDEX + 2));
         g_assert_cmphex(id, ==, VBE_DISPI_ID5);
-        g_assert_cmphex(qtest_readw(qts,
-                                    IA64_LEGACY_IO_BASE +
-                                    VBE_DISPI_IOPORT_DATA), ==, id);
 
-        qtest_writew(qts, IA64_LEGACY_IO_BASE + VBE_DISPI_IOPORT_INDEX,
+        qtest_writew(qts, IA64_LEGACY_IO_PORT_PA(VBE_DISPI_IOPORT_INDEX),
                      VBE_DISPI_INDEX_ENABLE);
-        qtest_writew(qts, IA64_LEGACY_IO_BASE +
-                          VBE_DISPI_IOPORT_INDEX + 2,
+        qtest_writew(qts,
+                     IA64_LEGACY_IO_PORT_PA(VBE_DISPI_IOPORT_INDEX + 2),
                      VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
-        g_assert_cmphex(qtest_readw(qts, IA64_LEGACY_IO_BASE +
-                                        VBE_DISPI_IOPORT_INDEX + 2), ==,
-                        VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
-        qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_SEQ_INDEX,
+        g_assert_cmphex(qtest_readw(
+            qts, IA64_LEGACY_IO_PORT_PA(VBE_DISPI_IOPORT_INDEX + 2)), ==,
+            VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
+        qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_SEQ_INDEX),
                      VGA_SEQ_RESET);
-        qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_SEQ_DATA, 1);
-        g_assert_cmphex(qtest_readw(qts, IA64_LEGACY_IO_BASE +
-                                        VBE_DISPI_IOPORT_INDEX + 2), ==, 0);
+        qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_SEQ_DATA), 1);
+        g_assert_cmphex(qtest_readw(
+            qts, IA64_LEGACY_IO_PORT_PA(VBE_DISPI_IOPORT_INDEX + 2)), ==, 0);
     } else {
         qts = qtest_init("-vga none -device VGA");
         qtest_outw(qts, VBE_DISPI_IOPORT_INDEX, VBE_DISPI_INDEX_ID);
@@ -162,57 +159,57 @@ static void vga_wide_planar_access(void)
 
     qts = qtest_init("-machine ia64-vpc -vga std -S");
 
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_SEQ_INDEX,
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_SEQ_INDEX),
                  VGA_SEQ_MEMORY_MODE);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_SEQ_DATA, 0x06);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_GFX_INDEX, VGA_GFX_MISC);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_GFX_DATA, 0x01);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_GFX_INDEX, VGA_GFX_MODE);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_GFX_DATA, 0);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_GFX_INDEX,
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_SEQ_DATA), 0x06);
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_GFX_INDEX), VGA_GFX_MISC);
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_GFX_DATA), 0x01);
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_GFX_INDEX), VGA_GFX_MODE);
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_GFX_DATA), 0);
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_GFX_INDEX),
                  VGA_GFX_SR_ENABLE);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_GFX_DATA, 0);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_GFX_INDEX,
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_GFX_DATA), 0);
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_GFX_INDEX),
                  VGA_GFX_DATA_ROTATE);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_GFX_DATA, 0);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_GFX_INDEX,
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_GFX_DATA), 0);
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_GFX_INDEX),
                  VGA_GFX_BIT_MASK);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_GFX_DATA, 0xff);
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_GFX_DATA), 0xff);
 
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_SEQ_INDEX,
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_SEQ_INDEX),
                  VGA_SEQ_PLANE_WRITE);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_SEQ_DATA, 1U << 0);
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_SEQ_DATA), 1U << 0);
     qtest_writeq(qts, IA64_VGA_LEGACY_BASE, plane0);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_SEQ_DATA, 1U << 2);
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_SEQ_DATA), 1U << 2);
     qtest_writeq(qts, IA64_VGA_LEGACY_BASE, plane2);
 
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_GFX_INDEX,
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_GFX_INDEX),
                  VGA_GFX_PLANE_READ);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_GFX_DATA, 0);
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_GFX_DATA), 0);
     g_assert_cmphex(qtest_readq(qts, IA64_VGA_LEGACY_BASE), ==, plane0);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_GFX_DATA, 2);
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_GFX_DATA), 2);
     g_assert_cmphex(qtest_readq(qts, IA64_VGA_LEGACY_BASE), ==, plane2);
 
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_SEQ_INDEX,
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_SEQ_INDEX),
                  VGA_SEQ_PLANE_WRITE);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_SEQ_DATA, 1U << 1);
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_SEQ_DATA), 1U << 1);
     qtest_writeq(qts, IA64_VGA_LEGACY_BASE + 1, unaligned);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_GFX_INDEX,
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_GFX_INDEX),
                  VGA_GFX_PLANE_READ);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_GFX_DATA, 1);
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_GFX_DATA), 1);
     g_assert_cmphex(qtest_readq(qts, IA64_VGA_LEGACY_BASE + 1), ==,
                     unaligned);
 
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_SEQ_DATA, 0x0f);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_GFX_INDEX, VGA_GFX_MODE);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_GFX_DATA, 2);
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_SEQ_DATA), 0x0f);
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_GFX_INDEX), VGA_GFX_MODE);
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_GFX_DATA), 2);
     qtest_writeq(qts, IA64_VGA_LEGACY_BASE + 0x100, colors);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_GFX_INDEX, VGA_GFX_MODE);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_GFX_DATA, 0);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_GFX_INDEX,
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_GFX_INDEX), VGA_GFX_MODE);
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_GFX_DATA), 0);
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_GFX_INDEX),
                  VGA_GFX_PLANE_READ);
     for (plane = 0; plane < 4; plane++) {
-        qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_GFX_DATA, plane);
+        qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_GFX_DATA), plane);
         g_assert_cmphex(qtest_readq(qts, IA64_VGA_LEGACY_BASE + 0x100), ==,
                         expanded[plane]);
     }
@@ -222,10 +219,10 @@ static void vga_wide_planar_access(void)
 
 static uint16_t ati_vbe_read(QTestState *qts, uint16_t index)
 {
-    uint64_t index_port = IA64_LEGACY_IO_BASE + VBE_DISPI_IOPORT_INDEX;
-
-    qtest_writew(qts, index_port, index);
-    return qtest_readw(qts, index_port + 2);
+    qtest_writew(qts, IA64_LEGACY_IO_PORT_PA(VBE_DISPI_IOPORT_INDEX),
+                 index);
+    return qtest_readw(
+        qts, IA64_LEGACY_IO_PORT_PA(VBE_DISPI_IOPORT_INDEX + 2));
 }
 
 static char *ppm_next_token(const uint8_t **cursor, const uint8_t *end)
@@ -361,12 +358,12 @@ static void ati_blit_visible_intersection(void)
                  ATI_CRTC_EXT_DISP_EN | ATI_CRTC_EN |
                  ATI_CRTC_PIX_WIDTH_8);
 
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_PEL_WRITE_INDEX, 1);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_PEL_DATA, 0x3f);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_PEL_DATA, 0);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_PEL_DATA, 0);
-    qtest_readb(qts, IA64_LEGACY_IO_BASE + VGA_INPUT_STATUS1);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_ATTR_INDEX, 0x20);
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_PEL_WRITE_INDEX), 1);
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_PEL_DATA), 0x3f);
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_PEL_DATA), 0);
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_PEL_DATA), 0);
+    qtest_readb(qts, IA64_LEGACY_IO_PORT_PA(VGA_INPUT_STATUS1));
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_ATTR_INDEX), 0x20);
 
     tmpdir = g_dir_make_tmp("ia64-ati-dirty-XXXXXX", &error);
     g_assert_no_error(error);
@@ -488,14 +485,15 @@ static void ati_stride(void)
     g_assert_cmpuint(ati_vbe_read(qts, VBE_DISPI_INDEX_BPP), ==, bpp);
     g_assert_cmpuint(ati_vbe_read(qts, VBE_DISPI_INDEX_VIRT_WIDTH), ==,
                      virtual_width);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_CRTC_INDEX,
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_CRTC_INDEX),
                  VGA_CRTC_OFFSET);
-    g_assert_cmphex(qtest_readb(qts, IA64_LEGACY_IO_BASE + VGA_CRTC_DATA), ==,
-                    (pitch / 8) & 0xff);
+    g_assert_cmphex(qtest_readb(
+        qts, IA64_LEGACY_IO_PORT_PA(VGA_CRTC_DATA)), ==,
+        (pitch / 8) & 0xff);
 
     /* Leave attribute-controller blanking, as a real VBE client does. */
-    qtest_readb(qts, IA64_LEGACY_IO_BASE + VGA_INPUT_STATUS1);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_ATTR_INDEX, 0x20);
+    qtest_readb(qts, IA64_LEGACY_IO_PORT_PA(VGA_INPUT_STATUS1));
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_ATTR_INDEX), 0x20);
 
     qtest_writel(qts, IA64_ATI_FB_BASE, marker);
     qtest_writel(qts, IA64_ATI_FB_BASE + width * (bpp / 8), padding_decoy);
@@ -510,8 +508,9 @@ static void ati_stride(void)
                              " {'filename':%s}}", ppm);
     assert_ppm_stride(ppm, width, height);
 
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_SEQ_INDEX, VGA_SEQ_RESET);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_SEQ_DATA, 1);
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_SEQ_INDEX),
+                 VGA_SEQ_RESET);
+    qtest_writeb(qts, IA64_LEGACY_IO_PORT_PA(VGA_SEQ_DATA), 1);
     g_assert_cmphex(ati_vbe_read(qts, VBE_DISPI_INDEX_ENABLE), ==, 0);
     g_assert_cmpuint(ati_vbe_read(qts, VBE_DISPI_INDEX_VIRT_WIDTH), ==,
                      virtual_width);

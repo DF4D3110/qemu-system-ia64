@@ -45,7 +45,10 @@
 #define IA64_MSR_COUNT   1024
 /* Maximum translation-register count implemented by a supported CPU model. */
 #define IA64_TR_MAX      64
+/* Storage upper bound; each CPU model selects its usable TLB capacity. */
 #define IA64_TLB_MAX     128
+/* Merced's non-architectural first-level data TLB. */
+#define IA64_DTLB1_MAX   32
 
 /*
  * CPUID register 4 general features/capability bits.  A model advertises
@@ -132,10 +135,9 @@
 #define IA64_FW_IDENTITY_BASE 0x00100000ULL
 #define IA64_FW_IDENTITY_SIZE 0x00100000ULL
 #define IA64_FIRMWARE_IVT_BASE 0x10000ULL
-#define IA64_FW_BOOT_IDENTITY_LIMIT 0x0000010000000000ULL
 #define IA64_LOCAL_SAPIC_PA   0x00000000fee00000ULL
 #define IA64_LOCAL_SAPIC_SIZE 0x00200000ULL
-#define IA64_PAL_IO_BLOCK_PA  0x000080000c000000ULL
+#define IA64_IO_PORT_SPACE_SIZE (64ULL << 20)
 
 #define IA64_SAPIC_LID_ID_SHIFT   24
 #define IA64_SAPIC_LID_EID_SHIFT  16
@@ -187,54 +189,9 @@ static inline uint64_t ia64_physical_address(uint64_t addr)
     return addr & ~IA64_PHYS_UC_BIT;
 }
 
-static inline bool ia64_pa_is_implemented(uint64_t addr)
-{
-    uint64_t implemented_mask = (1ULL << IA64_IMPL_PA_BITS) - 1;
-
-    return (addr & ~(IA64_PHYS_UC_BIT | implemented_mask)) == 0;
-}
-
-static inline uint64_t ia64_pa_canonicalize(uint64_t addr)
-{
-    uint64_t implemented_mask = (1ULL << IA64_IMPL_PA_BITS) - 1;
-
-    return addr & (IA64_PHYS_UC_BIT | implemented_mask);
-}
-
 static inline uint64_t ia64_ip_bundle_addr(uint64_t ip)
 {
     return ip & IA64_IP_BUNDLE_MASK;
-}
-
-static inline bool ia64_va_is_implemented(uint64_t va)
-{
-    if (IA64_IMPL_VA_MSB >= 60) {
-        return true;
-    }
-
-    {
-        uint64_t count = 60 - IA64_IMPL_VA_MSB;
-        uint64_t mask = (1ULL << count) - 1;
-        uint64_t unimplemented = (va >> (IA64_IMPL_VA_MSB + 1)) & mask;
-        uint64_t expected = (va & (1ULL << IA64_IMPL_VA_MSB)) ? mask : 0;
-
-        return unimplemented == expected;
-    }
-}
-
-static inline uint64_t ia64_va_canonicalize(uint64_t va)
-{
-    uint64_t region = va & (IA64_REGION_MASK << IA64_REGION_SHIFT);
-    uint64_t implemented_mask = (1ULL << (IA64_IMPL_VA_MSB + 1)) - 1;
-    uint64_t payload = va & implemented_mask;
-
-    if (IA64_IMPL_VA_MSB < 60 &&
-        (payload & (1ULL << IA64_IMPL_VA_MSB))) {
-        payload |= ((1ULL << (60 - IA64_IMPL_VA_MSB)) - 1) <<
-                   (IA64_IMPL_VA_MSB + 1);
-    }
-
-    return region | payload;
 }
 
 static inline uint8_t ia64_psr_cpl(uint64_t psr)
@@ -385,6 +342,21 @@ typedef enum IA64GeneralRegisterIndex {
     IA64_GR_THREAD_POINTER = 13,
 } IA64GeneralRegisterIndex;
 
+typedef enum IA64IA32GeneralRegisterIndex {
+    IA64_IA32_GR_RETURN_POINTER = IA64_GR_GLOBAL_POINTER,
+    IA64_IA32_GR_INTEGER_BASE = IA64_GR_RETURN0,
+    IA64_IA32_GR_DATA_SELECTORS = 16,
+    IA64_IA32_GR_SYSTEM_SELECTORS = 17,
+    IA64_IA32_GR_ES_DESCRIPTOR = 24,
+    IA64_IA32_GR_CS_DESCRIPTOR_SCRATCH = 25,
+    IA64_IA32_GR_SS_DESCRIPTOR_SCRATCH = 26,
+    IA64_IA32_GR_DS_DESCRIPTOR = 27,
+    IA64_IA32_GR_FS_DESCRIPTOR = 28,
+    IA64_IA32_GR_GS_DESCRIPTOR = 29,
+    IA64_IA32_GR_LDT_DESCRIPTOR = 30,
+    IA64_IA32_GR_GDT_DESCRIPTOR = 31,
+} IA64IA32GeneralRegisterIndex;
+
 typedef enum IA64PredicateRegisterIndex {
     IA64_PR_TRUE = 0,
     IA64_PR_ROTATING_BASE = 16,
@@ -479,6 +451,8 @@ typedef enum IA64ControlRegisterIndex {
 
 typedef enum IA64ApplicationRegisterIndex {
     IA64_AR_KR0 = 0,
+    IA64_AR_KR1 = 1,
+    IA64_AR_KR2 = 2,
     IA64_AR_KR7 = 7,
     IA64_AR_RSC = 16,
     IA64_AR_BSP = 17,
@@ -500,6 +474,12 @@ typedef enum IA64ApplicationRegisterIndex {
     IA64_AR_LC = 65,
     IA64_AR_EC = 66,
 } IA64ApplicationRegisterIndex;
+
+typedef enum IA64IA32ApplicationRegisterIndex {
+    IA64_IA32_AR_IOBASE = IA64_AR_KR0,
+    IA64_IA32_AR_TSS_DESCRIPTOR = IA64_AR_KR1,
+    IA64_IA32_AR_CR3_CR2 = IA64_AR_KR2,
+} IA64IA32ApplicationRegisterIndex;
 
 #define IA64_SPURIOUS_VECTOR      0x0F
 #define IA64_VECTOR_MASKED        (1ULL << 16)
@@ -699,7 +679,12 @@ typedef struct IA64FirmwareDebugRseState {
     int32_t clean;
     int32_t clean_nat;
     int32_t invalid;
+    uint64_t rnat_addr;
+    uint64_t load_rnat;
+    uint64_t load_rnat_addr;
     uint32_t rnat_first;
+    uint32_t rnat_last;
+    bool load_rnat_valid;
     uint8_t cfm_sof;
     uint8_t cfm_sol;
     uint8_t cfm_sor;
@@ -890,6 +875,8 @@ typedef struct CPUArchState {
 
 } CPUIA64State;
 
+static inline uint64_t ia64_pkr_key_mask(const CPUIA64State *env);
+
 void ia64_tlb_bump_generation(CPUIA64State *env, bool is_ifetch);
 const IA64TlbEntry *ia64_tlb_find_slow(CPUIA64State *env, uint64_t va,
                                        uint32_t rid, bool is_ifetch);
@@ -939,7 +926,7 @@ ia64_key_exception_for_key(const CPUIA64State *env, uint32_t key,
         uint64_t pkr = env->pkr[i];
 
         if ((pkr & IA64_PKR_VALID) &&
-            (pkr & IA64_PKR_KEY_MASK) == pkr_key) {
+            (pkr & ia64_pkr_key_mask(env)) == pkr_key) {
             matched = true;
             disable_bits = pkr;
             break;
@@ -1071,37 +1058,6 @@ ia64_tlb_find_cached(CPUIA64State *env, uint64_t va, uint32_t rid,
     return ia64_tlb_find_slow(env, va, rid, is_ifetch);
 }
 
-static inline bool ia64_tlb_entry_covers_va_any_rid(const IA64TlbEntry *entry,
-                                                    uint64_t va)
-{
-    if (!entry->valid || entry->ps == 0) {
-        return false;
-    }
-    if (ia64_rr_index(entry->va) != ia64_rr_index(va)) {
-        return false;
-    }
-    return ((entry->va ^ va) & entry->page_mask) == 0;
-}
-
-static inline bool ia64_tlb_has_explicit_va_mapping(const IA64TlbEntry *tlb,
-                                                    uint16_t tlb_count,
-                                                    uint64_t va)
-{
-    uint16_t i;
-
-    for (i = 0; i < tlb_count; i++) {
-        if (ia64_tlb_entry_covers_va_any_rid(&tlb[i], va)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static inline bool ia64_page_shift_insertable(uint8_t page_shift)
-{
-    return (IA64_INSERTABLE_PAGE_SIZE_MASK >> page_shift) & 1;
-}
-
 static inline uint32_t ia64_region_rid(const CPUIA64State *env, uint64_t va)
 {
     return ia64_rr_rid(env->rr[ia64_rr_index(va)]);
@@ -1139,65 +1095,6 @@ static inline bool ia64_sal_boot_environment_active(const CPUIA64State *env)
 static inline bool ia64_data_nested_tlb_active(const CPUIA64State *env)
 {
     return !(env->psr & IA64_PSR_IC) && !env->exception_state.psr_ic_inflight;
-}
-
-static inline bool ia64_sal_boot_virtual_pa(const CPUIA64State *env,
-                                            uint64_t va, uint64_t *pa)
-{
-    /*
-     * Before ExitBootServices(), IA-64 OS loaders execute under the SAL
-     * environment and may run in virtual mode while SAL still owns IVA and
-     * translation faults.  Model SAL's boot-time identity mappings when the
-     * firmware IVT is still active.
-     */
-    if (!ia64_sal_boot_environment_active(env)) {
-        return false;
-    }
-
-    if (ia64_rr_index(va) == 0 && va < IA64_FW_BOOT_IDENTITY_LIMIT) {
-        *pa = va;
-        return true;
-    }
-
-    return false;
-}
-
-static inline bool ia64_sal_boot_identity_pa(const CPUIA64State *env,
-                                             uint64_t va, uint64_t *pa)
-{
-    uint64_t phys;
-
-    /*
-     * SAL owns the IVT until ExitBootServices() completes.  In that
-     * environment its TLB miss handlers may install identity TC entries for
-     * OS-loader misses, using the current region's RID.  This is a miss
-     * fallback only; caller-installed TR/TC entries must take precedence.
-     */
-    if (!ia64_sal_boot_environment_active(env)) {
-        return false;
-    }
-
-    /*
-     * This fallback models SAL's boot-time miss handler for otherwise
-     * unmapped identity accesses.  If firmware or the OS loader has already
-     * installed an explicit TR/TC for the same virtual range, a RID mismatch
-     * must remain an architectural TLB miss instead of silently falling back
-     * to a different identity physical address.
-     */
-    if (ia64_tlb_has_explicit_va_mapping(
-            env->mmu.tlb_data, env->mmu.tlb_data_count, va) ||
-        ia64_tlb_has_explicit_va_mapping(
-            env->mmu.tlb_inst, env->mmu.tlb_inst_count, va)) {
-        return false;
-    }
-
-    phys = va & IA64_REGION7_PHYS_MASK;
-    if (phys >= IA64_FW_BOOT_IDENTITY_LIMIT) {
-        return false;
-    }
-
-    *pa = phys;
-    return true;
 }
 
 static inline bool ia64_vhpt_config_valid(const CPUIA64State *env,
@@ -1290,8 +1187,6 @@ void ia64_itc_advance_pending_itm(CPUIA64State *env);
 void ia64_itc_check_timer(CPUIA64State *env);
 void ia64_itc_enter_halt(CPUIA64State *env);
 
-#define IA64_ITC_NS_PER_TICK 5
-
 static inline bool ia64_external_interrupt_vector_valid(uint8_t vector)
 {
     return vector == 0 || vector == 2 || vector >= 16;
@@ -1311,7 +1206,9 @@ static inline uint64_t ia64_itc_read(CPUIA64State *env)
 static inline void ia64_itc_write(CPUIA64State *env, uint64_t value)
 {
     env->ar_itc = value;
-    env->interrupt.itc_delta = ia64_itc_clock_ns();
+    env->interrupt.itc_last_ns = ia64_itc_clock_ns();
+    env->interrupt.itc_fraction = 0;
+    env->interrupt.itc_tick_debt = 0;
     env->interrupt.itm_last_match_valid = false;
 }
 
@@ -1323,6 +1220,7 @@ typedef struct IA64BootInfo {
     uint64_t bsp;
     uint64_t stack_pointer;
     uint64_t rsc;
+    uint64_t low_ram_size;
     bool powered_off;
 } IA64BootInfo;
 
@@ -1344,6 +1242,12 @@ struct ArchCPU {
     uint32_t package_cpus;
 };
 
+typedef enum IA64CPUModel {
+    IA64_CPU_MODEL_MERCED,
+    IA64_CPU_MODEL_MADISON,
+    IA64_CPU_MODEL_MONTECITO,
+} IA64CPUModel;
+
 void ia64_cpu_set_boot_info(IA64CPU *cpu, const IA64BootInfo *info);
 void ia64_cpu_reset_to_boot_info(IA64CPU *cpu);
 
@@ -1354,13 +1258,47 @@ struct IA64CPUClass {
     ResettablePhases parent_phases;
 
     /* Guest-visible processor-model data. */
+    IA64CPUModel model;
     uint64_t cpuid_version;
     uint64_t cpuid_features;
-    uint8_t tr_count;
+    uint64_t pal_version;
+    uint32_t frequency_base_hz;
+    uint32_t itc_frequency_hz;
+    uint64_t processor_frequency_ratio;
+    uint64_t bus_frequency_ratio;
+    uint64_t itc_frequency_ratio;
+    uint32_t ia32_cpuid_version;
+    uint32_t ia32_cpuid_leaf2[4];
+    uint64_t insertable_page_size_mask;
+    uint64_t purgeable_page_size_mask;
+    uint8_t itr_count;
+    uint8_t dtr_count;
+    uint16_t itlb_entries;
+    uint16_t dtlb_entries;
+    uint8_t phys_addr_bits;
+    uint8_t impl_va_msb;
+    uint8_t rid_bits;
+    uint8_t key_bits;
+    uint8_t hash_tag_id;
+    uint8_t unique_tcs;
+    uint8_t tc_levels;
+    uint8_t perf_counter_width;
+    uint8_t memory_attribute_mask;
+    uint64_t implemented_pmc_mask;
+    uint64_t implemented_pmd_mask;
+    uint64_t perf_cycles_mask;
+    uint64_t perf_retired_mask;
+    bool rse_has_clean_partition;
     bool has_native_ia32;
     bool has_virtualization;
     bool is_montecito;
 };
+
+static inline uint64_t
+ia64_cpu_default_io_block_pa(const IA64CPUClass *icc)
+{
+    return (1ULL << icc->phys_addr_bits) - IA64_IO_PORT_SPACE_SIZE;
+}
 
 static inline IA64CPU *ia64_cpu_from_cpu_state(CPUState *cs)
 {
@@ -1383,6 +1321,103 @@ ia64_firmware_debug_state_const(const CPUIA64State *env)
 static inline IA64CPUClass *ia64_env_cpu_class(CPUIA64State *env)
 {
     return IA64_CPU_GET_CLASS(ia64_cpu_from_cpu_state(env_cpu(env)));
+}
+
+static inline const IA64CPUClass *
+ia64_env_cpu_class_const(const CPUIA64State *env)
+{
+    return ia64_env_cpu_class((CPUIA64State *)env);
+}
+
+static inline uint64_t ia64_cpu_page_size_mask(const CPUIA64State *env)
+{
+    return ia64_env_cpu_class_const(env)->insertable_page_size_mask;
+}
+
+static inline uint16_t ia64_cpu_tlb_capacity(const CPUIA64State *env,
+                                             bool is_data)
+{
+    const IA64CPUClass *icc = ia64_env_cpu_class_const(env);
+
+    return is_data ? icc->dtlb_entries : icc->itlb_entries;
+}
+
+static inline uint64_t
+ia64_cpu_purge_page_size_mask(const CPUIA64State *env)
+{
+    return ia64_env_cpu_class_const(env)->purgeable_page_size_mask;
+}
+
+static inline bool ia64_page_shift_insertable(const CPUIA64State *env,
+                                              uint8_t page_shift)
+{
+    return page_shift < 64 &&
+           ((ia64_cpu_page_size_mask(env) >> page_shift) & 1);
+}
+
+static inline uint64_t ia64_pkr_key_mask(const CPUIA64State *env)
+{
+    return ((1ULL << ia64_env_cpu_class_const(env)->key_bits) - 1) <<
+           IA64_PKR_KEY_SHIFT;
+}
+
+static inline uint64_t ia64_pkr_mask(const CPUIA64State *env)
+{
+    return IA64_PKR_VALID | IA64_PKR_WD | IA64_PKR_RD | IA64_PKR_XD |
+           ia64_pkr_key_mask(env);
+}
+
+static inline bool ia64_pa_is_implemented(const CPUIA64State *env,
+                                          uint64_t addr)
+{
+    uint64_t implemented_mask =
+        (1ULL << ia64_env_cpu_class_const(env)->phys_addr_bits) - 1;
+
+    return (addr & ~(IA64_PHYS_UC_BIT | implemented_mask)) == 0;
+}
+
+static inline uint64_t ia64_pa_canonicalize(const CPUIA64State *env,
+                                            uint64_t addr)
+{
+    uint64_t implemented_mask =
+        (1ULL << ia64_env_cpu_class_const(env)->phys_addr_bits) - 1;
+
+    return addr & (IA64_PHYS_UC_BIT | implemented_mask);
+}
+
+static inline bool ia64_va_is_implemented(const CPUIA64State *env,
+                                          uint64_t va)
+{
+    uint8_t impl_va_msb = ia64_env_cpu_class_const(env)->impl_va_msb;
+
+    if (impl_va_msb >= 60) {
+        return true;
+    }
+
+    {
+        uint64_t count = 60 - impl_va_msb;
+        uint64_t mask = (1ULL << count) - 1;
+        uint64_t unimplemented = (va >> (impl_va_msb + 1)) & mask;
+        uint64_t expected = (va & (1ULL << impl_va_msb)) ? mask : 0;
+
+        return unimplemented == expected;
+    }
+}
+
+static inline uint64_t ia64_va_canonicalize(const CPUIA64State *env,
+                                            uint64_t va)
+{
+    uint8_t impl_va_msb = ia64_env_cpu_class_const(env)->impl_va_msb;
+    uint64_t region = va & (IA64_REGION_MASK << IA64_REGION_SHIFT);
+    uint64_t implemented_mask = (1ULL << (impl_va_msb + 1)) - 1;
+    uint64_t payload = va & implemented_mask;
+
+    if (impl_va_msb < 60 && (payload & (1ULL << impl_va_msb))) {
+        payload |= ((1ULL << (60 - impl_va_msb)) - 1) <<
+                   (impl_va_msb + 1);
+    }
+
+    return region | payload;
 }
 
 #endif

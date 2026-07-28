@@ -20,6 +20,9 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "cpu.h"
+#ifdef TARGET_IA64
+#include "target/ia64/ia32/int-helper-adapter.h"
+#endif
 #include "qemu/host-utils.h"
 #include "exec/helper-proto.h"
 #include "qapi/error.h"

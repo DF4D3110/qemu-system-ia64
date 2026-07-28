@@ -34,31 +34,14 @@ static hwaddr ia64_pci_sparse_io_port(hwaddr encoded)
     hwaddr group = encoded >> 12;
     hwaddr low = encoded & 0xfff;
 
-    /*
-     * Linux marks the legacy IA-64 I/O space sparse and encodes port p as:
-     *
-     *     ((p >> 2) << 12) | (p & 0xfff)
-     *
-     * The firmware historically used dense addresses in the same window for
-     * early ATA/PS2 access, so keep invalid sparse encodings as dense fallbacks.
-     */
-    if ((group & 0x3ff) == (low >> 2)) {
-        return (group << 2) | (low & 3);
-    }
-    return encoded;
-}
-
-static hwaddr ia64_pci_dense_io_addr(hwaddr port)
-{
-    return IA64_PCI_IO_BASE + port;
+    return (group << 2) | (low & 3);
 }
 
 static uint64_t ia64_pci_sparse_io_read(void *opaque, hwaddr addr,
                                         unsigned size)
 {
     IA64PCIState *s = opaque;
-    hwaddr port = ia64_pci_sparse_io_port(addr + IA64_PCI_IO_SPARSE_SKIP);
-    hwaddr dense = ia64_pci_dense_io_addr(port);
+    hwaddr port = ia64_pci_sparse_io_port(addr);
 
     if (port >= IA64_PCI_IO_SIZE || port + size > IA64_PCI_IO_SIZE) {
         return ~0ULL;
@@ -66,13 +49,13 @@ static uint64_t ia64_pci_sparse_io_read(void *opaque, hwaddr addr,
 
     switch (size) {
     case 1:
-        return address_space_ldub(&s->pci_io_as, dense,
+        return address_space_ldub(&s->pci_io_as, port,
                                   MEMTXATTRS_UNSPECIFIED, NULL);
     case 2:
-        return address_space_lduw_le(&s->pci_io_as, dense,
+        return address_space_lduw_le(&s->pci_io_as, port,
                                      MEMTXATTRS_UNSPECIFIED, NULL);
     case 4:
-        return address_space_ldl_le(&s->pci_io_as, dense,
+        return address_space_ldl_le(&s->pci_io_as, port,
                                     MEMTXATTRS_UNSPECIFIED, NULL);
     default:
         return ~0ULL;
@@ -83,8 +66,7 @@ static void ia64_pci_sparse_io_write(void *opaque, hwaddr addr, uint64_t data,
                                      unsigned size)
 {
     IA64PCIState *s = opaque;
-    hwaddr port = ia64_pci_sparse_io_port(addr + IA64_PCI_IO_SPARSE_SKIP);
-    hwaddr dense = ia64_pci_dense_io_addr(port);
+    hwaddr port = ia64_pci_sparse_io_port(addr);
 
     if (port >= IA64_PCI_IO_SIZE || port + size > IA64_PCI_IO_SIZE) {
         return;
@@ -92,15 +74,15 @@ static void ia64_pci_sparse_io_write(void *opaque, hwaddr addr, uint64_t data,
 
     switch (size) {
     case 1:
-        address_space_stb(&s->pci_io_as, dense, data,
+        address_space_stb(&s->pci_io_as, port, data,
                           MEMTXATTRS_UNSPECIFIED, NULL);
         break;
     case 2:
-        address_space_stw_le(&s->pci_io_as, dense, data,
+        address_space_stw_le(&s->pci_io_as, port, data,
                              MEMTXATTRS_UNSPECIFIED, NULL);
         break;
     case 4:
-        address_space_stl_le(&s->pci_io_as, dense, data,
+        address_space_stl_le(&s->pci_io_as, port, data,
                              MEMTXATTRS_UNSPECIFIED, NULL);
         break;
     default:
@@ -231,19 +213,18 @@ static void ia64_pci_realize(DeviceState *dev, Error **errp)
     memory_region_init_alias(&s->pci_mmio_window, OBJECT(dev),
                              "pci-mmio-window", &s->pci_mmio,
                              IA64_PCI_MMIO_BASE, IA64_PCI_MMIO_SIZE);
-    /*
-     * IA-64 sparse I/O uses a 24-bit port offset within each io_space slot.
-     * Linux constructs CPU virtual addresses that can reach beyond 64 KiB
-     * even for ordinary byte/word port accesses, so the legacy PCI I/O window
-     * must cover the full 16 MiB aperture.
-     */
     memory_region_init(&s->pci_io, OBJECT(dev), "pci-io",
                        IA64_PCI_IO_SIZE);
     address_space_init(&s->pci_io_as, &s->pci_io, "ia64-pci-io");
     memory_region_init_io(&s->pci_io_sparse, OBJECT(dev),
                           &ia64_pci_sparse_io_ops, s, "pci-io-sparse",
-                          IA64_PCI_IO_SPARSE_SIZE -
-                          IA64_PCI_IO_SPARSE_SKIP);
+                          IA64_PCI_IO_SPARSE_SIZE);
+    /*
+     * A port device may issue another port transaction while servicing a
+     * request.  The sparse bridge only translates addresses and therefore
+     * permits that nested transaction to reach the independent port bus.
+     */
+    s->pci_io_sparse.disable_reentrancy_guard = true;
     memory_region_init_io(&s->pci_config, OBJECT(dev),
                           &ia64_pci_config_ops, s, "ia64-pci-config",
                           IA64_PCI_CONFIG_SIZE);
@@ -259,11 +240,7 @@ static void ia64_pci_realize(DeviceState *dev, Error **errp)
                                         IA64_PCI_MMIO_BASE,
                                         &s->pci_mmio_window, 1);
     memory_region_add_subregion(get_system_memory(), IA64_PCI_IO_BASE,
-                                &s->pci_io);
-    memory_region_add_subregion_overlap(get_system_memory(),
-                                        IA64_PCI_IO_BASE +
-                                        IA64_PCI_IO_SPARSE_SKIP,
-                                        &s->pci_io_sparse, 1);
+                                &s->pci_io_sparse);
     memory_region_add_subregion(get_system_memory(), IA64_PCI_CONFIG_BASE,
                                 &s->pci_config);
 }

@@ -12,9 +12,12 @@
 #include "decode/opcode.h"
 
 void ia64_rfi(CPUIA64State *env, uint64_t fault_ip, uint32_t fault_slot);
+void ia64_rse_resume_incomplete_frame(CPUIA64State *env);
 void ia64_write_cr(CPUIA64State *env, uint32_t cr_num, uint64_t value);
 void ia64_tlb_serialize(CPUIA64State *env, uint32_t include_data,
-                        uint32_t include_inst);
+                       uint32_t include_inst);
+void ia64_mmu_data_access(CPUIA64State *env, uint64_t va, uint32_t size,
+                          bool translated);
 void ia64_mmu_fc(CPUIA64State *env, uint64_t addr);
 void ia64_mmu_itr_insert(CPUIA64State *env, uint64_t pte,
                          uint64_t slot_reg, uint32_t is_data,
@@ -24,6 +27,7 @@ void ia64_mmu_ptr_purge(CPUIA64State *env, uint64_t ifa,
 void ia64_mmu_ptc_purge(CPUIA64State *env, uint64_t va,
                         uint64_t size_reg, uint32_t mode);
 uint64_t ia64_mmu_tpa(CPUIA64State *env, uint64_t va);
+bool ia64_mmu_translate_debug(CPUIA64State *env, uint64_t va, uint64_t *pa);
 uint64_t ia64_mmu_probe(CPUIA64State *env, uint64_t va, uint32_t is_write,
                         uint64_t access_level);
 void ia64_mmu_probe_fault(CPUIA64State *env, uint64_t va,
@@ -44,6 +48,12 @@ uint64_t ia64_mmu_ttag(CPUIA64State *env, uint64_t va);
 void ia64_mmu_itc_insert(CPUIA64State *env, uint64_t pte,
                          uint32_t is_data, uint64_t raw,
                          uint32_t fault_slot);
+bool ia64_mmu_insert_firmware_tc(CPUIA64State *env, uint64_t va,
+                                 uint64_t pa, bool is_data,
+                                 uint8_t page_shift);
+bool ia64_firmware_boot_miss_mapping(IA64CPU *cpu, uint64_t va,
+                                     uint64_t *pa, uint8_t *page_shift,
+                                     bool *direct);
 uint32_t ia64_firmware_debug_enter(CPUIA64State *env, uint64_t address);
 uint32_t ia64_firmware_debug_save(CPUIA64State *env);
 uint32_t ia64_firmware_debug_restore(CPUIA64State *env);
@@ -109,8 +119,9 @@ void ia64_flush_on_pk_change(CPUIA64State *env, uint64_t old_psr);
 
 uint64_t ia64_rse_current_cfm(const CPUIA64State *env);
 uint32_t ia64_rse_nat_words_grow(uint64_t addr, uint32_t nregs);
+uint64_t ia64_rse_read_rnat(const CPUIA64State *env);
 void ia64_rse_rnat_reloaded(CPUIA64State *env);
-void ia64_rse_rnat_bspstore_moved(CPUIA64State *env, uint64_t old_bspstore);
+void ia64_rse_rnat_undefined(CPUIA64State *env);
 void ia64_rse_pop_return_frame(CPUIA64State *env, uint64_t pfs);
 void ia64_rse_check(CPUIA64State *env, const char *site);
 void ia64_rse_br_call(CPUIA64State *env, uint32_t b_reg,

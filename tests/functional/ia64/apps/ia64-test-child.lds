@@ -3,7 +3,13 @@ ENTRY(__efi_entry_descriptor)
 
 SECTIONS
 {
-    . = 0x05000000;
+    /*
+     * Start immediately above the early loader's 16--80 MiB fixed window.
+     * This child has stripped relocations, so it also verifies that an exact
+     * fixed image base remains legal below the firmware's automatic allocation
+     * floor.
+     */
+    . = 0x05002000;
 
     .text : { *(.text*) }
     . = ALIGN(16);
@@ -39,7 +45,7 @@ SECTIONS
         LONG(__hii_data_entry - __hii_resource_start);
 
         __hii_data_entry = .;
-        LONG(__hii_packages - 0x05000000);
+        LONG(__hii_packages - 0x05002000);
         LONG(__hii_packages_end - __hii_packages);
         LONG(0); LONG(0);
 

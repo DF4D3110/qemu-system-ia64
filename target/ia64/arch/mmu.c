@@ -68,14 +68,16 @@ static uint64_t ia64_gr_page_size(uint64_t value)
                                      IA64_ITIR_PS_MASK);
 }
 
-static bool ia64_translation_insert_fields_valid(uint64_t pte, uint64_t itir)
+static bool ia64_translation_insert_fields_valid(CPUIA64State *env,
+                                                 uint64_t pte,
+                                                 uint64_t itir)
 {
     uint8_t page_shift = (itir >> IA64_ITIR_PS_SHIFT) &
                          IA64_ITIR_PS_MASK;
     uint64_t itir_reserved = IA64_ITIR_RESERVED_MASK;
     uint8_t ma;
 
-    if (!ia64_page_shift_insertable(page_shift)) {
+    if (!ia64_page_shift_insertable(env, page_shift)) {
         return false;
     }
     if (!(pte & IA64_PTE_PRESENT)) {
@@ -131,9 +133,9 @@ static void ia64_qemu_tlb_flush_entry(CPUIA64State *env,
     }
 }
 
-static int ia64_tlb_select_tc_slot(IA64TlbEntry *tlb,
+static int ia64_tlb_select_tc_slot(IA64TlbEntry *tlb, uint16_t capacity,
                                    uint16_t *next_replace, uint64_t va,
-                                   uint32_t rid, bool *matched);
+                                   uint32_t rid);
 
 bool ia64_memory_allows_advanced_load(IA64MemorySpeculation spec)
 {
@@ -163,13 +165,6 @@ static bool ia64_data_address_to_mapped_phys_attr(CPUIA64State *env,
         return true;
     }
 
-    if (ia64_sal_boot_virtual_pa(env, va, pa)) {
-        if (spec) {
-            *spec = IA64_MEM_SPECULATIVE;
-        }
-        return true;
-    }
-
     rid = ia64_region_rid(env, va);
     entry = ia64_tlb_find_cached(env, va, rid, false);
     if (entry) {
@@ -190,13 +185,6 @@ static bool ia64_data_address_to_mapped_phys_attr(CPUIA64State *env,
             }
             return (perm & IA64_TLB_R) != 0;
         }
-    }
-
-    if (ia64_sal_boot_identity_pa(env, va, pa)) {
-        if (spec) {
-            *spec = IA64_MEM_SPECULATIVE;
-        }
-        return true;
     }
 
     return false;
@@ -232,7 +220,8 @@ void ia64_mmu_fc(CPUIA64State *env, uint64_t addr)
 {
     uint64_t pa;
 
-    if ((env->psr & IA64_PSR_DT) && !ia64_va_is_implemented(addr)) {
+    if ((env->psr & IA64_PSR_DT) &&
+        !ia64_va_is_implemented(env, addr)) {
         ia64_raise_unimplemented_data_address(
             env, addr, IA64_ISR_R, true, false, ia64_current_code_tlb_ed(env));
     }
@@ -260,8 +249,210 @@ static void ia64_discard_pending_purge(IA64TlbEntry *entry,
     (*pending_count)--;
 }
 
+static bool ia64_merced_dtlb1_enabled(CPUIA64State *env)
+{
+    return ia64_env_cpu_class(env)->model == IA64_CPU_MODEL_MERCED;
+}
+
+static bool ia64_tlb_entries_equivalent(const IA64TlbEntry *a,
+                                        const IA64TlbEntry *b)
+{
+    return a->valid && b->valid &&
+           a->va == b->va && a->pa == b->pa &&
+           a->ps == b->ps && a->pte == b->pte &&
+           a->rid == b->rid && a->key == b->key;
+}
+
+static bool ia64_merced_dtlb1_contains(CPUIA64State *env,
+                                      const IA64TlbEntry *entry)
+{
+    uint16_t i;
+
+    if (!ia64_merced_dtlb1_enabled(env) || !entry->valid) {
+        return false;
+    }
+    for (i = 0; i < IA64_DTLB1_MAX; i++) {
+        if (ia64_tlb_entries_equivalent(&env->mmu.tlb_data_l1[i], entry)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void ia64_merced_dtlb1_stamp(CPUIA64State *env, uint8_t slot)
+{
+    if (env->mmu.tlb_data_l1_clock == UINT64_MAX) {
+        uint16_t i;
+
+        /*
+         * The wrap interval is purely theoretical, but keep the derived
+         * replacement state deterministic without changing relative age.
+         */
+        for (i = 0; i < IA64_DTLB1_MAX; i++) {
+            env->mmu.tlb_data_l1_age[i] =
+                env->mmu.tlb_data_l1[i].valid ? i + 1U : 0;
+        }
+        env->mmu.tlb_data_l1_clock = IA64_DTLB1_MAX;
+    }
+    env->mmu.tlb_data_l1_age[slot] =
+        ++env->mmu.tlb_data_l1_clock;
+}
+
+static void ia64_merced_dtlb1_invalidate_slot(CPUIA64State *env,
+                                               uint8_t slot)
+{
+    IA64TlbEntry *entry = &env->mmu.tlb_data_l1[slot];
+
+    if (!entry->valid) {
+        return;
+    }
+    ia64_qemu_tlb_flush_entry(env, entry);
+    entry->valid = 0;
+    env->mmu.tlb_data_l1_age[slot] = 0;
+    g_assert(env->mmu.tlb_data_l1_count > 0);
+    env->mmu.tlb_data_l1_count--;
+}
+
+static void ia64_merced_dtlb1_invalidate_copy(CPUIA64State *env,
+                                               const IA64TlbEntry *source)
+{
+    uint16_t i;
+
+    if (!ia64_merced_dtlb1_enabled(env)) {
+        return;
+    }
+    for (i = 0; i < IA64_DTLB1_MAX; i++) {
+        if (ia64_tlb_entries_equivalent(&env->mmu.tlb_data_l1[i],
+                                        source)) {
+            ia64_merced_dtlb1_invalidate_slot(env, i);
+        }
+    }
+}
+
+static void ia64_merced_dtlb1_touch_one(CPUIA64State *env, uint64_t va)
+{
+    const IA64TlbEntry *source = NULL;
+    int empty = -1;
+    uint64_t oldest_age = UINT64_MAX;
+    uint8_t oldest = 0;
+    uint32_t rid = ia64_region_rid(env, va);
+    uint16_t i;
+
+    if (!ia64_merced_dtlb1_enabled(env) ||
+        env->mmu.tlb_data_l1_count == 0) {
+        goto find_dtlb2;
+    }
+    for (i = 0; i < IA64_DTLB1_MAX; i++) {
+        if (ia64_tlb_match(&env->mmu.tlb_data_l1[i], va, rid)) {
+            ia64_merced_dtlb1_stamp(env, i);
+            return;
+        }
+    }
+
+find_dtlb2:
+    for (i = 0; i < env->mmu.tlb_data_count; i++) {
+        if (!env->mmu.tlb_data[i].pending_purge &&
+            ia64_tlb_match(&env->mmu.tlb_data[i], va, rid)) {
+            source = &env->mmu.tlb_data[i];
+            break;
+        }
+    }
+    if (!source || !ia64_merced_dtlb1_enabled(env)) {
+        return;
+    }
+
+    for (i = 0; i < IA64_DTLB1_MAX; i++) {
+        IA64TlbEntry *entry = &env->mmu.tlb_data_l1[i];
+
+        if (ia64_tlb_match(entry, va, rid)) {
+            if (ia64_tlb_entries_equivalent(entry, source)) {
+                *entry = *source;
+                ia64_merced_dtlb1_stamp(env, i);
+                return;
+            }
+            ia64_merced_dtlb1_invalidate_slot(env, i);
+        }
+        if (!entry->valid) {
+            if (empty < 0) {
+                empty = i;
+            }
+        } else if (env->mmu.tlb_data_l1_age[i] < oldest_age) {
+            oldest_age = env->mmu.tlb_data_l1_age[i];
+            oldest = i;
+        }
+    }
+
+    if (empty < 0) {
+        empty = oldest;
+        ia64_merced_dtlb1_invalidate_slot(env, empty);
+    }
+    env->mmu.tlb_data_l1[empty] = *source;
+    env->mmu.tlb_data_l1_count++;
+    ia64_merced_dtlb1_stamp(env, empty);
+}
+
+void ia64_mmu_data_access(CPUIA64State *env, uint64_t va, uint32_t size,
+                          bool translated)
+{
+    uint64_t end;
+
+    if (!ia64_merced_dtlb1_enabled(env) ||
+        !translated || size == 0) {
+        return;
+    }
+
+    ia64_merced_dtlb1_touch_one(env, va);
+    end = va + size - 1U;
+    if (end >= va && ((end ^ va) & TARGET_PAGE_MASK) != 0) {
+        ia64_merced_dtlb1_touch_one(env, end);
+    }
+}
+
+static bool ia64_merced_dtlb1_purge_range(CPUIA64State *env, uint64_t va,
+                                          uint64_t ps, uint32_t rid,
+                                          bool tc_only)
+{
+    uint64_t start = ia64_va_page_base(va, ps);
+    uint64_t end = start + ps - 1;
+    bool purged = false;
+    uint16_t i;
+
+    if (!ia64_merced_dtlb1_enabled(env)) {
+        return false;
+    }
+    if (end < start || end > IA64_REGION7_PHYS_MASK) {
+        end = IA64_REGION7_PHYS_MASK;
+    }
+    for (i = 0; i < IA64_DTLB1_MAX; i++) {
+        IA64TlbEntry *entry = &env->mmu.tlb_data_l1[i];
+
+        if ((!tc_only || !entry->is_tr) &&
+            ia64_tlb_entry_overlaps(entry, start, end, rid)) {
+            ia64_merced_dtlb1_invalidate_slot(env, i);
+            purged = true;
+        }
+    }
+    return purged;
+}
+
+static void ia64_qemu_tlb_flush_replaced_entry(CPUIA64State *env,
+                                                IA64TlbEntry *entry,
+                                                bool is_data)
+{
+    if (!is_data) {
+        ia64_qemu_tlb_flush_entry(env, entry);
+        return;
+    }
+    if (entry->pending_purge) {
+        ia64_merced_dtlb1_invalidate_copy(env, entry);
+    } else if (ia64_merced_dtlb1_contains(env, entry)) {
+        return;
+    }
+    ia64_qemu_tlb_flush_entry(env, entry);
+}
+
 static bool ia64_purge_tc_entries(CPUIA64State *env, IA64TlbEntry *tlb,
-                                  uint16_t *count,
+                                  uint16_t capacity, uint16_t *count,
                                   uint16_t *pending_count, uint64_t va,
                                   uint64_t ps, uint32_t rid, bool is_data,
                                   uint16_t *next_replace, int *insert_slot)
@@ -270,7 +461,7 @@ static bool ia64_purge_tc_entries(CPUIA64State *env, IA64TlbEntry *tlb,
     int victim = -1;
     uint64_t start = ia64_va_page_base(va, ps);
     uint64_t end = start + ps - 1;
-    uint16_t victim_distance = IA64_TLB_MAX;
+    uint16_t victim_distance = capacity;
     uint16_t i;
     bool purged = false;
 
@@ -279,6 +470,10 @@ static bool ia64_purge_tc_entries(CPUIA64State *env, IA64TlbEntry *tlb,
     }
     if (end < start || end > IA64_REGION7_PHYS_MASK) {
         end = IA64_REGION7_PHYS_MASK;
+    }
+    if (is_data) {
+        purged |= ia64_merced_dtlb1_purge_range(env, start, end - start + 1,
+                                                rid, true);
     }
     for (i = 0; i < *count; i++) {
         if (!tlb[i].valid) {
@@ -300,7 +495,7 @@ static bool ia64_purge_tc_entries(CPUIA64State *env, IA64TlbEntry *tlb,
             purged = true;
         } else if (insert_slot) {
             uint16_t distance = i >= *next_replace ?
-                i - *next_replace : IA64_TLB_MAX + i - *next_replace;
+                i - *next_replace : capacity + i - *next_replace;
 
             if (distance < victim_distance) {
                 victim = i;
@@ -314,12 +509,12 @@ static bool ia64_purge_tc_entries(CPUIA64State *env, IA64TlbEntry *tlb,
     }
 
     if (insert_slot) {
-        if (empty < 0 && *count < IA64_TLB_MAX) {
+        if (empty < 0 && *count < capacity) {
             empty = *count;
         }
         *insert_slot = empty >= 0 ? empty : victim;
         if (*insert_slot >= 0) {
-            *next_replace = (*insert_slot + 1) % IA64_TLB_MAX;
+            *next_replace = (*insert_slot + 1) % capacity;
         }
     }
 
@@ -441,6 +636,9 @@ static bool ia64_complete_pending_purges(CPUIA64State *env,
                           " pa=0x%016" PRIx64 " ps=0x%016" PRIx64 "\n",
                           kind, i, tlb[i].is_tr ? "TR" : "TC",
                           tlb[i].va, tlb[i].rid, tlb[i].pa, tlb[i].ps);
+            if (!is_ifetch) {
+                ia64_merced_dtlb1_invalidate_copy(env, &tlb[i]);
+            }
             if (targeted) {
                 ia64_qemu_tlb_flush_entry(env, &tlb[i]);
             }
@@ -508,17 +706,23 @@ void ia64_tlb_serialize(CPUIA64State *env, uint32_t serialize_data,
      */
 }
 
-static int ia64_tlb_select_tc_slot(IA64TlbEntry *tlb,
+static int ia64_tlb_select_tc_slot(IA64TlbEntry *tlb, uint16_t capacity,
                                    uint16_t *next_replace, uint64_t va,
-                                   uint32_t rid, bool *matched)
+                                   uint32_t rid)
 {
     int empty = -1;
     int victim = -1;
-    uint16_t victim_distance = IA64_TLB_MAX;
+    uint16_t victim_distance = capacity;
     uint16_t i;
 
-    *matched = false;
-    for (i = 0; i < IA64_TLB_MAX; i++) {
+    /*
+     * TC victim selection is implementation-specific.  The documented
+     * first-generation DTLB2 is fully associative with 96 entries, but its
+     * victim policy is not disclosed.  Reuse the model's deterministic
+     * circular policy rather than inventing reference-recency behavior that
+     * software could observe.
+     */
+    for (i = 0; i < capacity; i++) {
         if (!tlb[i].valid) {
             if (empty < 0) {
                 empty = i;
@@ -529,12 +733,11 @@ static int ia64_tlb_select_tc_slot(IA64TlbEntry *tlb,
             continue;
         }
         if (tlb[i].va == va && tlb[i].rid == rid) {
-            *matched = true;
             return i;
         }
         {
             uint16_t distance = i >= *next_replace ?
-                i - *next_replace : IA64_TLB_MAX + i - *next_replace;
+                i - *next_replace : capacity + i - *next_replace;
 
             if (distance < victim_distance) {
                 victim = i;
@@ -544,13 +747,13 @@ static int ia64_tlb_select_tc_slot(IA64TlbEntry *tlb,
     }
 
     if (empty >= 0) {
-        *next_replace = (empty + 1) % IA64_TLB_MAX;
+        *next_replace = (empty + 1) % capacity;
         return empty;
     }
 
     if (victim >= 0) {
         /* Keep replacement moving forward over non-TR entries. */
-        *next_replace = (victim + 1) % IA64_TLB_MAX;
+        *next_replace = (victim + 1) % capacity;
         return victim;
     }
 
@@ -558,11 +761,11 @@ static int ia64_tlb_select_tc_slot(IA64TlbEntry *tlb,
 }
 
 static bool ia64_cache_replaced_tr(IA64TlbEntry *tlb, uint16_t *cnt,
+                                   uint16_t capacity,
                                    uint16_t *next_replace,
                                    uint16_t *pending_count,
                                    const IA64TlbEntry *old_tr)
 {
-    bool matched;
     int slot;
 
     if (!old_tr->valid || !old_tr->is_tr) {
@@ -574,8 +777,8 @@ static bool ia64_cache_replaced_tr(IA64TlbEntry *tlb, uint16_t *cnt,
      * processor TLBs.  Model that architected behavior as a TC copy, which
      * remains until normal TC replacement or an explicit ptr purge.
      */
-    slot = ia64_tlb_select_tc_slot(tlb, next_replace, old_tr->va,
-                                   old_tr->rid, &matched);
+    slot = ia64_tlb_select_tc_slot(tlb, capacity, next_replace,
+                                   old_tr->va, old_tr->rid);
     if (slot < 0) {
         qemu_log_mask(CPU_LOG_MMU,
                       "ia64 cache replaced tr failed va=0x%016" PRIx64
@@ -614,18 +817,20 @@ void ia64_mmu_itr_insert(CPUIA64State *env, uint64_t pte, uint64_t slot_reg,
     uint8_t perm;
     uint32_t rid;
     uint32_t slot = slot_reg & 0xff;
+    uint16_t capacity = ia64_cpu_tlb_capacity(env, is_data);
     uint16_t *next_replace;
     CPUState *cs = env_cpu(env);
     bool cached_old_tr;
 
-    if (slot >= ia64_env_cpu_class(env)->tr_count) {
+    if (slot >= (is_data ? ia64_env_cpu_class(env)->dtr_count :
+                          ia64_env_cpu_class(env)->itr_count)) {
         env->cr_isr = 0x30;
         ia64_raise_exception(env, IA64_EXCP_RESERVED_REG_FIELD,
                                ia64_ip_bundle_addr(env->ip), raw,
                                fault_slot);
         return;
     }
-    if (!ia64_translation_insert_fields_valid(pte, env->cr_itir)) {
+    if (!ia64_translation_insert_fields_valid(env, pte, env->cr_itir)) {
         env->cr_isr = 0x30;
         ia64_raise_exception(env, IA64_EXCP_RESERVED_REG_FIELD,
                                ia64_ip_bundle_addr(env->ip), raw,
@@ -642,7 +847,7 @@ void ia64_mmu_itr_insert(CPUIA64State *env, uint64_t pte, uint64_t slot_reg,
     perm = ia64_pte_perm(pte, 0);
     rid = ia64_region_rid(env, env->cr_ifa);
 
-    if (!ia64_va_is_implemented(env->cr_ifa)) {
+    if (!ia64_va_is_implemented(env, env->cr_ifa)) {
         ia64_raise_unimplemented_data_address(
             env, env->cr_ifa, 0, true, false, ia64_current_code_tlb_ed(env));
     }
@@ -665,13 +870,16 @@ void ia64_mmu_itr_insert(CPUIA64State *env, uint64_t pte, uint64_t slot_reg,
 
     IA64TlbEntry old_tr = tlb[slot];
 
-    ia64_purge_tc_entries(env, tlb, cnt, pending_count, va, ps, rid,
+    ia64_purge_tc_entries(env, tlb, capacity, cnt, pending_count, va, ps, rid,
                           is_data, NULL, NULL);
     if (old_tr.valid && !old_tr.is_tr) {
         ia64_qemu_tlb_flush_entry(env, &old_tr);
     }
-    cached_old_tr = ia64_cache_replaced_tr(tlb, cnt, next_replace,
-                                           pending_count, &old_tr);
+    cached_old_tr = ia64_cache_replaced_tr(
+        tlb, cnt, capacity, next_replace, pending_count, &old_tr);
+    if (is_data) {
+        ia64_merced_dtlb1_invalidate_copy(env, &old_tr);
+    }
     if (!cached_old_tr) {
         ia64_discard_pending_purge(&tlb[slot], pending_count);
     }
@@ -712,7 +920,7 @@ void ia64_mmu_ptr_purge(CPUIA64State *env, uint64_t ifa, uint64_t size_reg,
     uint32_t rid = ia64_region_rid(env, ifa);
     uint16_t count;
 
-    if (!ia64_va_is_implemented(ifa)) {
+    if (!ia64_va_is_implemented(env, ifa)) {
         ia64_raise_unimplemented_data_address(
             env, ifa, 0, true, false, ia64_current_code_tlb_ed(env));
     }
@@ -733,6 +941,9 @@ void ia64_mmu_ptr_purge(CPUIA64State *env, uint64_t ifa, uint64_t size_reg,
         is_data ? &env->mmu.pending_purge_data_count :
                   &env->mmu.pending_purge_inst_count,
         va, ps, rid, false, is_data ? 'd' : 'i');
+    if (is_data) {
+        ia64_merced_dtlb1_purge_range(env, va, ps, rid, false);
+    }
     ia64_assert_pending_purge_counts(env);
 }
 
@@ -747,6 +958,8 @@ static void ia64_ptc_mark_global(CPUIA64State *env,
                                  const IA64PtcGlobalWork *work,
                                  bool remote)
 {
+    ia64_merced_dtlb1_purge_range(env, work->va, work->ps,
+                                  work->rid, true);
     ia64_mark_pending_purge_entries(
         env->mmu.tlb_data, env->mmu.tlb_data_count,
         &env->mmu.pending_purge_data_count,
@@ -789,7 +1002,7 @@ void ia64_mmu_ptc_purge(CPUIA64State *env, uint64_t va, uint64_t size_reg,
     uint32_t rid = ia64_region_rid(env, va);
     uint64_t ps = ia64_gr_page_size(size_reg);
 
-    if (!ia64_va_is_implemented(va)) {
+    if (!ia64_va_is_implemented(env, va)) {
         ia64_raise_unimplemented_data_address(
             env, va, 0, true, false, ia64_current_code_tlb_ed(env));
     }
@@ -826,13 +1039,29 @@ void ia64_mmu_ptc_purge(CPUIA64State *env, uint64_t va, uint64_t size_reg,
             ia64_ptc_mark_global(env, &template, false);
         }
     } else if (mode == 2) {
+        /*
+         * ptc.e is architecturally local.  Some dual-thread silicon could
+         * accidentally over-purge translation resources belonging to the
+         * other logical processor, but its specification update explicitly
+         * describes that as an erratum and says the purge should not
+         * propagate.  Keep each vCPU's translation caches independent rather
+         * than reproducing an incidental sibling purge.
+         */
         ia64_mark_pending_purge_all_tc(
             env->mmu.tlb_data, env->mmu.tlb_data_count,
             &env->mmu.pending_purge_data_count, 'd');
+        if (ia64_merced_dtlb1_enabled(env)) {
+            uint16_t i;
+
+            for (i = 0; i < IA64_DTLB1_MAX; i++) {
+                ia64_merced_dtlb1_invalidate_slot(env, i);
+            }
+        }
         ia64_mark_pending_purge_all_tc(
             env->mmu.tlb_inst, env->mmu.tlb_inst_count,
             &env->mmu.pending_purge_inst_count, 'i');
     } else {
+        ia64_merced_dtlb1_purge_range(env, va, ps, rid, true);
         ia64_mark_pending_purge_entries(
             env->mmu.tlb_data, env->mmu.tlb_data_count,
             &env->mmu.pending_purge_data_count, va, ps, rid, true, 'd');
@@ -858,7 +1087,7 @@ uint64_t ia64_mmu_tpa(CPUIA64State *env, uint64_t va)
     const IA64TlbEntry *entry;
 
     if (env->psr & IA64_PSR_DT) {
-        if (!ia64_va_is_implemented(va)) {
+        if (!ia64_va_is_implemented(env, va)) {
             excp = IA64_EXCP_UNIMPL_DATA_ADDR;
             goto tpa_fault;
         }
@@ -889,9 +1118,6 @@ uint64_t ia64_mmu_tpa(CPUIA64State *env, uint64_t va)
             if (excp != IA64_EXCP_NONE) {
                 goto tpa_fault;
             }
-            return pa;
-        }
-        if (ia64_sal_boot_identity_pa(env, va, &pa)) {
             return pa;
         }
         vhpt_enabled = ia64_vhpt_walker_enabled(env, va, false, false,
@@ -958,16 +1184,12 @@ static uint64_t ia64_probe_address(CPUIA64State *env, uint64_t va,
         return 1;
     }
 
-    if (!ia64_va_is_implemented(va)) {
+    if (!ia64_va_is_implemented(env, va)) {
         return 0;
     }
 
     if (ia64_firmware_identity_pa(env->cr_iva, env->ip, env->psr, va,
                                   &pa)) {
-        return 1;
-    }
-
-    if (ia64_sal_boot_virtual_pa(env, va, &pa)) {
         return 1;
     }
 
@@ -981,9 +1203,6 @@ static uint64_t ia64_probe_address(CPUIA64State *env, uint64_t va,
         return excp == IA64_EXCP_NONE ? 1 : 0;
     }
 
-    if (ia64_sal_boot_identity_pa(env, va, &pa)) {
-        return 1;
-    }
     return 0;
 }
 
@@ -1030,7 +1249,7 @@ ia64_data_reference_exception(CPUIA64State *env, uint64_t va,
         result->valid = false;
     }
     if (!(env->psr & IA64_PSR_DT)) {
-        if (!ia64_pa_is_implemented(va)) {
+        if (!ia64_pa_is_implemented(env, va)) {
             return IA64_EXCP_UNIMPL_DATA_ADDR;
         }
         pa = ia64_physical_address(va);
@@ -1042,14 +1261,13 @@ ia64_data_reference_exception(CPUIA64State *env, uint64_t va,
         return IA64_EXCP_NONE;
     }
     if (ia64_firmware_identity_pa(env->cr_iva, env->ip, env->psr, va,
-                                  &pa) ||
-        ia64_sal_boot_virtual_pa(env, va, &pa)) {
+                                  &pa)) {
         ia64_set_data_reference_result(result, pa, IA64_MEM_SPECULATIVE,
                                        IA64_PTE_MA_WB);
         return IA64_EXCP_NONE;
     }
 
-    if (!ia64_va_is_implemented(va)) {
+    if (!ia64_va_is_implemented(env, va)) {
         return IA64_EXCP_UNIMPL_DATA_ADDR;
     }
 
@@ -1080,11 +1298,6 @@ ia64_data_reference_exception(CPUIA64State *env, uint64_t va,
                                                      needed, false,
                                                      is_write || is_rw,
                                                      false);
-    }
-    if (ia64_sal_boot_identity_pa(env, va, &pa)) {
-        ia64_set_data_reference_result(result, pa, IA64_MEM_SPECULATIVE,
-                                       IA64_PTE_MA_WB);
-        return IA64_EXCP_NONE;
     }
     if (ia64_data_nested_tlb_active(env)) {
         return IA64_EXCP_DATA_NESTED_TLB;
@@ -1305,7 +1518,7 @@ static uint64_t ia64_probe_dt_disabled(CPUIA64State *env, uint64_t va,
     const IA64TlbEntry *entry;
     IA64Exception excp;
 
-    if (!ia64_va_is_implemented(va)) {
+    if (!ia64_va_is_implemented(env, va)) {
         return 0;
     }
 
@@ -1578,9 +1791,11 @@ uint64_t ia64_mmu_thash(CPUIA64State *env, uint64_t va)
     return ia64_vhpt_hash_address(env, va);
 }
 
-static uint64_t ia64_implemented_va_payload(uint64_t va)
+static uint64_t ia64_implemented_va_payload(CPUIA64State *env, uint64_t va)
 {
-    return va & ((1ULL << (IA64_IMPL_VA_MSB + 1)) - 1);
+    uint8_t impl_va_msb = ia64_env_cpu_class(env)->impl_va_msb;
+
+    return va & ((1ULL << (impl_va_msb + 1)) - 1);
 }
 
 static uint8_t ia64_region_preferred_ps(CPUIA64State *env, uint64_t va)
@@ -1597,23 +1812,27 @@ static bool ia64_vhpt_preferred_page_size_supported(CPUIA64State *env,
     uint8_t rr_ps = (env->rr[ia64_rr_index(va)] >> IA64_ITIR_PS_SHIFT) &
                     IA64_ITIR_PS_MASK;
 
-    return ia64_page_shift_insertable(rr_ps);
+    return ia64_page_shift_insertable(env, rr_ps);
 }
 
 static uint64_t ia64_vhpt_hpn(CPUIA64State *env, uint64_t va)
 {
-    return ia64_implemented_va_payload(va) >>
+    return ia64_implemented_va_payload(env, va) >>
            ia64_region_preferred_ps(env, va);
 }
 
 static uint64_t ia64_vhpt_long_tag(CPUIA64State *env, uint64_t va)
 {
     uint8_t rr_ps = ia64_region_preferred_ps(env, va);
-    uint8_t hpn_bits = rr_ps > IA64_IMPL_VA_MSB ? 0 :
-                       IA64_IMPL_VA_MSB + 1 - rr_ps;
+    uint8_t impl_va_msb = ia64_env_cpu_class(env)->impl_va_msb;
+    uint8_t hpn_bits = rr_ps > impl_va_msb ? 0 :
+                       impl_va_msb + 1 - rr_ps;
     uint64_t hpn = ia64_vhpt_hpn(env, va);
     uint64_t rid = ia64_region_rid(env, va);
 
+    if (ia64_env_cpu_class(env)->model == IA64_CPU_MODEL_MERCED) {
+        return hpn ^ (rid << 39);
+    }
     if (hpn_bits == 0) {
         return rid;
     }
@@ -1640,10 +1859,17 @@ static uint64_t ia64_vhpt_long_hash_address(CPUIA64State *env, uint64_t va,
     uint64_t base = env->cr_pta & IA64_PTA_BASE_MASK;
     uint64_t entries = 1ULL << (size - 5);
     uint64_t hpn = ia64_vhpt_hpn(env, va);
-    uint64_t hash = (hpn ^ (hpn >> 7) ^ ia64_region_rid(env, va)) &
-                    (entries - 1);
-    uint64_t offset = hash << 5;
+    uint64_t hash;
+    uint64_t offset;
     uint64_t mask = (1ULL << size) - 1;
+
+    if (ia64_env_cpu_class(env)->model == IA64_CPU_MODEL_MERCED) {
+        hash = hpn ^ ia64_region_rid(env, va);
+    } else {
+        hash = hpn ^ (hpn >> 7) ^ ia64_region_rid(env, va);
+    }
+    hash &= entries - 1;
+    offset = hash << 5;
 
     if (hash_out) {
         *hash_out = hash;
@@ -1692,10 +1918,7 @@ static IA64VhptEntryStatus ia64_vhpt_entry_phys(CPUIA64State *env,
     }
 
     rid = ia64_region_rid(env, entry_va);
-    /*
-     * VHPT walker references to the VHPT itself are performed at
-     * privilege level 0 regardless of PSR.cpl.
-     */
+    /* VHPT walker references use privilege level 0 regardless of PSR.cpl. */
     entry = ia64_tlb_find_cached(env, entry_va, rid, false);
     if (entry && entry->pending_purge) {
         /*
@@ -1786,7 +2009,8 @@ static bool ia64_vhpt_pte_valid(uint64_t pte)
     return !(pte & IA64_PTE_RESERVED_MASK) && (ma == 0 || ma >= 4);
 }
 
-static bool ia64_vhpt_itir_valid(uint64_t pte, uint64_t itir)
+static bool ia64_vhpt_itir_valid(CPUIA64State *env, uint64_t pte,
+                                 uint64_t itir)
 {
     uint8_t page_shift = (itir >> IA64_ITIR_PS_SHIFT) & IA64_ITIR_PS_MASK;
     uint64_t reserved_mask = IA64_ITIR_RESERVED_MASK;
@@ -1795,16 +2019,21 @@ static bool ia64_vhpt_itir_valid(uint64_t pte, uint64_t itir)
         reserved_mask &= 3;
     }
     return !(itir & reserved_mask) &&
-           ia64_page_shift_insertable(page_shift);
+           ia64_page_shift_insertable(env, page_shift);
 }
 
-static bool ia64_vhpt_lookup_pte(CPUIA64State *env, uint64_t va,
-                                 bool is_ifetch, bool is_rse, uint64_t *pte,
-                                 uint64_t *entry_va)
+static bool ia64_vhpt_lookup_pte_itir(CPUIA64State *env, uint64_t va,
+                                      bool is_ifetch, bool is_rse,
+                                      uint64_t *pte, uint64_t *entry_va,
+                                      uint64_t *out_itir)
 {
     uint8_t size;
     bool long_format;
     uint64_t entry_pa;
+
+    if (out_itir) {
+        *out_itir = 0;
+    }
 
     if (!ia64_vhpt_walker_enabled(env, va, is_ifetch, is_rse,
                                   &size, &long_format)) {
@@ -1838,9 +2067,103 @@ static bool ia64_vhpt_lookup_pte(CPUIA64State *env, uint64_t va,
         if ((tag & (1ULL << 63)) || tag != expected_tag) {
             return false;
         }
+        if (out_itir) {
+            *out_itir = itir;
+        }
         return ia64_vhpt_pte_valid(*pte) &&
-               ia64_vhpt_itir_valid(*pte, itir);
+               ia64_vhpt_itir_valid(env, *pte, itir);
     }
+}
+
+static bool ia64_vhpt_lookup_pte(CPUIA64State *env, uint64_t va,
+                                 bool is_ifetch, bool is_rse, uint64_t *pte,
+                                 uint64_t *entry_va)
+{
+    return ia64_vhpt_lookup_pte_itir(env, va, is_ifetch, is_rse, pte,
+                                     entry_va, NULL);
+}
+
+/*
+ * Merced's DTLB1 holds non-inclusive copies that the normal search path
+ * deliberately ignores, so a debug translation must look for them separately
+ * or it will miss translations the guest can still use.
+ */
+static const IA64TlbEntry *ia64_merced_dtlb1_find(CPUIA64State *env,
+                                                  uint64_t va, uint32_t rid)
+{
+    uint16_t i;
+
+    if (!ia64_merced_dtlb1_enabled(env)) {
+        return NULL;
+    }
+    for (i = 0; i < IA64_DTLB1_MAX; i++) {
+        const IA64TlbEntry *entry = &env->mmu.tlb_data_l1[i];
+
+        if (entry->valid && entry->rid == rid &&
+            ((va ^ entry->va) & entry->page_mask) == 0) {
+            return entry;
+        }
+    }
+    return NULL;
+}
+
+/*
+ * Translate for the monitor, gva2gpa and the gdbstub.  This must not disturb
+ * the modeled MMU: no TC insertion, no fault, no PSR update.  Returning false
+ * makes callers report the address as unmapped; the previous behaviour of
+ * falling back to the virtual address silently produced a physical address
+ * that belonged to something else entirely.
+ *
+ * A miss is not proof that the guest cannot reach the address.  On IA-64 the
+ * VHPT is a translation cache rather than the authoritative page table, and
+ * an OS that keeps separate tables can map an address this function cannot
+ * resolve.
+ */
+bool ia64_mmu_translate_debug(CPUIA64State *env, uint64_t va, uint64_t *pa)
+{
+    const IA64TlbEntry *entry;
+    uint64_t pte;
+    uint64_t itir;
+    uint64_t entry_va;
+    uint64_t page_mask;
+    uint8_t page_shift;
+    uint8_t perm;
+    uint32_t rid;
+
+    if (!(env->psr & IA64_PSR_IT)) {
+        *pa = va;
+        return true;
+    }
+    if (ia64_firmware_identity_pa(env->cr_iva, va, env->psr, va, pa)) {
+        return true;
+    }
+
+    rid = ia64_region_rid(env, va);
+
+    /* Data first: debug accesses are overwhelmingly data, not code. */
+    entry = ia64_tlb_find_cached(env, va, rid, false);
+    if (!entry) {
+        entry = ia64_merced_dtlb1_find(env, va, rid);
+    }
+    if (!entry) {
+        entry = ia64_tlb_find_cached(env, va, rid, true);
+    }
+    if (entry) {
+        ia64_tlb_entry_translate(entry, va, ia64_psr_cpl(env->psr), pa, &perm);
+        return true;
+    }
+
+    if (!ia64_vhpt_lookup_pte_itir(env, va, false, false, &pte, &entry_va,
+                                   &itir) ||
+        !(pte & IA64_PTE_PRESENT)) {
+        return false;
+    }
+
+    page_shift = itir ? ((itir >> IA64_ITIR_PS_SHIFT) & IA64_ITIR_PS_MASK) :
+                        ia64_region_preferred_ps(env, va);
+    page_mask = (1ULL << page_shift) - 1;
+    *pa = ((pte & IA64_PTE_PPN_MASK) & ~page_mask) | (va & page_mask);
+    return true;
 }
 
 bool ia64_vhpt_pte_not_present(CPUIA64State *env, uint64_t va,
@@ -1859,7 +2182,7 @@ bool ia64_vhpt_pte_not_present(CPUIA64State *env, uint64_t va,
            !(pte & IA64_PTE_PRESENT);
 }
 
-static IA64TlbEntry *
+static const IA64TlbEntry *
 ia64_vhpt_install_tc(CPUIA64State *env, uint64_t va, uint32_t rid,
                      bool is_ifetch, uint64_t pa, uint64_t page_size,
                      uint8_t ar, uint8_t pl, uint8_t perm, uint32_t key,
@@ -1872,17 +2195,18 @@ ia64_vhpt_install_tc(CPUIA64State *env, uint64_t va, uint32_t rid,
                                          &env->mmu.tlb_data_replace;
     uint16_t *pending_count = is_ifetch ?
         &env->mmu.pending_purge_inst_count : &env->mmu.pending_purge_data_count;
+    uint16_t capacity = ia64_cpu_tlb_capacity(env, !is_ifetch);
     uint64_t base_va = va & ~(page_size - 1);
     uint64_t base_pa = pa & ~(page_size - 1);
     int slot;
 
-    ia64_purge_tc_entries(env, tlb, cnt, pending_count, base_va, page_size,
-                          rid, !is_ifetch, next_replace, &slot);
+    ia64_purge_tc_entries(env, tlb, capacity, cnt, pending_count, base_va,
+                          page_size, rid, !is_ifetch, next_replace, &slot);
     if (slot < 0) {
         return NULL;
     }
 
-    ia64_qemu_tlb_flush_entry(env, &tlb[slot]);
+    ia64_qemu_tlb_flush_replaced_entry(env, &tlb[slot], !is_ifetch);
     ia64_discard_pending_purge(&tlb[slot], pending_count);
     tlb[slot].va = base_va;
     tlb[slot].pa = base_pa;
@@ -1915,7 +2239,7 @@ ia64_vhpt_install_tc(CPUIA64State *env, uint64_t va, uint32_t rid,
      * it does not carry IA-64 region IDs.  A VHPT walk can install a TC entry
      * for a different RID than a cached same-VA host entry, so discard the
      * host translation range covered by the installed TC.
-     */
+    */
     ia64_qemu_tlb_flush_entry(env, &tlb[slot]);
     return &tlb[slot];
 }
@@ -2000,7 +2324,7 @@ bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
             page_mask = (1ULL << page_shift) - 1;
             *pa = ((translation & IA64_PTE_PPN_MASK) & ~page_mask) |
                   (va & page_mask);
-            IA64TlbEntry *entry = ia64_vhpt_install_tc(
+            const IA64TlbEntry *entry = ia64_vhpt_install_tc(
                 env, va, rid, is_ifetch, *pa, 1ULL << page_shift, ar, pl,
                 *perm, rid, translation);
 
@@ -2065,7 +2389,7 @@ bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
             goto long_miss;
         }
         if (!ia64_vhpt_pte_valid(translation) ||
-            !ia64_vhpt_itir_valid(translation, itir)) {
+            !ia64_vhpt_itir_valid(env, translation, itir)) {
             qemu_log_mask(CPU_LOG_MMU,
                           "ia64 vhpt reserved translation %c"
                           " va=0x%016" PRIx64 " rid=0x%06" PRIx32
@@ -2095,7 +2419,7 @@ bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
                 *perm = ia64_pte_perm(translation, access_level);
                 *pa = ((translation & IA64_PTE_PPN_MASK) & ~page_mask) |
                       (va & page_mask);
-                IA64TlbEntry *entry = ia64_vhpt_install_tc(
+                const IA64TlbEntry *entry = ia64_vhpt_install_tc(
                     env, va, rid, is_ifetch, *pa,
                     1ULL << long_page_shift, ar, pl, *perm, entry_key,
                     translation);
@@ -2176,10 +2500,11 @@ void ia64_mmu_itc_insert(CPUIA64State *env, uint64_t pte, uint32_t is_data,
     uint8_t ar = ia64_pte_ar(pte);
     uint8_t pl = ia64_pte_pl(pte);
     uint8_t perm = ia64_pte_perm(pte, 0);
+    uint16_t capacity = ia64_cpu_tlb_capacity(env, is_data);
     int slot;
     bool purged;
 
-    if (!ia64_translation_insert_fields_valid(pte, env->cr_itir)) {
+    if (!ia64_translation_insert_fields_valid(env, pte, env->cr_itir)) {
         env->cr_isr = 0x30;
         ia64_raise_exception(env, IA64_EXCP_RESERVED_REG_FIELD,
                                ia64_ip_bundle_addr(env->ip), raw,
@@ -2187,7 +2512,7 @@ void ia64_mmu_itc_insert(CPUIA64State *env, uint64_t pte, uint32_t is_data,
         return;
     }
 
-    if (!ia64_va_is_implemented(env->cr_ifa)) {
+    if (!ia64_va_is_implemented(env, env->cr_ifa)) {
         ia64_raise_unimplemented_data_address(
             env, env->cr_ifa, 0, true, false, ia64_current_code_tlb_ed(env));
     }
@@ -2208,12 +2533,12 @@ void ia64_mmu_itc_insert(CPUIA64State *env, uint64_t pte, uint32_t is_data,
         pending_count = &env->mmu.pending_purge_inst_count;
     }
 
-    purged = ia64_purge_tc_entries(env, tlb, cnt, pending_count, va, ps, rid,
-                                   is_data, next_replace, &slot);
+    purged = ia64_purge_tc_entries(env, tlb, capacity, cnt, pending_count, va,
+                                   ps, rid, is_data, next_replace, &slot);
     if (slot < 0) {
         return;
     }
-    ia64_qemu_tlb_flush_entry(env, &tlb[slot]);
+    ia64_qemu_tlb_flush_replaced_entry(env, &tlb[slot], is_data);
     ia64_discard_pending_purge(&tlb[slot], pending_count);
 
     tlb[slot].va = va;
@@ -2248,4 +2573,42 @@ void ia64_mmu_itc_insert(CPUIA64State *env, uint64_t pte, uint32_t is_data,
      * QEMU TLB without a corresponding modeled TC entry.
      */
     ia64_qemu_tlb_flush_entry(env, &tlb[slot]);
+}
+
+bool ia64_mmu_insert_firmware_tc(CPUIA64State *env, uint64_t va,
+                                 uint64_t pa, bool is_data,
+                                 uint8_t page_shift)
+{
+    const IA64TlbEntry *entry;
+    uint64_t page_size;
+    uint64_t pte;
+    uint32_t rid;
+    uint8_t perm;
+
+    if (!ia64_page_shift_insertable(env, page_shift) ||
+        !ia64_va_is_implemented(env, va) ||
+        !ia64_pa_is_implemented(env, pa)) {
+        return false;
+    }
+
+    page_size = 1ULL << page_shift;
+    if ((va & (page_size - 1)) != (pa & (page_size - 1))) {
+        return false;
+    }
+
+    env->cr_ifa = va;
+    env->cr_itir = (env->cr_itir & IA64_ITIR_KEY_MASK) |
+                   ((uint64_t)page_shift << IA64_ITIR_PS_SHIFT);
+    pte = (pa & IA64_PTE_PPN_MASK & ~(page_size - 1)) |
+          IA64_PTE_PRESENT | IA64_PTE_ACCESSED | IA64_PTE_DIRTY |
+          (3ULL << IA64_PTE_AR_SHIFT);
+    ia64_mmu_itc_insert(env, pte, is_data, 0, 0);
+
+    rid = ia64_region_rid(env, va);
+    entry = ia64_tlb_find_cached(env, va, rid, !is_data);
+    if (entry == NULL || entry->is_tr) {
+        return false;
+    }
+    ia64_tlb_entry_translate(entry, va, 0, &pa, &perm);
+    return perm != 0;
 }

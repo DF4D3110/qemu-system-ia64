@@ -1,4 +1,7 @@
-/* Reuse QEMU's block memory-access support for IA-32 x87 state. */
+/* Adapt the shared block memory-access implementation to IA-32 state. */
+
+#ifndef TARGET_IA64_IA32_ACCESS_ADAPTER_H
+#define TARGET_IA64_IA32_ACCESS_ADAPTER_H
 
 #include "helper-compat.h"
 #include "ia32/ia32.h"
@@ -11,4 +14,5 @@
         (CPUIA64State *)(env), (uint32_t)(addr), (size),              \
         (access) == MMU_DATA_STORE ? IA64_IA32_SEG_ACCESS_WRITE :     \
                                      IA64_IA32_SEG_ACCESS_READ)
-#include "target/i386/tcg/access.c"
+
+#endif /* TARGET_IA64_IA32_ACCESS_ADAPTER_H */
