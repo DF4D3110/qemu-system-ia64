@@ -14,6 +14,22 @@
 #define IA64_FW_HANDOFF_MAGIC         0x4d41523436414951ULL /* "QIA64RAM" */
 #define IA64_FW_HANDOFF_VERSION       10ULL
 
+#define IA64_FW_COMPAT_HANDOFF_ADDR   (IA64_FW_HANDOFF_ADDR + 0x100ULL)
+#define IA64_FW_COMPAT_HANDOFF_MAGIC  0x504d4f4334364951ULL /* "QI64COMP" */
+#define IA64_FW_COMPAT_HANDOFF_VERSION 1ULL
+
+#define IA64_FW_COMPAT_LOADER_DIRECT_ALIAS (1ULL << 0)
+#define IA64_FW_COMPAT_EARLY_LOADER_MEMORY (1ULL << 1)
+#define IA64_FW_COMPAT_SPARSE_SAL_MDT      (1ULL << 2)
+#define IA64_FW_COMPAT_SAL_CODE_GP         (1ULL << 3)
+#define IA64_FW_COMPAT_COMBINED_RUNTIME    (1ULL << 4)
+#define IA64_FW_COMPAT_LEGACY_LOADER_MASK \
+    (IA64_FW_COMPAT_LOADER_DIRECT_ALIAS | \
+     IA64_FW_COMPAT_EARLY_LOADER_MEMORY | \
+     IA64_FW_COMPAT_SPARSE_SAL_MDT | \
+     IA64_FW_COMPAT_SAL_CODE_GP | \
+     IA64_FW_COMPAT_COMBINED_RUNTIME)
+
 #define IA64_FW_CONSOLE_SERIAL        0ULL
 #define IA64_FW_CONSOLE_VGA           1ULL
 #define IA64_FW_DEBUG_PORT_PRESENT    1ULL
@@ -57,5 +73,18 @@ typedef struct __attribute__((packed)) IA64VpcHandoff {
     unsigned long long CoresPerSocket;
     unsigned long long ThreadsPerCore;
 } IA64VpcHandoff;
+
+/*
+ * Optional extension kept separate from IA64VpcHandoff so firmware that
+ * understands only handoff version 10 continues to consume its base fields.
+ * New firmware treats a missing extension as the historical compatibility
+ * profile, preserving its behavior with older machine implementations.
+ */
+typedef struct __attribute__((packed)) IA64VpcCompatHandoff {
+    unsigned long long Magic;
+    unsigned long long Version;
+    unsigned long long Size;
+    unsigned long long Flags;
+} IA64VpcCompatHandoff;
 
 #endif /* HW_IA64_VPC_ABI_H */

@@ -184,11 +184,22 @@ void ia64_cpu_dump_state(CPUState *cs, FILE *f, int flags)
                  cpu->env.cfm_rrb_fr, cpu->env.cfm_rrb_pr,
                  cpu->env.ar_pfs, cpu->env.ar_bsp, cpu->env.ar_bspstore);
     qemu_fprintf(f, "RSE: bol=%u dirty=%d/%d clean=%d/%d invalid=%d"
-                 " RNAT=0x%016" PRIx64 " RSC=0x%016" PRIx64 "\n",
+                 " RNAT=0x%016" PRIx64 " RNAT_ADDR=0x%016" PRIx64
+                 " RNAT_DEFINED=0x%016" PRIx64
+                 " RSC=0x%016" PRIx64 "\n",
                  cpu->env.rse.rse_bol, cpu->env.rse.rse_dirty,
                  cpu->env.rse.rse_dirty_nat, cpu->env.rse.rse_clean,
                  cpu->env.rse.rse_clean_nat, cpu->env.rse.rse_invalid,
-                 ia64_rse_read_rnat(&cpu->env), cpu->env.ar_rsc);
+                 ia64_rse_read_rnat(&cpu->env),
+                 cpu->env.rse.rse_rnat_addr,
+                 ia64_rse_read_rnat_defined(&cpu->env), cpu->env.ar_rsc);
+    qemu_fprintf(f, "RSE-FILL: RNAT=0x%016" PRIx64
+                 " ADDR=0x%016" PRIx64 " DEFINED=0x%016" PRIx64
+                 " VALID=%u\n",
+                 cpu->env.rse.rse_load_rnat,
+                 cpu->env.rse.rse_load_rnat_addr,
+                 cpu->env.rse.rse_load_rnat_defined,
+                 cpu->env.rse.rse_load_rnat_valid);
     ia64_dump_tlb(f, "ITLB", cpu->env.mmu.tlb_inst,
                   cpu->env.mmu.tlb_inst_count);
     ia64_dump_tlb(f, "DTLB", cpu->env.mmu.tlb_data,

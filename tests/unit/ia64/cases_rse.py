@@ -518,6 +518,26 @@ test_rse_bspstore_undefined_rnat_drops_stale_lower_bits = require_registers(
         "r8": 0,
     }, entry=0x10)
 
+"""Only RNAT{RNATBitIndex:0} has a defined source after mov-to-RNAT.
+Undefined high bits read as zero under the target policy, and even a
+same-value mov-to-BSPSTORE makes the complete RNAT value undefined."""
+test_rse_rnat_defined_mask_and_bspstore_invalidation = require_registers(
+    "rse_rnat_defined_mask_and_bspstore_invalidation", [
+        (0x10, *movl_mlx(3, 0x100030)),
+        (0x20, 0x00, mov_ar(3, 18), nop_i(), nop_i()),
+        (0x30, *movl_mlx(4, 0x7fffffffffffffff)),
+        (0x40, 0x00, mov_m_gr_ar(4, 19), nop_i(), nop_i()),
+        (0x50, 0x00, mov_m_ar_gr(8, 19), nop_i(), nop_i()),
+        (0x60, 0x00, mov_ar(3, 18), nop_i(), nop_i()),
+        (0x70, 0x00, mov_m_ar_gr(9, 19), nop_i(), nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+    ], {
+        "ip": 0x80,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x7f,
+        "r9": 0,
+    }, entry=0x10)
+
 test_rse_loadrs_bspstore_return_uses_covered_frame = require_registers(
     "rse_loadrs_bspstore_return_uses_covered_frame", [
         (0x10, *movl_mlx(3, 0x100000)),
@@ -943,6 +963,9 @@ test_rse_untracked_return_uses_each_rnat_collection = require_registers(
         "cfm_sol": 88,
     }, entry=0x10)
 
+"""A return that does not reach the collection word must not modify it.
+The no-merge rule applies when the RSE actually spills RNAT; it does not
+authorize changing unrelated backing memory without an RSE store."""
 test_rse_return_reclaims_clean_keeps_unreached_rnat = require_registers(
     "rse_return_reclaims_clean_keeps_unreached_rnat", [
         (0x10, *movl_mlx(3, 0x1001f8)),
@@ -980,11 +1003,10 @@ test_rse_return_reclaims_clean_keeps_unreached_rnat = require_registers(
 """A br.ret that reclaims clean registers moves AR.BSPSTORE down without
 any RSE traffic.  When it lands in a different NaT collection group the
 bits AR.RNAT accumulated for the group it left describe registers this
-group never held, so the next collection spill must take those bits from
-the backing store instead.  Here r111 is spilled with its NaT set into
-the second collection (bit 16), the return rebases BSPSTORE into the
-first collection at bit 56, and the collection word the following spill
-writes at 0x1001f8 must stay zero."""
+group never held.  Here r111 is spilled with its NaT set into the second
+collection (bit 16), the return rebases BSPSTORE into the first collection
+at bit 56, and the following complete RNAT spill must materialize undefined
+bits as zero rather than merging the old word at 0x1001f8."""
 test_rse_return_reclaims_clean_rebases_rnat_collection = require_registers(
     "rse_return_reclaims_clean_rebases_rnat_collection", [
         (0x10, *movl_mlx(3, 0x100000)),
@@ -1604,6 +1626,9 @@ test_rse_rfi_bspstore_advanced_iip_spills_parent_frame = require_registers(
         "cfm_sol": 6,
     }, entry=0x10)
 
+"""The interrupted dirty frame survives an rfi without an RSE spill.  The
+handler's mov-to-BSPSTORE operations independently make RNAT undefined, so
+the target's deterministic readback after return is zero."""
 test_rse_rfi_does_not_spill_dirty_frame_rnat = require_registers(
     "rse_rfi_does_not_spill_dirty_frame_rnat", [
         (0x10, *movl_mlx(2, 1 << 13)),
@@ -1612,7 +1637,7 @@ test_rse_rfi_does_not_spill_dirty_frame_rnat = require_registers(
         (0x40, *movl_mlx(3, 0x100000)),
         (0x50, 0x00, mov_m_gr_ar(3, 18), nop_i(),
          nop_i()),
-        (0x60, *movl_mlx(4, 1 << 3)),
+        (0x60, *movl_mlx(4, 1)),
         (0x70, 0x00, mov_m_gr_ar(4, 19), nop_i(),
          nop_i()),
         (0x80, 0x00, nop_m(), alloc(36, 7, 6, 0, 0),
@@ -1647,7 +1672,7 @@ test_rse_rfi_does_not_spill_dirty_frame_rnat = require_registers(
         "ip": 0xc0,
         "exception": IA64_EXCP_NONE,
         "r8": 0x123456789abcdef0,
-        "r9": 1 << 3,
+        "r9": 0,
         "cfm_sof": 7,
         "cfm_sol": 6,
     }, entry=0x10)
@@ -2795,7 +2820,7 @@ test_rse_sal_alt_dtlb_resumes_br_ret_fill = require_registers(
         "r15": 0xc1c2c3c4c5c6c7c8,
         "cfm_sof": 62,
         "cfm_sol": 57,
-    }, entry=0x10)
+    }, entry=0x10, machine="itanium-vpc")
 
 test_rse_exception_loadrs_preserves_interrupted_call = require_registers(
     "rse_exception_loadrs_preserves_interrupted_call", [
@@ -4382,6 +4407,7 @@ CASE_NAMES = (
     'rse_return_growth_keeps_dirty_bsp_distance',
     'rse_return_reclaims_clean_keeps_unreached_rnat',
     'rse_return_reclaims_clean_rebases_rnat_collection',
+    'rse_rnat_defined_mask_and_bspstore_invalidation',
     'rse_rfi_advanced_iip_bspstore_switch_loads_external_frame',
     'rse_rfi_advanced_iip_preserves_nested_call_locals',
     'rse_rfi_advanced_iip_uses_covered_current_frame',
@@ -4434,7 +4460,10 @@ CASE_METADATA = {
             'itanium-system-abstraction-layer-specification.pdf: '
             'section 3.3.1',
         ),
-        required_features=frozenset({'firmware-sal'}),
+        required_features=frozenset({
+            'firmware-sal',
+            'machine:itanium-vpc',
+        }),
     ),
     'rse_spill_fault_sets_isr_rs': CaseMetadata(nonterminal_effect_loop=True),
     'rse_uses_rsc_pl_for_access_rights': CaseMetadata(nonterminal_effect_loop=True),

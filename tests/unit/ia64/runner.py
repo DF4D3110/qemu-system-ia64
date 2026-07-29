@@ -51,6 +51,7 @@ class MicroProgram:
     expected: StateExpectation
     completion: Completion
     data: tuple[MemoryInitializer, ...] = ()
+    machine: str = "ia64-vpc"
     machine_args: tuple[str, ...] = ()
     cpu: str | None = None
     smp: str = "1"
@@ -101,7 +102,7 @@ def _loader_args(program: MicroProgram) -> list[str]:
 
 
 def _command(qemu: str, program: MicroProgram) -> list[str]:
-    machine = "ia64-vpc"
+    machine = program.machine
     if program.machine_args:
         machine += "," + ",".join(program.machine_args)
     command = [

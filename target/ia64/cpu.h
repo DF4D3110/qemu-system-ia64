@@ -680,10 +680,10 @@ typedef struct IA64FirmwareDebugRseState {
     int32_t clean_nat;
     int32_t invalid;
     uint64_t rnat_addr;
+    uint64_t rnat_defined;
     uint64_t load_rnat;
     uint64_t load_rnat_addr;
-    uint32_t rnat_first;
-    uint32_t rnat_last;
+    uint64_t load_rnat_defined;
     bool load_rnat_valid;
     uint8_t cfm_sof;
     uint8_t cfm_sol;
@@ -1233,6 +1233,7 @@ struct ArchCPU {
     bool boot_info_valid;
     bool boot_info_pending;
     bool alat_full;
+    uint64_t firmware_compat_flags;
     uint32_t socket_id;
     uint32_t core_id;
     uint32_t thread_id;

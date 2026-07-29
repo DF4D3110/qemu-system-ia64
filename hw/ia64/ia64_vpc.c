@@ -351,8 +351,17 @@ static const uint8_t ia64_int10_rom_init[] = {
 };
 #endif
 
-#define TYPE_IA64_VPC_MACHINE MACHINE_TYPE_NAME("ia64-vpc")
-OBJECT_DECLARE_SIMPLE_TYPE(IA64VpcMachineState, IA64_VPC_MACHINE)
+#define TYPE_IA64_VPC_MACHINE MACHINE_TYPE_NAME("ia64-vpc-base")
+#define TYPE_ITANIUM_VPC_MACHINE MACHINE_TYPE_NAME("itanium-vpc")
+#define TYPE_ITANIUM2_VPC_MACHINE MACHINE_TYPE_NAME("itanium2-vpc")
+OBJECT_DECLARE_TYPE(IA64VpcMachineState, IA64VpcMachineClass,
+                    IA64_VPC_MACHINE)
+
+struct IA64VpcMachineClass {
+    MachineClass parent_class;
+
+    uint64_t firmware_compat_flags;
+};
 
 struct IA64VpcMachineState {
     MachineState parent_obj;
@@ -1980,7 +1989,9 @@ static void ia64_vpc_map_ram(IA64VpcMachineState *s)
 static void ia64_vpc_write_firmware_handoff(IA64VpcMachineState *s)
 {
     MachineState *machine = MACHINE(s);
+    IA64VpcMachineClass *ivmc = IA64_VPC_MACHINE_GET_CLASS(s);
     IA64VpcHandoff handoff = { 0 };
+    IA64VpcCompatHandoff compat = { 0 };
     bool debug_port_present = debug_port_get_chardev() != NULL;
 
     _Static_assert(sizeof(IA64VpcHandoff) == 104,
@@ -1995,6 +2006,8 @@ static void ia64_vpc_write_firmware_handoff(IA64VpcMachineState *s)
                    "IA-64 firmware handoff core count offset changed");
     _Static_assert(offsetof(IA64VpcHandoff, ThreadsPerCore) == 96,
                    "IA-64 firmware handoff thread count offset changed");
+    _Static_assert(sizeof(IA64VpcCompatHandoff) == 32,
+                   "IA-64 firmware compatibility handoff ABI size changed");
 
     handoff.Magic = cpu_to_le64(IA64_FW_HANDOFF_MAGIC);
     handoff.Version = cpu_to_le64(IA64_FW_HANDOFF_VERSION);
@@ -2014,6 +2027,13 @@ static void ia64_vpc_write_firmware_handoff(IA64VpcMachineState *s)
     handoff.ThreadsPerCore = cpu_to_le64(machine->smp.threads);
     cpu_physical_memory_write(IA64_FW_HANDOFF_ADDR, &handoff,
                               sizeof(handoff));
+
+    compat.Magic = cpu_to_le64(IA64_FW_COMPAT_HANDOFF_MAGIC);
+    compat.Version = cpu_to_le64(IA64_FW_COMPAT_HANDOFF_VERSION);
+    compat.Size = cpu_to_le64(sizeof(compat));
+    compat.Flags = cpu_to_le64(ivmc->firmware_compat_flags);
+    cpu_physical_memory_write(IA64_FW_COMPAT_HANDOFF_ADDR, &compat,
+                              sizeof(compat));
 }
 
 static void ia64_vpc_configure_pci_irq(PCIDevice *pci_dev)
@@ -2507,6 +2527,7 @@ static bool ia64_vpc_load_firmware(IA64VpcMachineState *s,
 static bool ia64_vpc_build(MachineState *machine, Error **errp)
 {
     IA64VpcMachineState *s = IA64_VPC_MACHINE(machine);
+    IA64VpcMachineClass *ivmc = IA64_VPC_MACHINE_GET_CLASS(s);
     IA64CPU *cpu;
     DeviceState *pci_host;
     DeviceState *iosapic;
@@ -2545,6 +2566,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
 
         cpu = IA64_CPU(object_new(machine->cpu_type));
         cpu->alat_full = s->alat_full;
+        cpu->firmware_compat_flags = ivmc->firmware_compat_flags;
         cpu->socket_id = i / per_socket;
         cpu->core_id = (i / threads) % cores;
         cpu->thread_id = i % threads;
@@ -2754,7 +2776,6 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
 
     (void)data;
 
-    mc->desc = "IA-64 virtual PC platform";
     mc->init = ia64_vpc_init;
     mc->max_cpus = IA64_VPC_MAX_CPUS;
     mc->default_cpus = 1;
@@ -2777,8 +2798,6 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
     mc->no_parallel = 1;
     mc->no_floppy = 1;
     mc->no_cdrom = 1;
-
-    ia64_vpc_add_compat_defaults(mc);
 
     object_class_property_add_bool(oc, "i8042",
                                    ia64_vpc_get_i8042,
@@ -2807,18 +2826,52 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
         "Set the IA-64 ALAT model to 'zero' (default) or 'full'");
 }
 
-static const TypeInfo ia64_vpc_machine_typeinfo = {
-    .name = TYPE_IA64_VPC_MACHINE,
-    .parent = TYPE_MACHINE,
-    .instance_size = sizeof(IA64VpcMachineState),
-    .instance_init = ia64_vpc_machine_instance_init,
-    .instance_finalize = ia64_vpc_machine_instance_finalize,
-    .class_init = ia64_vpc_machine_class_init,
-};
-
-static void ia64_vpc_machine_register_types(void)
+static void itanium_vpc_machine_class_init(ObjectClass *oc, const void *data)
 {
-    type_register_static(&ia64_vpc_machine_typeinfo);
+    MachineClass *mc = MACHINE_CLASS(oc);
+    IA64VpcMachineClass *ivmc = IA64_VPC_MACHINE_CLASS(oc);
+
+    (void)data;
+
+    mc->desc = "IA-64 virtual PC with early Itanium firmware compatibility";
+    mc->default_cpu_type = IA64_CPU_TYPE_NAME("merced");
+    ivmc->firmware_compat_flags = IA64_FW_COMPAT_LEGACY_LOADER_MASK;
+    ia64_vpc_add_compat_defaults(mc);
 }
 
-type_init(ia64_vpc_machine_register_types)
+static void itanium2_vpc_machine_class_init(ObjectClass *oc, const void *data)
+{
+    MachineClass *mc = MACHINE_CLASS(oc);
+    IA64VpcMachineClass *ivmc = IA64_VPC_MACHINE_CLASS(oc);
+
+    (void)data;
+
+    mc->desc = "IA-64 virtual PC with standards-oriented firmware";
+    mc->alias = "ia64-vpc";
+    mc->default_cpu_type = IA64_CPU_TYPE_NAME("montecito");
+    ivmc->firmware_compat_flags = 0;
+    ia64_vpc_add_compat_defaults(mc);
+}
+
+static const TypeInfo ia64_vpc_machine_types[] = {
+    {
+        .name = TYPE_IA64_VPC_MACHINE,
+        .parent = TYPE_MACHINE,
+        .abstract = true,
+        .instance_size = sizeof(IA64VpcMachineState),
+        .instance_init = ia64_vpc_machine_instance_init,
+        .instance_finalize = ia64_vpc_machine_instance_finalize,
+        .class_size = sizeof(IA64VpcMachineClass),
+        .class_init = ia64_vpc_machine_class_init,
+    }, {
+        .name = TYPE_ITANIUM_VPC_MACHINE,
+        .parent = TYPE_IA64_VPC_MACHINE,
+        .class_init = itanium_vpc_machine_class_init,
+    }, {
+        .name = TYPE_ITANIUM2_VPC_MACHINE,
+        .parent = TYPE_IA64_VPC_MACHINE,
+        .class_init = itanium2_vpc_machine_class_init,
+    },
+};
+
+DEFINE_TYPES(ia64_vpc_machine_types)

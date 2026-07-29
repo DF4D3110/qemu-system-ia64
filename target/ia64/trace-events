@@ -14,6 +14,7 @@ ia64_mmu_serialize(int cpu_index, uint32_t data, uint32_t instruction, uint32_t 
 
 # arch/rse.c
 ia64_rse_state(int cpu_index, const char *operation, uint64_t bsp, uint64_t bspstore, int32_t dirty, int32_t dirty_nat, int32_t clean, int32_t clean_nat, int32_t invalid, uint32_t sof) "cpu=%d operation=%s bsp=0x%016" PRIx64 " bspstore=0x%016" PRIx64 " dirty=%" PRId32 "/%" PRId32 " clean=%" PRId32 "/%" PRId32 " invalid=%" PRId32 " sof=%" PRIu32
+ia64_rse_rnat_state(int cpu_index, const char *operation, uint64_t rnat, uint64_t rnat_addr, uint64_t rnat_defined, uint64_t load_rnat, uint64_t load_rnat_addr, uint64_t load_rnat_defined, bool load_rnat_valid) "cpu=%d operation=%s rnat=0x%016" PRIx64 "@0x%016" PRIx64 "/0x%016" PRIx64 " load_rnat=0x%016" PRIx64 "@0x%016" PRIx64 "/0x%016" PRIx64 " valid=%d"
 
 # arch/pal.c
 ia64_pal_call(int cpu_index, uint64_t index, uint64_t arg0, uint64_t arg1, uint64_t arg2) "cpu=%d index=0x%03" PRIx64 " args=0x%016" PRIx64 ",0x%016" PRIx64 ",0x%016" PRIx64

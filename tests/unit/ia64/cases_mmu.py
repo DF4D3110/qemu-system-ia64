@@ -5782,7 +5782,7 @@ test_sal_boot_nonstandard_direct_tc_is_purgeable_after_iva_handoff = \
             "r28": IA64_ISR_R,
             "r29": 0x1122334455667788,
             "r30": 0x1122334455667788,
-        }, entry=0x10)
+        }, entry=0x10, machine="itanium-vpc")
 
 test_sal_boot_identity_coexists_with_explicit_rid_mapping = \
     require_registers(

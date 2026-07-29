@@ -10,6 +10,7 @@
 #include "decoder.h"
 #include "exec-access.h"
 #include "fpreg.h"
+#include "hw/ia64/ia64_vpc_abi.h"
 
 #define FW_BOOT_NONSTANDARD_DIRECT_BASE 0x0000000080000000ULL
 #define FW_BOOT_NONSTANDARD_DIRECT_RR \
@@ -48,6 +49,8 @@ bool ia64_firmware_boot_miss_mapping(IA64CPU *cpu, uint64_t va,
      * still apply; this must never become a persistent address-space bypass.
      */
     if (ia64_rr_index(va) == 7 &&
+        (cpu->firmware_compat_flags &
+         IA64_FW_COMPAT_LOADER_DIRECT_ALIAS) &&
         (rr & FW_BOOT_NONSTANDARD_DIRECT_RR_MASK) ==
             FW_BOOT_NONSTANDARD_DIRECT_RR &&
         !(env->cr_pta & IA64_PTA_VE) &&
@@ -326,10 +329,10 @@ static void ia64_fw_debug_save_rse(CPUIA64State *env)
     state->clean_nat = env->rse.rse_clean_nat;
     state->invalid = env->rse.rse_invalid;
     state->rnat_addr = env->rse.rse_rnat_addr;
+    state->rnat_defined = env->rse.rse_rnat_defined;
     state->load_rnat = env->rse.rse_load_rnat;
     state->load_rnat_addr = env->rse.rse_load_rnat_addr;
-    state->rnat_first = env->rse.rse_rnat_first;
-    state->rnat_last = env->rse.rse_rnat_last;
+    state->load_rnat_defined = env->rse.rse_load_rnat_defined;
     state->load_rnat_valid = env->rse.rse_load_rnat_valid;
     state->cfm_sof = env->cfm_sof;
     state->cfm_sol = env->cfm_sol;
@@ -359,10 +362,10 @@ static void ia64_fw_debug_restore_rse(CPUIA64State *env)
     env->rse.rse_clean_nat = state->clean_nat;
     env->rse.rse_invalid = state->invalid;
     env->rse.rse_rnat_addr = state->rnat_addr;
+    env->rse.rse_rnat_defined = state->rnat_defined;
     env->rse.rse_load_rnat = state->load_rnat;
     env->rse.rse_load_rnat_addr = state->load_rnat_addr;
-    env->rse.rse_rnat_first = state->rnat_first;
-    env->rse.rse_rnat_last = state->rnat_last;
+    env->rse.rse_load_rnat_defined = state->load_rnat_defined;
     env->rse.rse_load_rnat_valid = state->load_rnat_valid;
     env->cfm_sof = state->cfm_sof;
     env->cfm_sol = state->cfm_sol;

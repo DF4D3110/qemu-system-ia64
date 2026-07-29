@@ -593,9 +593,11 @@ static void test_acpi_reset_register(void)
 static void assert_firmware_handoff(QTestState *qts, uint64_t i8042,
                                     uint64_t cpus, uint64_t nvram,
                                     uint64_t sockets, uint64_t cores,
-                                    uint64_t threads)
+                                    uint64_t threads,
+                                    uint64_t compat_flags)
 {
     IA64VpcHandoff handoff;
+    IA64VpcCompatHandoff compat;
 
     g_assert_cmpuint(sizeof(handoff), ==, 104);
     qtest_memread(qts, IA64_FW_HANDOFF_ADDR, &handoff, sizeof(handoff));
@@ -614,6 +616,15 @@ static void assert_firmware_handoff(QTestState *qts, uint64_t i8042,
     g_assert_cmphex(le64_to_cpu(handoff.SocketCount), ==, sockets);
     g_assert_cmphex(le64_to_cpu(handoff.CoresPerSocket), ==, cores);
     g_assert_cmphex(le64_to_cpu(handoff.ThreadsPerCore), ==, threads);
+
+    qtest_memread(qts, IA64_FW_COMPAT_HANDOFF_ADDR,
+                  &compat, sizeof(compat));
+    g_assert_cmphex(le64_to_cpu(compat.Magic), ==,
+                    IA64_FW_COMPAT_HANDOFF_MAGIC);
+    g_assert_cmphex(le64_to_cpu(compat.Version), ==,
+                    IA64_FW_COMPAT_HANDOFF_VERSION);
+    g_assert_cmphex(le64_to_cpu(compat.Size), ==, sizeof(compat));
+    g_assert_cmphex(le64_to_cpu(compat.Flags), ==, compat_flags);
 }
 
 static void test_firmware_handoff_defaults(void)
@@ -636,7 +647,7 @@ static void test_firmware_handoff_defaults(void)
     uint8_t actual[sizeof(IA64VpcHandoff)];
     QTestState *qts = ia64_vpc_start(NULL);
 
-    assert_firmware_handoff(qts, 1, 1, 0, 1, 1, 1);
+    assert_firmware_handoff(qts, 1, 1, 0, 1, 1, 1, 0);
     qtest_memread(qts, IA64_FW_HANDOFF_ADDR, actual, sizeof(actual));
     g_assert_cmpmem(actual, sizeof(actual),
                     expected_v10, sizeof(expected_v10));
@@ -648,7 +659,7 @@ static void test_firmware_handoff_i8042_off(void)
     QTestState *qts = qtest_init("-machine ia64-vpc,i8042=off "
                                  "-m 256M -S");
 
-    assert_firmware_handoff(qts, 0, 1, 0, 1, 1, 1);
+    assert_firmware_handoff(qts, 0, 1, 0, 1, 1, 1, 0);
     qtest_quit(qts);
 }
 
@@ -660,7 +671,7 @@ static void test_smp_topology(gconstpointer opaque)
     g_autoptr(QDict) response = NULL;
     QList *cpus;
 
-    assert_firmware_handoff(qts, 1, count, 0, count, 1, 1);
+    assert_firmware_handoff(qts, 1, count, 0, count, 1, 1, 0);
     response = qtest_qmp(qts, "{'execute':'query-cpus-fast'}");
     g_assert(qdict_haskey(response, "return"));
     cpus = qdict_get_qlist(response, "return");
@@ -673,8 +684,42 @@ static void test_smp_explicit_topology(void)
     QTestState *qts =
         ia64_vpc_start("-smp 4,sockets=1,cores=2,threads=2");
 
-    assert_firmware_handoff(qts, 1, 4, 0, 1, 2, 2);
+    assert_firmware_handoff(qts, 1, 4, 0, 1, 2, 2, 0);
     qtest_quit(qts);
+}
+
+static void test_machine_firmware_profiles(void)
+{
+    QTestState *qts;
+
+    qts = qtest_init("-machine itanium2-vpc -cpu merced -m 256M -S");
+    assert_firmware_handoff(qts, 1, 1, 0, 1, 1, 1, 0);
+    qtest_quit(qts);
+
+    qts = qtest_init("-machine itanium-vpc -cpu montecito -m 256M -S");
+    assert_firmware_handoff(qts, 1, 1, 0, 1, 1, 1,
+                            IA64_FW_COMPAT_LEGACY_LOADER_MASK);
+    qtest_quit(qts);
+}
+
+static void test_machine_default_ram(void)
+{
+    static const char *const machines[] = {
+        "itanium-vpc",
+        "itanium2-vpc",
+    };
+    IA64VpcHandoff handoff;
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(machines); i++) {
+        QTestState *qts =
+            qtest_initf("-machine %s -S", machines[i]);
+
+        qtest_memread(qts, IA64_FW_HANDOFF_ADDR,
+                      &handoff, sizeof(handoff));
+        g_assert_cmphex(le64_to_cpu(handoff.RamSize), ==, 2 * GiB);
+        qtest_quit(qts);
+    }
 }
 
 static void test_smp_rejects_full_alat(void)
@@ -1404,6 +1449,10 @@ int main(int argc, char **argv)
                    test_firmware_handoff_defaults);
     qtest_add_func("/ia64-vpc/firmware-handoff/i8042-off",
                    test_firmware_handoff_i8042_off);
+    qtest_add_func("/ia64-vpc/firmware-handoff/machine-profiles",
+                   test_machine_firmware_profiles);
+    qtest_add_func("/ia64-vpc/firmware-handoff/default-ram",
+                   test_machine_default_ram);
     for (cpus = 1; cpus <= 4; cpus++) {
         g_autofree char *path =
             g_strdup_printf("/ia64-vpc/smp/topology/%u", cpus);

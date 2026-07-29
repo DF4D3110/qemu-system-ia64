@@ -119,29 +119,26 @@ typedef struct IA64RSEState {
     bool rse_cfle;
 
     /*
-     * Derived spill- and fill-side NaT collection state.  AR.RNAT is the
-     * architected partial collection associated with the RSE store pointer;
-     * rse_rnat_addr identifies its 512-byte backing-store collection.
-     * rse_rnat_first is the first bit that subsequent stores will replace.
-     * rse_rnat_last is one past the last defined bit.  Internal incomplete-
-     * frame bookkeeping can move BSPSTORE above the saved spill pointer, so
-     * that pointer alone cannot recover the upper bound.
+     * Derived spill- and fill-side NaT collection state.
      *
-     * RSE.BspLoad can walk a different collection from AR.BSPSTORE.  Keep
-     * its completed collection in a separate latch so a mandatory fill does
-     * not destroy an unsaved partial AR.RNAT collection.  The SDM specifies
-     * the externally visible RNAT and pointer relationships, but not this
-     * implementation latch; it is derived state, not a new architectural
-     * register.  Architectural reads compose the latch with spill bits for
-     * the collection selected by the current BSPSTORE.  UINT64_MAX
-     * rse_rnat_addr denotes architecturally undefined RNAT after
-     * mov-to-BSPSTORE or loadrs.
+     * AR.RNAT holds the spill-side value and rse_rnat_defined identifies
+     * exactly which of its low 63 bits have a defined source.  Keep a mask
+     * rather than a contiguous range: incomplete-frame movement can make
+     * stores non-contiguous.  Undefined bits are materialized as zero; they
+     * are never recovered from an old backing-store collection.
+     *
+     * RSE.BspLoad can walk a different collection from AR.BSPSTORE.  Its
+     * value and defined mask therefore live in a separate fill-side latch.
+     * These latches model externally visible RSE effects; they are not new
+     * architectural registers.  UINT64_MAX rse_rnat_addr denotes an
+     * entirely undefined spill-side RNAT after mov-to-BSPSTORE, loadrs, or
+     * an RNAT collection spill.
      */
     uint64_t rse_rnat_addr;
+    uint64_t rse_rnat_defined;
     uint64_t rse_load_rnat;
     uint64_t rse_load_rnat_addr;
-    uint32_t rse_rnat_first;
-    uint32_t rse_rnat_last;
+    uint64_t rse_load_rnat_defined;
     bool rse_load_rnat_valid;
 } IA64RSEState;
 

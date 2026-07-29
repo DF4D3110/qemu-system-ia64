@@ -56,12 +56,12 @@ pal_proc_entry:
      * different mapping.  The public SAL and EFI specifications found so
      * far do not describe that historical mapping rule.
      *
-     * Keep this non-standard compatibility boundary in a small RX-only
-     * entry stub.  The advertised GP is the anchor below, so the value from
-     * either a conforming physical caller or that HAL identifies the SAL
-     * code relocation.  The stub then runs the ordinary linked C image with
-     * instruction, data, and RSE translation disabled and its real physical
-     * GP.
+     * The compatibility firmware profile advertises the anchor below,
+     * whereas the standards-oriented profile advertises the real data GP.
+     * Derive the SAL code relocation from the current IP instead of assuming
+     * that the caller's r1 uses either profile.  The stub then runs the
+     * ordinary linked C image with instruction, data, and RSE translation
+     * disabled and its real physical GP.
      *
      * A physical SAL call must not retain the caller's virtual RSE as the
      * previous bridge did: alloc or br.ret can otherwise raise an RSE TLB
@@ -125,10 +125,17 @@ sal_proc_entry:
     mov r24 = r12
     mov r25 = psr
     ;;
-    movl r26 = sal_proc_gp_anchor
+sal_proc_capture_ip:
+    /*
+     * Do not use br.call to obtain IP here.  A call overwrites ar.pfs before
+     * the physical-context bridge has saved the caller's frame state.
+     */
+    mov r26 = ip
     mov r27 = ar.rsc
     ;;
-    sub r26 = r23, r26
+    movl r31 = sal_proc_capture_ip
+    ;;
+    sub r26 = r26, r31
 
     /*
      * SAL permits fully physical or fully virtual calls.  Do not attempt a

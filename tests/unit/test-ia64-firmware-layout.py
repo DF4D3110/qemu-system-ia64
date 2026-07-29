@@ -110,6 +110,15 @@ def run_checks(binary: str, elf: str):
         r"<fpswa_emulation_entry>:|\Z)",
         disassembly, re.DOTALL)
     sal_entry_text = sal_entry.group(1) if sal_entry else ""
+    sal_physical = re.search(
+        r"\n[0-9a-fA-F]{16} <sal_proc_physical>:",
+        sal_entry_text)
+    sal_virtual_bridge = (
+        sal_entry_text[:sal_physical.start()] if sal_physical else "")
+    if not re.search(r"\bmov\s+r26=ip\b", sal_virtual_bridge) or \
+            re.search(r"\bbr\.call\b", sal_virtual_bridge):
+        raise RuntimeError(
+            "SAL entry clobbers ar.pfs before saving the caller's frame")
     required_sal_entry_ops = (
         r"\bflushrs\b",
         r"\binvala\b",

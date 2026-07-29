@@ -2032,6 +2032,8 @@ static UINTN                  mProcessorCount = 1;
 static UINTN                  mSocketCount = 1;
 static UINTN                  mCoresPerSocket = 1;
 static UINTN                  mThreadsPerCore = 1;
+static UINT64                 mFirmwareCompatFlags =
+    IA64_FW_COMPAT_LEGACY_LOADER_MASK;
 
 static BOOLEAN fw_data_translation_enabled(void);
 
@@ -2075,12 +2077,39 @@ FW_STATIC_ASSERT(__builtin_offsetof(IA64VpcHandoff, CoresPerSocket) == 88,
                  fw_handoff_cores_per_socket_offset);
 FW_STATIC_ASSERT(__builtin_offsetof(IA64VpcHandoff, ThreadsPerCore) == 96,
                  fw_handoff_threads_per_core_offset);
+FW_STATIC_ASSERT(sizeof(IA64VpcCompatHandoff) == 32,
+                 fw_compat_handoff_size);
 
 static BOOLEAN fw_handoff_valid(const FW_HANDOFF_HEADER *Handoff)
 {
     return Handoff->Magic == IA64_FW_HANDOFF_MAGIC &&
            Handoff->Version >= 1 &&
            Handoff->Version <= IA64_FW_HANDOFF_VERSION;
+}
+
+static void fw_init_compatibility_profile(void)
+{
+    IA64VpcCompatHandoff *handoff =
+        (IA64VpcCompatHandoff *)(UINTN)IA64_FW_COMPAT_HANDOFF_ADDR;
+
+    /*
+     * Absence means the machine predates the profile extension.  Preserve
+     * that machine's historical behavior, while an explicit zero selects
+     * the standards-oriented profile.
+     */
+    mFirmwareCompatFlags = IA64_FW_COMPAT_LEGACY_LOADER_MASK;
+    if (handoff->Magic != IA64_FW_COMPAT_HANDOFF_MAGIC ||
+        handoff->Version != IA64_FW_COMPAT_HANDOFF_VERSION ||
+        handoff->Size < sizeof(*handoff)) {
+        return;
+    }
+    mFirmwareCompatFlags =
+        handoff->Flags & IA64_FW_COMPAT_LEGACY_LOADER_MASK;
+}
+
+static BOOLEAN fw_compat_enabled(UINT64 Flag)
+{
+    return (mFirmwareCompatFlags & Flag) != 0;
 }
 
 static BOOLEAN fw_handoff_ram_size(UINT64 *RamSize)
@@ -7824,6 +7853,11 @@ static BOOLEAN efi_find_auto_pages_forward(UINT64 Start, UINT64 End,
     UINT64 high_start = Start > FW_EARLY_LOADER_WINDOW_END ?
                         Start : FW_EARLY_LOADER_WINDOW_END;
 
+    if (!fw_compat_enabled(IA64_FW_COMPAT_EARLY_LOADER_MEMORY)) {
+        return efi_find_free_pages_forward(Start, End, Size, Alignment,
+                                           Memory);
+    }
+
     if (Start < low_end &&
         efi_find_free_pages_forward(Start, low_end, Size, Alignment,
                                     Memory)) {
@@ -7842,6 +7876,11 @@ static BOOLEAN efi_find_auto_pages_backward(UINT64 Start, UINT64 End,
                         Start : FW_EARLY_LOADER_WINDOW_END;
     UINT64 low_end = End < FW_EARLY_LOADER_WINDOW_BASE ?
                      End : FW_EARLY_LOADER_WINDOW_BASE;
+
+    if (!fw_compat_enabled(IA64_FW_COMPAT_EARLY_LOADER_MEMORY)) {
+        return efi_find_free_pages_backward(Start, End, Size, Alignment,
+                                            Memory);
+    }
 
     if (high_start < End &&
         efi_find_free_pages_backward(high_start, End, Size, Alignment,
@@ -12559,10 +12598,11 @@ static void efi_insert_memory_descriptor(UINTN Index,
 
 static BOOLEAN efi_preserve_memory_map_boundary(UINT64 Boundary)
 {
-    return Boundary == FW_EARLY_LOADER_WINDOW_BASE ||
-           Boundary == FW_LOW_IMAGE_BASE ||
-           Boundary == FW_LOW_LEGACY_IMAGE_BASE ||
-           Boundary == FW_EARLY_LOADER_WINDOW_END;
+    return fw_compat_enabled(IA64_FW_COMPAT_EARLY_LOADER_MEMORY) &&
+           (Boundary == FW_EARLY_LOADER_WINDOW_BASE ||
+            Boundary == FW_LOW_IMAGE_BASE ||
+            Boundary == FW_LOW_LEGACY_IMAGE_BASE ||
+            Boundary == FW_EARLY_LOADER_WINDOW_END);
 }
 
 static BOOLEAN efi_memory_descriptors_can_merge(EFI_MEMORY_DESCRIPTOR *A,
@@ -12803,8 +12843,15 @@ static BOOLEAN efi_memory_map_has_range_or_empty(EFI_MEMORY_TYPE Type,
            efi_memory_map_has_descriptor(Type, Start, End, Attribute);
 }
 
+static UINT64 efi_boot_stack_conventional_start(void)
+{
+    return fw_compat_enabled(IA64_FW_COMPAT_EARLY_LOADER_MEMORY) ?
+        FW_EARLY_LOADER_WINDOW_END : ACPI_RECLAIM_END;
+}
+
 static BOOLEAN efi_memory_map_has_boot_stack_layout(void)
 {
+    UINT64 conventional_start = efi_boot_stack_conventional_start();
     UINT64 pointer_start = mSystemTablePointerBase;
     UINT64 pointer_end = pointer_start + FW_SYSTEM_TABLE_POINTER_SIZE;
 
@@ -12817,7 +12864,7 @@ static BOOLEAN efi_memory_map_has_boot_stack_layout(void)
 
     if (pointer_start == 0) {
         return efi_memory_map_has_descriptor(
-                   EfiConventionalMemory, FW_EARLY_LOADER_WINDOW_END,
+                   EfiConventionalMemory, conventional_start,
                    mBootStackBase, EFI_MEMORY_WB) &&
                efi_memory_map_has_range_or_empty(
                    EfiConventionalMemory, mBootStackTop,
@@ -12832,7 +12879,7 @@ static BOOLEAN efi_memory_map_has_boot_stack_layout(void)
 
     if (pointer_start < mBootStackBase) {
         return efi_memory_map_has_range_or_empty(
-                   EfiConventionalMemory, FW_EARLY_LOADER_WINDOW_END,
+                   EfiConventionalMemory, conventional_start,
                    pointer_start, EFI_MEMORY_WB) &&
                efi_memory_map_has_range_or_empty(
                    EfiConventionalMemory, pointer_end,
@@ -12843,7 +12890,7 @@ static BOOLEAN efi_memory_map_has_boot_stack_layout(void)
     }
 
     return efi_memory_map_has_descriptor(
-               EfiConventionalMemory, FW_EARLY_LOADER_WINDOW_END,
+               EfiConventionalMemory, conventional_start,
                mBootStackBase, EFI_MEMORY_WB) &&
            efi_memory_map_has_range_or_empty(
                EfiConventionalMemory, mBootStackTop,
@@ -12862,6 +12909,7 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
     static EFI_POOL_ALLOCATION_RECORD saved_pool[POOL_ALLOCATION_MAX];
     UINTN firmware_end = ((UINTN)&_end + 0x1FFFU) & ~0x1FFFULL;
     UINTN runtime_code_start = (UINTN)&__runtime_code_start;
+    UINTN runtime_data_start = (UINTN)&__runtime_data_start;
     EFI_MEMORY_DESCRIPTOR before;
     EFI_MEMORY_DESCRIPTOR preserved;
     EFI_MEMORY_DESCRIPTOR legacy;
@@ -12896,6 +12944,10 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
     UINT32 descriptor_version;
     UINTN i;
     EFI_STATUS st;
+    BOOLEAN early_loader_memory =
+        fw_compat_enabled(IA64_FW_COMPAT_EARLY_LOADER_MEMORY);
+    BOOLEAN combined_runtime =
+        fw_compat_enabled(IA64_FW_COMPAT_COMBINED_RUNTIME);
     BOOLEAN ok = 1;
 
     fw_copy_mem(saved_map, mMemoryMap, sizeof(saved_map));
@@ -13002,17 +13054,16 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
     ordinary_next.PhysicalStart =
         FW_EARLY_LOADER_WINDOW_END + 0x1000ULL;
 
-    if (!efi_memory_map_has_descriptor(
-            EfiConventionalMemory, FW_EARLY_LOADER_WINDOW_BASE,
-            FW_LOW_IMAGE_BASE, EFI_MEMORY_WB) ||
-        !efi_memory_map_has_descriptor(EfiConventionalMemory,
-                                       FW_LOW_IMAGE_BASE,
-                                       FW_LOW_LEGACY_IMAGE_BASE,
-                                       EFI_MEMORY_WB) ||
-        !efi_memory_map_has_descriptor(EfiConventionalMemory,
-                                       FW_LOW_LEGACY_IMAGE_BASE,
-                                       FW_EARLY_LOADER_WINDOW_END,
-                                       EFI_MEMORY_WB) ||
+    if ((early_loader_memory &&
+         (!efi_memory_map_has_descriptor(
+              EfiConventionalMemory, FW_EARLY_LOADER_WINDOW_BASE,
+              FW_LOW_IMAGE_BASE, EFI_MEMORY_WB) ||
+          !efi_memory_map_has_descriptor(
+              EfiConventionalMemory, FW_LOW_IMAGE_BASE,
+              FW_LOW_LEGACY_IMAGE_BASE, EFI_MEMORY_WB) ||
+          !efi_memory_map_has_descriptor(
+              EfiConventionalMemory, FW_LOW_LEGACY_IMAGE_BASE,
+              FW_EARLY_LOADER_WINDOW_END, EFI_MEMORY_WB))) ||
         !efi_memory_map_has_boot_stack_layout() ||
         !efi_memory_map_has_descriptor(EfiMemoryMappedIO, IOSAPIC_BASE,
                                        IOSAPIC_BASE + IOSAPIC_SIZE,
@@ -13055,12 +13106,23 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
                                        ACPI_RECLAIM_END, EFI_MEMORY_WB) ||
         !efi_memory_map_is_sorted() ||
         !efi_memory_map_has_ia64_descriptor_alignment() ||
-        !efi_memory_map_covers_range(EfiRuntimeServicesCode,
-                                     runtime_code_start, firmware_end,
-                                     EFI_MEMORY_WB | EFI_MEMORY_RUNTIME) ||
-        efi_memory_descriptors_can_merge(&before, &preserved) ||
-        efi_memory_descriptors_can_merge(&preserved, &legacy) ||
-        efi_memory_descriptors_can_merge(&legacy, &ordinary) ||
+        (combined_runtime ?
+         !efi_memory_map_covers_range(
+             EfiRuntimeServicesCode, runtime_code_start, firmware_end,
+             EFI_MEMORY_WB | EFI_MEMORY_RUNTIME) :
+         (!efi_memory_map_has_descriptor(
+              EfiRuntimeServicesCode, runtime_code_start,
+              runtime_data_start,
+              EFI_MEMORY_WB | EFI_MEMORY_RUNTIME) ||
+          !efi_memory_map_has_descriptor(
+              EfiRuntimeServicesData, runtime_data_start, firmware_end,
+              EFI_MEMORY_WB | EFI_MEMORY_RUNTIME))) ||
+        efi_memory_descriptors_can_merge(&before, &preserved) ==
+            early_loader_memory ||
+        efi_memory_descriptors_can_merge(&preserved, &legacy) ==
+            early_loader_memory ||
+        efi_memory_descriptors_can_merge(&legacy, &ordinary) ==
+            early_loader_memory ||
         !efi_memory_descriptors_can_merge(&ordinary, &ordinary_next)) {
         ok = 0;
         goto out;
@@ -13081,16 +13143,22 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
             EFI_PAGE_SIZE,
             efi_memory_type_allocation_granularity(EfiLoaderData),
             &automatic_any) ||
-        automatic_any < FW_AUTO_ALLOCATION_BASE ||
-        ranges_overlap(automatic_any, EFI_PAGE_SIZE,
-                       FW_EARLY_LOADER_WINDOW_BASE,
-                       FW_EARLY_LOADER_WINDOW_END -
-                           FW_EARLY_LOADER_WINDOW_BASE) ||
+        (early_loader_memory ?
+         (automatic_any < FW_AUTO_ALLOCATION_BASE ||
+          ranges_overlap(automatic_any, EFI_PAGE_SIZE,
+                         FW_EARLY_LOADER_WINDOW_BASE,
+                         FW_EARLY_LOADER_WINDOW_END -
+                             FW_EARLY_LOADER_WINDOW_BASE)) :
+         (automatic_any < ACPI_RECLAIM_END ||
+          automatic_any >= FW_EARLY_LOADER_WINDOW_END)) ||
         !efi_find_max_pages(
             automatic_max, EFI_PAGE_SIZE,
             efi_memory_type_allocation_granularity(EfiLoaderData),
             &automatic_max) ||
-        automatic_max + EFI_PAGE_SIZE > FW_EARLY_LOADER_WINDOW_BASE) {
+        (early_loader_memory ?
+         automatic_max + EFI_PAGE_SIZE > FW_EARLY_LOADER_WINDOW_BASE :
+         automatic_max + EFI_PAGE_SIZE !=
+             FW_EARLY_LOADER_WINDOW_END)) {
         ok = 0;
         goto out;
     }
@@ -13107,11 +13175,14 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
                              efi_memory_type_allocation_granularity(
                                  EfiLoaderData),
                              &expected_pool_address) ||
-        expected_pool_address < FW_AUTO_ALLOCATION_BASE ||
-        ranges_overlap(expected_pool_address, EFI_POOL_CHUNK_SIZE,
-                       FW_EARLY_LOADER_WINDOW_BASE,
-                       FW_EARLY_LOADER_WINDOW_END -
-                           FW_EARLY_LOADER_WINDOW_BASE) ||
+        (early_loader_memory ?
+         (expected_pool_address < FW_AUTO_ALLOCATION_BASE ||
+          ranges_overlap(expected_pool_address, EFI_POOL_CHUNK_SIZE,
+                         FW_EARLY_LOADER_WINDOW_BASE,
+                         FW_EARLY_LOADER_WINDOW_END -
+                             FW_EARLY_LOADER_WINDOW_BASE)) :
+         (expected_pool_address < ACPI_RECLAIM_END ||
+          expected_pool_address >= FW_EARLY_LOADER_WINDOW_END)) ||
         bs_allocate_pool(EfiLoaderData, 17, &pool) != EFI_SUCCESS ||
         pool == NULL) {
         ok = 0;
@@ -13529,12 +13600,13 @@ out:
 
 static void efi_add_boot_stack_low_ram(UINTN *Index, UINT64 LowRamEnd)
 {
+    UINT64 conventional_start = efi_boot_stack_conventional_start();
     UINT64 pointer_start = mSystemTablePointerBase;
     UINT64 pointer_end = pointer_start + FW_SYSTEM_TABLE_POINTER_SIZE;
 
     if (pointer_start != 0 && pointer_start < mBootStackBase) {
         efi_add_memory_range(Index, EfiConventionalMemory,
-                             FW_EARLY_LOADER_WINDOW_END, pointer_start,
+                             conventional_start, pointer_start,
                              EFI_MEMORY_WB);
         efi_add_memory_range(Index, EfiReservedMemoryType,
                              pointer_start, pointer_end, EFI_MEMORY_WB);
@@ -13542,7 +13614,7 @@ static void efi_add_boot_stack_low_ram(UINTN *Index, UINT64 LowRamEnd)
                              pointer_end, mBootStackBase, EFI_MEMORY_WB);
     } else {
         efi_add_memory_range(Index, EfiConventionalMemory,
-                             FW_EARLY_LOADER_WINDOW_END, mBootStackBase,
+                             conventional_start, mBootStackBase,
                              EFI_MEMORY_WB);
     }
 
@@ -13568,6 +13640,7 @@ static void efi_init_memory_map(void)
 {
     UINTN firmware_end = ((UINTN)&_end + 0x1FFFU) & ~0x1FFFULL;
     UINTN runtime_code_start = (UINTN)&__runtime_code_start;
+    UINTN runtime_data_start = (UINTN)&__runtime_data_start;
     UINTN pal_start = (UINTN)pal_proc_entry & ~0xFFFULL;
     UINTN pal_end = pal_start + 0x1000U;
     UINT64 ram_size = fw_guest_ram_size();
@@ -13613,17 +13686,28 @@ static void efi_init_memory_map(void)
                              EFI_MEMORY_WB);
         efi_add_memory_range(&index, EfiBootServicesCode, pal_end,
                              runtime_code_start, EFI_MEMORY_WB);
-        /*
-         * Keep the linked runtime image in one EFI descriptor.  IA-64 SAL
-         * enters with a GP supplied by the SAL system table, and the linked
-         * code uses GP-relative references into rodata/data.  A loader may
-         * assign unrelated virtual bases to separate runtime descriptors,
-         * which would break those references.
-         */
-        efi_add_memory_range(&index, EfiRuntimeServicesCode,
-                             runtime_code_start, firmware_end,
-                             efi_memory_attribute(EfiRuntimeServicesCode,
-                                                  EFI_MEMORY_WB));
+        if (fw_compat_enabled(IA64_FW_COMPAT_COMBINED_RUNTIME)) {
+            /*
+             * The early-loader profile keeps code and data under one virtual
+             * mapping because its SAL caller applies the code delta to GP.
+             */
+            efi_add_memory_range(
+                &index, EfiRuntimeServicesCode,
+                runtime_code_start, firmware_end,
+                efi_memory_attribute(EfiRuntimeServicesCode,
+                                     EFI_MEMORY_WB));
+        } else {
+            efi_add_memory_range(
+                &index, EfiRuntimeServicesCode,
+                runtime_code_start, runtime_data_start,
+                efi_memory_attribute(EfiRuntimeServicesCode,
+                                     EFI_MEMORY_WB));
+            efi_add_memory_range(
+                &index, EfiRuntimeServicesData,
+                runtime_data_start, firmware_end,
+                efi_memory_attribute(EfiRuntimeServicesData,
+                                     EFI_MEMORY_WB));
+        }
     } else {
         efi_add_memory_range(&index, EfiRuntimeServicesCode, 0x00100000,
                              firmware_end,
@@ -13631,11 +13715,6 @@ static void efi_init_memory_map(void)
                                                   EFI_MEMORY_WB));
     }
 
-    /*
-     * Some early IA-64 loaders reserve fixed physical windows from 16 MiB
-     * through 80 MiB.  Publish those pages as free memory, with 48--80 MiB in
-     * one descriptor, and keep firmware-selected allocations elsewhere.
-     */
     efi_add_memory_range(&index, EfiConventionalMemory, firmware_end,
                          FW_LOW_RECLAIM_BASE, EFI_MEMORY_WB);
     efi_add_memory_range(&index, EfiACPIMemoryNVS, ACPI_RECLAIM_BASE,
@@ -13643,16 +13722,27 @@ static void efi_init_memory_map(void)
     efi_add_memory_range(&index, EfiACPIReclaimMemory,
                          ACPI_RECLAIM_TABLE_BASE, ACPI_RECLAIM_END,
                          EFI_MEMORY_WB);
-    efi_add_memory_range(&index, EfiConventionalMemory, ACPI_RECLAIM_END,
-                         FW_EARLY_LOADER_WINDOW_BASE, EFI_MEMORY_WB);
-    efi_add_memory_range(&index, EfiConventionalMemory,
-                         FW_EARLY_LOADER_WINDOW_BASE,
-                         FW_LOW_IMAGE_BASE, EFI_MEMORY_WB);
-    efi_add_memory_range(&index, EfiConventionalMemory, FW_LOW_IMAGE_BASE,
-                         FW_LOW_LEGACY_IMAGE_BASE, EFI_MEMORY_WB);
-    efi_add_memory_range(&index, EfiConventionalMemory,
-                         FW_LOW_LEGACY_IMAGE_BASE,
-                         FW_EARLY_LOADER_WINDOW_END, EFI_MEMORY_WB);
+    if (fw_compat_enabled(IA64_FW_COMPAT_EARLY_LOADER_MEMORY)) {
+        /*
+         * Early loaders reserve fixed physical windows from 16 MiB through
+         * 80 MiB.  Preserve their descriptor boundaries and keep automatic
+         * firmware allocations out of those otherwise free pages.
+         */
+        efi_add_memory_range(
+            &index, EfiConventionalMemory, ACPI_RECLAIM_END,
+            FW_EARLY_LOADER_WINDOW_BASE, EFI_MEMORY_WB);
+        efi_add_memory_range(
+            &index, EfiConventionalMemory,
+            FW_EARLY_LOADER_WINDOW_BASE, FW_LOW_IMAGE_BASE,
+            EFI_MEMORY_WB);
+        efi_add_memory_range(
+            &index, EfiConventionalMemory, FW_LOW_IMAGE_BASE,
+            FW_LOW_LEGACY_IMAGE_BASE, EFI_MEMORY_WB);
+        efi_add_memory_range(
+            &index, EfiConventionalMemory,
+            FW_LOW_LEGACY_IMAGE_BASE, FW_EARLY_LOADER_WINDOW_END,
+            EFI_MEMORY_WB);
+    }
     /*
      * SAL reuses each processor's RAM-top stack after ExitBootServices(), so
      * keep the entire stack pool as runtime data.  AllocatePool() uses only
@@ -14516,182 +14606,6 @@ static BOOLEAN sal_table_append_entry(UINT8 **Cursor, const VOID *Entry,
     return 1;
 }
 
-static BOOLEAN sal_efi_memory_attribute(UINT64 EfiAttribute,
-                                        UINT8 *Current,
-                                        UINT8 *Supported)
-{
-    UINT64 cache_attribute = EfiAttribute & (EFI_MEMORY_WB | EFI_MEMORY_UC);
-
-    if (cache_attribute == EFI_MEMORY_WB) {
-        *Current = SAL_MEMORY_ATTRIBUTE_WB;
-        *Supported = SAL_MEMORY_SUPPORTS_WB;
-        return 1;
-    }
-    if (cache_attribute == EFI_MEMORY_UC) {
-        *Current = SAL_MEMORY_ATTRIBUTE_UC;
-        *Supported = SAL_MEMORY_SUPPORTS_UC;
-        return 1;
-    }
-    return 0;
-}
-
-static UINT8 sal_memory_page_access(UINT8 MemoryType, UINT8 MemoryUsage)
-{
-    if (MemoryType == SAL_MEMORY_TYPE_NONEXISTENT) {
-        return SAL_PAGE_ACCESS_READ;
-    }
-    if (MemoryType == SAL_MEMORY_TYPE_REGULAR &&
-        (MemoryUsage == SAL_MEMORY_USAGE_PAL_CODE ||
-         MemoryUsage == SAL_MEMORY_USAGE_BOOT_CODE ||
-         MemoryUsage == SAL_MEMORY_USAGE_RUNTIME_CODE)) {
-        return SAL_PAGE_ACCESS_RX;
-    }
-    return SAL_PAGE_ACCESS_RW;
-}
-
-static void sal_limit_segment_end(UINT64 Start, UINT64 Boundary,
-                                  UINT64 *End)
-{
-    if (Boundary > Start && Boundary < *End) {
-        *End = Boundary;
-    }
-}
-
-static UINT64 sal_memory_segment_end(UINT64 Start, UINT64 End)
-{
-    UINT64 pal_start = (UINTN)pal_proc_entry & ~0xfffULL;
-    UINT64 pal_end = pal_start + EFI_PAGE_SIZE;
-    UINT64 runtime_code_start = (UINTN)&__runtime_code_start;
-    UINT64 runtime_data_start = (UINTN)&__runtime_data_start;
-    UINT64 firmware_end = ((UINTN)&_end + 0x1fffU) & ~0x1fffULL;
-
-    sal_limit_segment_end(Start, pal_start, &End);
-    sal_limit_segment_end(Start, pal_end, &End);
-    sal_limit_segment_end(Start, runtime_code_start, &End);
-    sal_limit_segment_end(Start, runtime_data_start, &End);
-    sal_limit_segment_end(Start, firmware_end, &End);
-    sal_limit_segment_end(Start, FW_LOCAL_SAPIC_BASE, &End);
-    sal_limit_segment_end(Start, FW_LOCAL_SAPIC_BASE +
-                         FW_LOCAL_SAPIC_SIZE, &End);
-    sal_limit_segment_end(Start, FW_FIRMWARE_ADDRESS_SPACE_BASE, &End);
-    sal_limit_segment_end(Start, FW_FIRMWARE_ADDRESS_SPACE_END, &End);
-    return End;
-}
-
-static BOOLEAN sal_memory_segment_metadata(
-    const EFI_MEMORY_DESCRIPTOR *EfiDescriptor, UINT64 Address,
-    UINT8 *NeedVirtualAddress, UINT8 *CurrentMemoryAttribute,
-    UINT8 *PageAccessRights, UINT8 *SupportedMemoryAttributes,
-    UINT8 *MemoryType, UINT8 *MemoryUsage)
-{
-    UINT64 pal_start = (UINTN)pal_proc_entry & ~0xfffULL;
-    UINT64 pal_end = pal_start + EFI_PAGE_SIZE;
-    UINT64 runtime_code_start = (UINTN)&__runtime_code_start;
-    UINT64 runtime_data_start = (UINTN)&__runtime_data_start;
-    UINT64 firmware_end = ((UINTN)&_end + 0x1fffU) & ~0x1fffULL;
-
-    *NeedVirtualAddress =
-        (EfiDescriptor->Attribute & EFI_MEMORY_RUNTIME) != 0;
-    if (!sal_efi_memory_attribute(EfiDescriptor->Attribute,
-                                  CurrentMemoryAttribute,
-                                  SupportedMemoryAttributes)) {
-        return 0;
-    }
-
-    if (Address >= pal_start && Address < pal_end) {
-        *MemoryType = SAL_MEMORY_TYPE_REGULAR;
-        *MemoryUsage = SAL_MEMORY_USAGE_PAL_CODE;
-        *NeedVirtualAddress = 0;
-    } else if (Address >= runtime_code_start &&
-               Address < runtime_data_start) {
-        *MemoryType = SAL_MEMORY_TYPE_REGULAR;
-        *MemoryUsage = SAL_MEMORY_USAGE_RUNTIME_CODE;
-        *NeedVirtualAddress = 1;
-    } else if (Address >= runtime_data_start && Address < firmware_end) {
-        *MemoryType = SAL_MEMORY_TYPE_REGULAR;
-        *MemoryUsage = SAL_MEMORY_USAGE_RUNTIME_DATA;
-        *NeedVirtualAddress = 1;
-    } else if (Address >= FW_LOCAL_SAPIC_BASE &&
-               Address < FW_LOCAL_SAPIC_BASE + FW_LOCAL_SAPIC_SIZE) {
-        *MemoryType = SAL_MEMORY_TYPE_SAPIC;
-        *MemoryUsage = SAL_MEMORY_USAGE_UNSPECIFIED;
-    } else if (Address >= FW_FIRMWARE_ADDRESS_SPACE_BASE &&
-               Address < FW_FIRMWARE_ADDRESS_SPACE_END) {
-        *MemoryType = SAL_MEMORY_TYPE_FIRMWARE;
-        *MemoryUsage = SAL_MEMORY_USAGE_UNSPECIFIED;
-        *NeedVirtualAddress = 1;
-    } else {
-        switch (EfiDescriptor->Type) {
-        case EfiConventionalMemory:
-            *MemoryType = SAL_MEMORY_TYPE_REGULAR;
-            *MemoryUsage = SAL_MEMORY_USAGE_UNSPECIFIED;
-            break;
-        case EfiLoaderCode:
-        case EfiBootServicesCode:
-            *MemoryType = SAL_MEMORY_TYPE_REGULAR;
-            *MemoryUsage = SAL_MEMORY_USAGE_BOOT_CODE;
-            break;
-        case EfiLoaderData:
-        case EfiBootServicesData:
-            *MemoryType = SAL_MEMORY_TYPE_REGULAR;
-            *MemoryUsage = SAL_MEMORY_USAGE_BOOT_DATA;
-            break;
-        case EfiRuntimeServicesCode:
-            *MemoryType = SAL_MEMORY_TYPE_REGULAR;
-            *MemoryUsage = SAL_MEMORY_USAGE_RUNTIME_CODE;
-            break;
-        case EfiRuntimeServicesData:
-            /*
-             * Runtime data outside the linked SAL data image is private
-             * firmware storage (for example, the SAL stacks).  SAL 3.0
-             * Table 3-6 maps both usage 5 and usage 12 to
-             * EfiRuntimeServicesData.  Keeping the distinction here also
-             * leaves exactly one SAL runtime-data image for old consumers
-             * that retain only the last descriptor of each usage.
-             */
-            *MemoryType = SAL_MEMORY_TYPE_REGULAR;
-            *MemoryUsage = SAL_MEMORY_USAGE_RESERVED;
-            break;
-        case EfiACPIReclaimMemory:
-            *MemoryType = SAL_MEMORY_TYPE_REGULAR;
-            *MemoryUsage = SAL_MEMORY_USAGE_ACPI_RECLAIM;
-            break;
-        case EfiACPIMemoryNVS:
-            *MemoryType = SAL_MEMORY_TYPE_REGULAR;
-            *MemoryUsage = SAL_MEMORY_USAGE_ACPI_NVS;
-            break;
-        case EfiReservedMemoryType:
-            *MemoryType = SAL_MEMORY_TYPE_REGULAR;
-            *MemoryUsage = SAL_MEMORY_USAGE_RESERVED;
-            break;
-        case EfiUnusableMemory:
-            *MemoryType = SAL_MEMORY_TYPE_BAD;
-            *MemoryUsage = SAL_MEMORY_USAGE_UNSPECIFIED;
-            break;
-        case EfiMemoryMappedIO:
-            *MemoryType = SAL_MEMORY_TYPE_MMIO;
-            *MemoryUsage = SAL_MEMORY_USAGE_UNSPECIFIED;
-            break;
-        case EfiMemoryMappedIOPortSpace:
-            *MemoryType = SAL_MEMORY_TYPE_IO_PORT;
-            *MemoryUsage = SAL_MEMORY_USAGE_UNSPECIFIED;
-            break;
-        case EfiPalCode:
-            *MemoryType = SAL_MEMORY_TYPE_REGULAR;
-            *MemoryUsage = SAL_MEMORY_USAGE_PAL_CODE;
-            break;
-        default:
-            *MemoryType = SAL_MEMORY_TYPE_REGULAR;
-            *MemoryUsage = SAL_MEMORY_USAGE_RESERVED;
-            break;
-        }
-    }
-
-    *PageAccessRights =
-        sal_memory_page_access(*MemoryType, *MemoryUsage);
-    return 1;
-}
-
 static BOOLEAN sal_memory_descriptor_metadata_equal(
     const IA64_SAL_MEMORY_DESCRIPTOR *A,
     const IA64_SAL_MEMORY_DESCRIPTOR *B)
@@ -14768,35 +14682,12 @@ static BOOLEAN sal_table_append_memory_range(
     return 1;
 }
 
-static BOOLEAN sal_table_append_nonexistent_range(
-    UINT8 **Cursor, UINTN *MemoryDescriptorCount, UINT64 Start, UINT64 End)
+static BOOLEAN sal_use_legacy_compatibility_mdt(void)
 {
-    return sal_table_append_memory_range(
-        Cursor, MemoryDescriptorCount, Start, End, 0,
-        SAL_MEMORY_ATTRIBUTE_UC, SAL_PAGE_ACCESS_READ,
-        SAL_MEMORY_SUPPORTS_UC, SAL_MEMORY_TYPE_NONEXISTENT,
-        SAL_MEMORY_USAGE_UNSPECIFIED);
+    return fw_compat_enabled(IA64_FW_COMPAT_SPARSE_SAL_MDT);
 }
 
-static UINT64 sal_processor_version(void)
-{
-    UINT64 version;
-    UINTN index = 3;
-
-    __asm__ volatile ("mov %0 = cpuid[%1]" : "=r"(version) : "r"(index));
-    return version;
-}
-
-static BOOLEAN sal_use_merced_compatibility_mdt(void)
-{
-    /*
-     * CPUID[3].family occupies bits 31:24.  Family 7 identifies Merced;
-     * later processor implementations use different family numbers.
-     */
-    return ((sal_processor_version() >> 24) & 0xffU) == 7U;
-}
-
-static BOOLEAN sal_table_append_merced_compatibility_mdt(
+static BOOLEAN sal_table_append_legacy_compatibility_mdt(
     UINT8 **Cursor, UINTN *MemoryDescriptorCount)
 {
     UINT64 pal_start = (UINTN)pal_proc_entry & ~0xfffULL;
@@ -14810,9 +14701,9 @@ static BOOLEAN sal_table_append_merced_compatibility_mdt(
      * systems; an IA-64 operating system obtains this information from EFI.
      * Released Merced-era IA-64 HALs nevertheless require these five
      * firmware records, and malfunction if the MDT duplicates EFI's normal
-     * RAM map.  Publish only the historical compatibility records on family
-     * 7 processors while leaving the specification-complete MDT in place for
-     * later processor generations.
+     * RAM map.  Publish only the historical compatibility records in the
+     * early-loader machine profile.  CPU selection is deliberately
+     * independent of this firmware ABI.
      */
     return sal_table_append_memory_range(
                Cursor, MemoryDescriptorCount, pal_start, pal_end, 0,
@@ -14846,78 +14737,17 @@ static BOOLEAN sal_table_append_merced_compatibility_mdt(
 static BOOLEAN sal_table_append_memory_descriptors(
     UINT8 **Cursor, UINTN *MemoryDescriptorCount)
 {
-    UINT64 covered_end = 0;
-    UINTN i;
-
-    if (sal_use_merced_compatibility_mdt()) {
-        return sal_table_append_merced_compatibility_mdt(
+    if (sal_use_legacy_compatibility_mdt()) {
+        return sal_table_append_legacy_compatibility_mdt(
             Cursor, MemoryDescriptorCount);
     }
 
     /*
-     * SAL 3.0 section 3.2.7 says Type 1 MDT entries are not required for an
-     * IA-64 operating system.  Nevertheless, an early IA-64 HAL rejects the
-     * SAL table unless it finds PAL code, SAL runtime code/data, and
-     * firmware-address-space MDT records.  No public specification found so
-     * far explains that stricter historical platform expectation.
-     *
-     * Outside the Merced compatibility path above, section 3.2.7.2 requires
-     * an MDT, when present, to cover the entire system address space.
-     * Generate a physically ordered, gap-free 44-bit platform map and
-     * describe every hole explicitly as non-existent memory.
+     * SAL 3.0 section 3.2.7.2 assigns Type 1 memory descriptors to IA-32 OS
+     * boot.  An IA-64 OS receives its memory map through EFI, so the
+     * standards-oriented profile omits the MDT instead of duplicating it.
      */
-    for (i = 0; i < mMemoryMapEntries; i++) {
-        const EFI_MEMORY_DESCRIPTOR *efi = &mMemoryMap[i];
-        UINT64 start = efi->PhysicalStart;
-        UINT64 end;
-
-        if (efi->NumberOfPages == 0 ||
-            start >= SAL_SYSTEM_ADDRESS_LIMIT ||
-            efi->NumberOfPages >
-                (SAL_SYSTEM_ADDRESS_LIMIT - start) / EFI_PAGE_SIZE) {
-            return 0;
-        }
-        end = start + (efi->NumberOfPages << 12);
-        if (start < covered_end || end > SAL_SYSTEM_ADDRESS_LIMIT) {
-            return 0;
-        }
-        if (start > covered_end &&
-            !sal_table_append_nonexistent_range(
-                Cursor, MemoryDescriptorCount, covered_end, start)) {
-            return 0;
-        }
-
-        while (start < end) {
-            UINT64 segment_end = sal_memory_segment_end(start, end);
-            UINT8 need_virtual_address;
-            UINT8 current_memory_attribute;
-            UINT8 page_access_rights;
-            UINT8 supported_memory_attributes;
-            UINT8 memory_type;
-            UINT8 memory_usage;
-
-            if (segment_end <= start ||
-                !sal_memory_segment_metadata(
-                    efi, start, &need_virtual_address,
-                    &current_memory_attribute, &page_access_rights,
-                    &supported_memory_attributes, &memory_type,
-                    &memory_usage) ||
-                !sal_table_append_memory_range(
-                    Cursor, MemoryDescriptorCount, start, segment_end,
-                    need_virtual_address, current_memory_attribute,
-                    page_access_rights, supported_memory_attributes,
-                    memory_type, memory_usage)) {
-                return 0;
-            }
-            start = segment_end;
-        }
-        covered_end = end;
-    }
-
-    return covered_end == SAL_SYSTEM_ADDRESS_LIMIT ||
-           sal_table_append_nonexistent_range(
-               Cursor, MemoryDescriptorCount, covered_end,
-               SAL_SYSTEM_ADDRESS_LIMIT);
+    return 1;
 }
 
 static BOOLEAN sal_build_system_table(void)
@@ -14951,13 +14781,15 @@ static BOOLEAN sal_build_system_table(void)
     entrypoint.Type = SAL_DESCRIPTOR_ENTRYPOINT;
     entrypoint.PalProc = (UINTN)pal_proc_entry;
     /*
-     * sal_proc_entry and sal_proc_gp_anchor are raw assembly symbols, not
-     * IA-64 C function descriptors.  The code-side GP anchor is intentional:
-     * the entry stub uses its relocation to tolerate a released HAL that
-     * applies the runtime-code mapping to the advertised SAL GP.
+     * These are raw IA-64 entry/GP values, not a C function descriptor.
+     * Standards mode advertises the data GP.  The compatibility profile
+     * advertises a code-side anchor for a caller that relocates SAL GP with
+     * the runtime-code mapping.
      */
     entrypoint.SalProc = (UINTN)sal_proc_entry;
-    entrypoint.SalGp = (UINTN)sal_proc_gp_anchor;
+    entrypoint.SalGp =
+        fw_compat_enabled(IA64_FW_COMPAT_SAL_CODE_GP) ?
+        (UINTN)sal_proc_gp_anchor : fw_current_gp();
     if (!sal_table_append_entry(&cursor, &entrypoint,
                                 sizeof(entrypoint)) ||
         !sal_table_append_memory_descriptors(
@@ -15415,8 +15247,10 @@ static BOOLEAN __attribute__((noinline)) sal_system_table_selftest(void)
     UINT64 firmware_end = ((UINTN)&_end + 0x1fffU) & ~0x1fffULL;
     UINT64 covered_end = 0;
     UINT64 sal_proc = (UINTN)sal_proc_entry;
-    UINT64 sal_gp = (UINTN)sal_proc_gp_anchor;
     UINT64 sal_data_gp = fw_current_gp();
+    UINT64 sal_gp =
+        fw_compat_enabled(IA64_FW_COMPAT_SAL_CODE_GP) ?
+        (UINTN)sal_proc_gp_anchor : sal_data_gp;
     UINT8 previous_type = 0;
     UINTN entrypoint_count = 0;
     UINTN memory_count = 0;
@@ -15424,8 +15258,8 @@ static BOOLEAN __attribute__((noinline)) sal_system_table_selftest(void)
     UINTN tr_count = 0;
     UINTN wake_count = 0;
     UINTN i;
-    BOOLEAN merced_compatibility_mdt =
-        sal_use_merced_compatibility_mdt();
+    BOOLEAN legacy_compatibility_mdt =
+        sal_use_legacy_compatibility_mdt();
     BOOLEAN pal_code_found = 0;
     BOOLEAN boot_code_found = 0;
     BOOLEAN runtime_code_found = 0;
@@ -15486,7 +15320,7 @@ static BOOLEAN __attribute__((noinline)) sal_system_table_selftest(void)
 
             entry_size = sizeof(*memory);
             if (memory->PageCount == 0 ||
-                (merced_compatibility_mdt ?
+                (legacy_compatibility_mdt ?
                  memory->PhysicalAddress < covered_end :
                  memory->PhysicalAddress != covered_end) ||
                 memory->PhysicalAddress >= SAL_SYSTEM_ADDRESS_LIMIT ||
@@ -15606,16 +15440,15 @@ static BOOLEAN __attribute__((noinline)) sal_system_table_selftest(void)
 
     return cursor == end &&
            entrypoint_count == 1 &&
-           memory_count != 0 &&
            features_count == 1 &&
            tr_count == 1 &&
            wake_count == 1 &&
            header->EntryCount == memory_count + 4U &&
-           (merced_compatibility_mdt ?
-            memory_count == 5U :
-            covered_end == SAL_SYSTEM_ADDRESS_LIMIT) &&
-           pal_code_found && boot_code_found && runtime_code_found &&
-           runtime_data_found && firmware_space_found;
+           (legacy_compatibility_mdt ?
+            (memory_count == 5U && pal_code_found && boot_code_found &&
+             runtime_code_found && runtime_data_found &&
+             firmware_space_found) :
+            memory_count == 0);
 }
 
 static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
@@ -16359,11 +16192,13 @@ static BOOLEAN __attribute__((noinline)) uefi_event_services_selftest(void)
 
             timer_rec->timer_active = 1;
             timer_rec->timer_type = TIMER_RELATIVE;
-            timer_rec->timer_last_tick = ~(UINT64)0 - 9U;
+            timer_rec->timer_last_tick = ~(UINT64)0;
             timer_rec->timer_remaining_100ns = 1;
             timer_rec->timer_partial_ticks = 0;
             timer_rec->timer_period_100ns = 0;
-            if (!fw_event_timer_consume(timer_rec, 10) ||
+            /* Advance exactly 100 ns across the 64-bit ITC wrap. */
+            if (!fw_event_timer_consume(
+                    timer_rec, FW_ITC_TICKS_PER_100NS - 1U) ||
                 timer_rec->timer_active ||
                 timer_rec->timer_remaining_100ns != 0) {
                 ok = 0;
@@ -17127,15 +16962,16 @@ static BOOLEAN pe_image_base_is_conventional(UINT64 base, UINT64 size)
 
 static UINT64 pe_image_allocation_floor(BOOLEAN RuntimeImage)
 {
-    /*
-     * Some IA-64 loaders use the low image window as a descriptor-aligned
-     * staging area.  Runtime images receive virtual-address-change callbacks
-     * after the loader has consumed early low-memory mappings, so place them
-     * in the ordinary low-RAM region above those loader-owned windows.
-     */
-    return RuntimeImage ?
-        IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE :
-        IA64_EFI_IMAGE_FALLBACK_BASE;
+    if (fw_compat_enabled(IA64_FW_COMPAT_EARLY_LOADER_MEMORY)) {
+        /*
+         * Keep firmware-selected images above loader-owned fixed windows.
+         * Explicit fixed-base images remain allowed inside free memory.
+         */
+        return RuntimeImage ?
+            IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE :
+            IA64_EFI_IMAGE_FALLBACK_BASE;
+    }
+    return ACPI_RECLAIM_END;
 }
 
 /*
@@ -24950,6 +24786,10 @@ static BOOLEAN __attribute__((noinline)) pe_image_base_allocation_selftest(void)
     UINTN saved_entries = mMemoryMapEntries;
     UINTN saved_key = mMapKey;
     UINT64 saved_next_pe_image_base = mNextPeImageBase;
+    UINT64 image_floor = pe_image_allocation_floor(0);
+    UINT64 runtime_floor = pe_image_allocation_floor(1);
+    BOOLEAN early_loader_memory =
+        fw_compat_enabled(IA64_FW_COMPAT_EARLY_LOADER_MEMORY);
     UINT64 base;
     BOOLEAN ok = 1;
 
@@ -24964,59 +24804,58 @@ static BOOLEAN __attribute__((noinline)) pe_image_base_allocation_selftest(void)
     mMemoryMapEntries = 0;
     mMapKey = 0;
     efi_add_memory_range(&mMemoryMapEntries, EfiConventionalMemory,
-                         FW_EARLY_LOADER_WINDOW_BASE,
+                         ACPI_RECLAIM_END,
                          IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE + 0x40000ULL,
                          EFI_MEMORY_WB);
 
-    mNextPeImageBase = IA64_EFI_IMAGE_FALLBACK_BASE;
+    mNextPeImageBase = image_floor;
     base = pe_choose_image_base(FW_LOW_IMAGE_BASE, 0x10000, 0, 0, 0, 0);
-    if (base != IA64_EFI_IMAGE_FALLBACK_BASE) {
+    if (base != (early_loader_memory ?
+                 IA64_EFI_IMAGE_FALLBACK_BASE : FW_LOW_IMAGE_BASE) ||
+        mNextPeImageBase != (early_loader_memory ?
+            IA64_EFI_IMAGE_FALLBACK_BASE + IA64_EFI_IMAGE_ALIGN :
+            image_floor)) {
         ok = 0;
         goto out;
     }
 
     /* Conventional page and pool records remain invisible in the map. */
     mPageAllocations[0].in_use = 1;
-    mPageAllocations[0].base = IA64_EFI_IMAGE_FALLBACK_BASE;
+    mPageAllocations[0].base = image_floor;
     mPageAllocations[0].pages = IA64_EFI_IMAGE_ALIGN >> 12;
     mPageAllocations[0].type = EfiConventionalMemory;
     mPoolAllocations[0].in_use = 1;
-    mPoolAllocations[0].base =
-        IA64_EFI_IMAGE_FALLBACK_BASE + IA64_EFI_IMAGE_ALIGN;
+    mPoolAllocations[0].base = image_floor + IA64_EFI_IMAGE_ALIGN;
     mPoolAllocations[0].size = IA64_EFI_IMAGE_ALIGN;
     mPoolAllocations[0].backing_base = mPoolAllocations[0].base;
     mPoolAllocations[0].backing_pages = IA64_EFI_IMAGE_ALIGN >> 12;
     mPoolAllocations[0].type = EfiConventionalMemory;
-    mNextPeImageBase = IA64_EFI_IMAGE_FALLBACK_BASE;
-    base = pe_choose_image_base(FW_LOW_IMAGE_BASE, 0x10000, 0, 0, 0, 0);
-    if (base !=
-            IA64_EFI_IMAGE_FALLBACK_BASE + 2U * IA64_EFI_IMAGE_ALIGN ||
-        mNextPeImageBase !=
-            IA64_EFI_IMAGE_FALLBACK_BASE + 3U * IA64_EFI_IMAGE_ALIGN) {
+    mNextPeImageBase = image_floor;
+    base = pe_choose_image_base(0, 0x10000, 0, 0, 0, 0);
+    if (base != image_floor + 2U * IA64_EFI_IMAGE_ALIGN ||
+        mNextPeImageBase != image_floor + 3U * IA64_EFI_IMAGE_ALIGN) {
         ok = 0;
         goto out;
     }
     fw_set_mem(mPageAllocations, sizeof(mPageAllocations), 0);
     fw_set_mem(mPoolAllocations, sizeof(mPoolAllocations), 0);
 
-    mNextPeImageBase = IA64_EFI_IMAGE_FALLBACK_BASE;
-    base = pe_choose_image_base(FW_LOW_IMAGE_BASE, 0x10000, 1, 0, 0, 0);
-    if (base != IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE ||
-        mNextPeImageBase !=
-        IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE + 0x10000ULL) {
+    mNextPeImageBase = runtime_floor;
+    base = pe_choose_image_base(0, 0x10000, 1, 0, 0, 0);
+    if (base != runtime_floor ||
+        mNextPeImageBase != runtime_floor + 0x10000ULL) {
         ok = 0;
         goto out;
     }
 
     mLoadedImages[0].in_use = 1;
     mLoadedImages[0].loaded_image.ImageBase =
-        (VOID *)(UINTN)(IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE + 0x10000ULL);
+        (VOID *)(UINTN)(runtime_floor + 0x10000ULL);
     mLoadedImages[0].loaded_image.ImageSize = 0x10000;
-    base = pe_choose_image_base(IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE +
-                                0x10000ULL, 0x10000, 1, 0, 0, 0);
-    if (base != IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE + 0x20000ULL ||
-        mNextPeImageBase !=
-        IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE + 0x30000ULL) {
+    base = pe_choose_image_base(runtime_floor + 0x10000ULL,
+                                0x10000, 1, 0, 0, 0);
+    if (base != runtime_floor + 0x20000ULL ||
+        mNextPeImageBase != runtime_floor + 0x30000ULL) {
         ok = 0;
         goto out;
     }
@@ -25031,7 +24870,7 @@ static BOOLEAN __attribute__((noinline)) pe_image_base_allocation_selftest(void)
                          IA64_EFI_IMAGE_FALLBACK_BASE,
                          IA64_EFI_IMAGE_FALLBACK_BASE + 0x100000ULL,
                          EFI_MEMORY_WB);
-    mNextPeImageBase = IA64_EFI_IMAGE_FALLBACK_BASE;
+    mNextPeImageBase = image_floor;
 
     /*
      * Images without relocations must load where they were linked even below
@@ -25039,14 +24878,16 @@ static BOOLEAN __attribute__((noinline)) pe_image_base_allocation_selftest(void)
      */
     base = pe_choose_image_base(0x1040000ULL, 0x34000, 0, 1, 0, 0);
     if (base != 0x1040000ULL ||
-        mNextPeImageBase != IA64_EFI_IMAGE_FALLBACK_BASE) {
+        mNextPeImageBase != image_floor) {
         ok = 0;
         goto out;
     }
 
-    /* The same base still loses to the floor when the image can move. */
-    if (pe_choose_image_base(0x1040000ULL, 0x34000, 0, 0, 0, 0) <
-        IA64_EFI_IMAGE_FALLBACK_BASE) {
+    /* Only the compatibility profile imposes the historical staging floor. */
+    base = pe_choose_image_base(0x1040000ULL, 0x34000, 0, 0, 0, 0);
+    if ((early_loader_memory &&
+         base < IA64_EFI_IMAGE_FALLBACK_BASE) ||
+        (!early_loader_memory && base != 0x1040000ULL)) {
         ok = 0;
         goto out;
     }
@@ -25069,9 +24910,9 @@ static BOOLEAN __attribute__((noinline)) pe_image_base_allocation_selftest(void)
     fw_set_mem(mLoadedImages, sizeof(mLoadedImages), 0);
 
     mMemoryMapEntries = 0;
-    mNextPeImageBase = IA64_EFI_IMAGE_FALLBACK_BASE;
+    mNextPeImageBase = image_floor;
     if (pe_choose_image_base(0, 0x10000, 0, 0, 0, 0) != 0 ||
-        mNextPeImageBase != IA64_EFI_IMAGE_FALLBACK_BASE) {
+        mNextPeImageBase != image_floor) {
         ok = 0;
     }
 
@@ -30816,10 +30657,12 @@ static BOOLEAN __attribute__((noinline)) pci_poll_timer_selftest(void)
 {
     FW_PCI_POLL_TIMER timer;
 
-    timer.last_tick = ~0ULL - 9U;
+    timer.last_tick = ~(UINT64)0;
     timer.remaining_100ns = 1;
     timer.partial_ticks = 0;
-    if (!pci_poll_timer_consume(&timer, 10) ||
+    /* Advance exactly 100 ns across the 64-bit ITC wrap. */
+    if (!pci_poll_timer_consume(
+            &timer, FW_ITC_TICKS_PER_100NS - 1U) ||
         timer.remaining_100ns != 0) {
         return 0;
     }
@@ -34838,6 +34681,11 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
      */
     mBootStackTop = stack_top;
     mBootStackBase = stack_top - FW_BOOT_STACK_SIZE;
+    fw_init_compatibility_profile();
+    mNextPageAddr =
+        fw_compat_enabled(IA64_FW_COMPAT_EARLY_LOADER_MEMORY) ?
+        FW_AUTO_ALLOCATION_BASE : ACPI_RECLAIM_END;
+    mNextPeImageBase = mNextPageAddr;
     mProcessorCount = fw_handoff_processor_count();
     fw_handoff_processor_topology(mProcessorCount);
     mResetFloatingPointDisableBits =
@@ -34870,6 +34718,10 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
     uart_puts("Firmware Entry:       0x0000000000000000\r\n\r\n");
 
     uart_puts("GP check: OK\r\n");
+    uart_puts("Firmware profile:     ");
+    uart_puts(mFirmwareCompatFlags == 0 ?
+              "standards-oriented\r\n" :
+              "early-loader compatibility\r\n");
 
     nvram_init();
 

@@ -262,7 +262,10 @@ void ia64_system_write_ar(CPUIA64State *env, uint32_t ar_num, uint64_t value)
     }
     env->ar[ar_num] = value;
     if (ar_num == 19) {
-        /* Software supplies the whole NaT collection of BSPSTORE's group. */
+        /*
+         * Software supplies RNAT for BSPSTORE's group.  RNATBitIndex
+         * determines the defined low subset; higher bits are undefined.
+         */
         ia64_rse_rnat_reloaded(env);
     }
     if (ar_num == 18) {
