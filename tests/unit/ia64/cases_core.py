@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .case import (CaseMetadata, CaseObservation, bind_cases)
+from .case import (CaseEvidence, CaseMetadata, CaseObservation, bind_cases)
 from .encoding import (
     HIGH_TR_BASE,
     IA64_EXCP_BREAK,
@@ -1894,6 +1894,28 @@ test_br_call_indirect_completers_decode = require_registers(
          br_ret(6)),
     ], {"ip": 0x50, "r4": 0x5a, "r5": 0x33}, entry=0x10)
 
+test_br_call_indirect_merced_wh4_alias = require_registers(
+    "br_call_indirect_merced_wh4_alias", [
+        (0x10, 0x00, nop_m(), addl(8, 0x70, 0), nop_i()),
+        (0x20, 0x00, nop_m(), mov_br_gr(6, 8), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(),
+         br_call_indirect(0, 6, wh=4, many=True)),
+        (0x40, 0x00, adds(5, 0x33, 0), nop_i(), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
+        (0x70, 0x10, adds(4, 0x5a, 0), nop_i(), br_ret(0)),
+    ], {
+        "ip": 0x50,
+        "r4": 0x5a,
+        "r5": 0x33,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10, cpu="merced")
+
+test_br_call_indirect_wh4_madison_illegal = require_exception(
+    "br_call_indirect_wh4_madison_illegal", [
+        (0x10, 0x10, nop_m(), nop_i(),
+         br_call_indirect(0, 6, wh=4, many=True)),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10, cpu="madison")
+
 test_br_indirect_ignores_low_bits = require_registers(
     "br_indirect_ignores_low_bits", [
         (0x10, *movl_mlx(8, 0x6f)),
@@ -2866,6 +2888,8 @@ CASE_NAMES = (
     'addp4_imm_positive_decode',
     'andcm_imm_negative_mask_round_trip',
     'br_call_indirect_completers_decode',
+    'br_call_indirect_merced_wh4_alias',
+    'br_call_indirect_wh4_madison_illegal',
     'br_call_ret_preserves_ec',
     'br_call_ret_strcpy_pipeline_stops_on_first_zero_word',
     'br_cloop_decrements_lc',
@@ -3048,6 +3072,14 @@ CASE_NAMES = (
 )
 
 CASE_METADATA = {
+    'br_call_indirect_merced_wh4_alias': CaseMetadata(
+        encoding_evidence=CaseEvidence.EXTERNAL_GUEST_REGRESSION,
+        tags=frozenset({'merced', 'external-guest-regression'}),
+        spec_refs=(
+            'Observed early IA-64 guest binaries: '
+            'indirect import-call sequences',
+        ),
+    ),
 }
 
 CASE_ALIASES = {

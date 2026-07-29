@@ -1439,6 +1439,33 @@ IA64GenResult ia64_gen_complete_branch(
     return skip == NULL ? IA64_GEN_NORETURN : IA64_GEN_CONTINUE;
 }
 
+static Ia64Instruction ia64_decode_insn_for_model(
+    CPUIA64State *env, IA64SlotUnit unit, uint64_t raw,
+    uint64_t address, uint8_t slot)
+{
+    Ia64Instruction insn = ia64_decode_insn(unit, raw, address, slot);
+    uint64_t slot_raw = raw & IA64_SLOT_MASK;
+
+    /*
+     * Some early IA-64 toolchains emitted indirect .dptk calls with B5.wh=4
+     * in import-call sequences.  The architectural encoding is 5, but
+     * first-generation hardware accepted the encoding with bit 32 clear.
+     * Preserve the strict decoder for later processors while accepting the
+     * observed first-generation alias on the Merced model.
+     */
+    if (!insn.valid &&
+        ia64_env_cpu_class(env)->model == IA64_CPU_MODEL_MERCED &&
+        unit == IA64_UNIT_B &&
+        ((slot_raw >> 37) & 0xf) == 1 &&
+        ((slot_raw >> 32) & 0x7) == 4) {
+        insn = ia64_decode_insn(unit, slot_raw | (1ULL << 32),
+                                address, slot);
+        insn.raw = slot_raw;
+    }
+
+    return insn;
+}
+
 static bool ia64_is_zero_st1_postinc(const Ia64Instruction *insn)
 {
     return (insn->opcode == IA64_OP_ST1 ||
@@ -1470,8 +1497,9 @@ static bool ia64_analyze_self_counted_loop(
             continue;
         }
 
-        insn = ia64_decode_insn(template_info->units[slot],
-                                slots[slot], bundle_ip, slot);
+        insn = ia64_decode_insn_for_model(
+            ctx->env, template_info->units[slot], slots[slot],
+            bundle_ip, slot);
         ia64_apply_mlx_long_fixup(template_code, slots, slot, &insn,
                                   &skip_x_slot);
         if (insn.valid &&
@@ -2655,9 +2683,9 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
             continue;
         }
 
-        Ia64Instruction insn = ia64_decode_insn(
-            template_info->units[slot], slots[slot], bundle_ip,
-            slot);
+        Ia64Instruction insn = ia64_decode_insn_for_model(
+            ctx->env, template_info->units[slot], slots[slot],
+            bundle_ip, slot);
         bool stop_after;
         bool track_iipa_for_insn;
 
@@ -2846,7 +2874,8 @@ static bool ia64_tr_disas_log(const DisasContextBase *db, CPUState *cs,
                 }
 
                 unit = template_info->units[slot];
-                insn = ia64_decode_insn(unit, slots[slot], bundle_ip, slot);
+                insn = ia64_decode_insn_for_model(
+                    ctx->env, unit, slots[slot], bundle_ip, slot);
                 ia64_apply_mlx_long_fixup(template_code, slots, slot, &insn,
                                           &skip_x_slot);
                 fprintf(logfile,

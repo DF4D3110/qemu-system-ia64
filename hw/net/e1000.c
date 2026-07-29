@@ -72,6 +72,7 @@ static int debugflags = DBGBIT(TXERR) | DBGBIT(GENERAL);
 /*
  * HW models:
  *  E1000_DEV_ID_82540EM works with Windows, Linux, and OS X <= 10.8
+ *  E1000_DEV_ID_82543GC_COPPER is provided for early guest drivers
  *  E1000_DEV_ID_82544GC_COPPER appears to work; not well tested
  *  E1000_DEV_ID_82545EM_COPPER works with Linux and OS X >= 10.6
  *  Others never tested
@@ -1731,6 +1732,12 @@ static const E1000Info e1000_devices[] = {
         .device_id = E1000_DEV_ID_82540EM,
         .revision  = 0x03,
         .phy_id2   = E1000_PHY_ID2_8254xx_DEFAULT,
+    },
+    {
+        .name      = "e1000-82543gc",
+        .device_id = E1000_DEV_ID_82543GC_COPPER,
+        .revision  = 0x02,
+        .phy_id2   = E1000_PHY_ID2_82544x,
     },
     {
         .name      = "e1000-82544gc",

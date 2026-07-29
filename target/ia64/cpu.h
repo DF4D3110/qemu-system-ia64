@@ -49,6 +49,7 @@
 #define IA64_TLB_MAX     128
 /* Merced's non-architectural first-level data TLB. */
 #define IA64_DTLB1_MAX   32
+#define IA64_DTLB1_MICRO_SIZE 64
 
 /*
  * CPUID register 4 general features/capability bits.  A model advertises

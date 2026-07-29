@@ -1999,6 +1999,77 @@ def test_itc_d_merced_main_tlb_capacity(qemu):
     }, name="itc_d_merced_main_tlb_capacity", cpu="merced")
 
 
+def test_itc_d_merced_dtlb1_micro_hit_updates_lru(qemu):
+    fill_base = 0x100000
+    page_size = 0x4000
+    data_offset = 0x1000
+    cursor = 0x10000
+    entry = cursor
+    bundles = [
+        (cursor, *movl_mlx(18, 0x4009661)),
+        (cursor + 0x10, 0x00, adds(7, 0x38, 0), nop_i(), nop_i()),
+        (cursor + 0x20, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+    ]
+    cursor += 0x30
+
+    def append_itc(index):
+        nonlocal cursor
+        va = fill_base + index * page_size + data_offset
+
+        bundles.extend([
+            (cursor, *movl_mlx(19, va)),
+            (cursor + 0x10, 0x00, mov_m_gr_cr(19, 20), nop_i(), nop_i()),
+            (cursor + 0x20, 0x00, itc_d(18), nop_i(), nop_i()),
+        ])
+        cursor += 0x30
+
+    def append_load(index, dest=30):
+        nonlocal cursor
+        va = fill_base + index * page_size + data_offset
+
+        bundles.extend([
+            (cursor, *movl_mlx(2, va)),
+            (cursor + 0x10, 0x00, ld8(dest, 2), nop_i(), nop_i()),
+        ])
+        cursor += 0x20
+
+    # Seed 33 DTLB2 translations, then fill all 32 DTLB1 slots.
+    for index in range(33):
+        append_itc(index)
+    bundles.extend([
+        (cursor, 0x00, ssm(IA64_PSR_DT), nop_i(), nop_i()),
+        (cursor + 0x10, 0x00, srlz_d(), nop_i(), nop_i()),
+    ])
+    cursor += 0x20
+    for index in range(32):
+        append_load(index)
+
+    # Keep page zero in the direct touch cache while every other page is made
+    # newer.  Its repeated hits must still update the modeled DTLB1 LRU;
+    # otherwise the 33rd fill below incorrectly chooses page zero as victim.
+    append_load(0)
+    for index in range(1, 32):
+        append_load(index)
+        append_load(0)
+    append_load(32)
+
+    # Rotate the page-zero and page-one sources out of Merced's 96-entry
+    # DTLB2.  Page zero must remain accessible solely through its recently
+    # touched, non-inclusive DTLB1 copy.
+    for index in range(33, MERCED_DTLB_ENTRIES + 2):
+        append_itc(index)
+    append_load(0, dest=31)
+    terminal_ip = cursor
+    bundles.append((terminal_ip, 0x10, nop_m(), nop_i(),
+                    br_cond(terminal_ip, terminal_ip)))
+
+    run_program(qemu, bundles, entry=entry, expected={
+        "ip": terminal_ip,
+        "exception": IA64_EXCP_NONE,
+        "r31": 0,
+    }, name="itc_d_merced_dtlb1_micro_hit_updates_lru", cpu="merced")
+
+
 def test_itc_d_full_tc_replacement_rotates(qemu):
     tc_fill_count = IA64_TLB_MAX
     fill_base = 0x100000
@@ -6418,6 +6489,7 @@ CASE_NAMES = (
     'itc_d_evicted_refill_flushes_host_tlb',
     'itc_d_key_permission_store_raises_permission_vector',
     'itc_d_matching_pkr_allows_keyed_load',
+    'itc_d_merced_dtlb1_micro_hit_updates_lru',
     'itc_d_merced_main_tlb_capacity',
     'itc_d_nat_pte_consumes',
     'itc_d_not_present_raises_page_fault',
@@ -6600,6 +6672,15 @@ CASE_METADATA = {
     'interruption_serializes_pending_ptr_d': CaseMetadata(nonterminal_effect_loop=True),
     'itc_d_not_present_rejects_low_itir_reserved_field': CaseMetadata(terminal_is_fault_ip=True),
     'itc_d_merced_main_tlb_capacity': CaseMetadata(
+        expectation_evidence=CaseEvidence.PAL_OR_PLATFORM_ABI,
+        tags=frozenset({'cpu-model:merced', 'model-specific-tlb'}),
+        spec_refs=(
+            'Itanium-hardware-developer-manual-248701-002.pdf: '
+            'sections 2.5.6.1 and 2.5.6.2',
+        ),
+        required_features=frozenset({'cpu-model:merced'}),
+    ),
+    'itc_d_merced_dtlb1_micro_hit_updates_lru': CaseMetadata(
         expectation_evidence=CaseEvidence.PAL_OR_PLATFORM_ABI,
         tags=frozenset({'cpu-model:merced', 'model-specific-tlb'}),
         spec_refs=(

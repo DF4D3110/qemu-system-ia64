@@ -254,6 +254,57 @@ static bool ia64_merced_dtlb1_enabled(CPUIA64State *env)
     return ia64_env_cpu_class(env)->model == IA64_CPU_MODEL_MERCED;
 }
 
+static void ia64_merced_dtlb1_bump_generation(CPUIA64State *env)
+{
+    env->mmu.tlb_data_l1_generation++;
+    if (env->mmu.tlb_data_l1_generation == 0) {
+        env->mmu.tlb_data_l1_generation = 1;
+        memset(env->mmu.tlb_data_l1_micro, 0,
+               sizeof(env->mmu.tlb_data_l1_micro));
+    }
+}
+
+static bool ia64_merced_dtlb1_lookup_micro(CPUIA64State *env, uint64_t va,
+                                           uint32_t rid, uint8_t *slot)
+{
+    uint32_t index = ((va >> TARGET_PAGE_BITS) ^ rid) &
+                     (IA64_DTLB1_MICRO_SIZE - 1);
+    IA64MicroTlbEntry *cached = &env->mmu.tlb_data_l1_micro[index];
+
+    if (!cached->valid ||
+        cached->generation != env->mmu.tlb_data_l1_generation ||
+        cached->rid != rid ||
+        ((va ^ cached->va) & cached->page_mask) != 0 ||
+        cached->slot >= IA64_DTLB1_MAX ||
+        !ia64_tlb_match(&env->mmu.tlb_data_l1[cached->slot], va, rid)) {
+        return false;
+    }
+    *slot = cached->slot;
+    return true;
+}
+
+static void ia64_merced_dtlb1_cache_page(CPUIA64State *env, uint64_t va,
+                                         uint32_t rid, uint8_t slot)
+{
+    uint32_t index = ((va >> TARGET_PAGE_BITS) ^ rid) &
+                     (IA64_DTLB1_MICRO_SIZE - 1);
+    IA64MicroTlbEntry *cached = &env->mmu.tlb_data_l1_micro[index];
+
+    /*
+     * Cache only the host target page, not the full architected translation.
+     * Overlapping IA-64 page sizes can otherwise have a different first
+     * matching slot elsewhere inside a large translation.
+     */
+    *cached = (IA64MicroTlbEntry) {
+        .va = va & TARGET_PAGE_MASK,
+        .page_mask = TARGET_PAGE_MASK,
+        .rid = rid,
+        .generation = env->mmu.tlb_data_l1_generation,
+        .slot = slot,
+        .valid = true,
+    };
+}
+
 static bool ia64_tlb_entries_equivalent(const IA64TlbEntry *a,
                                         const IA64TlbEntry *b)
 {
@@ -311,6 +362,7 @@ static void ia64_merced_dtlb1_invalidate_slot(CPUIA64State *env,
     env->mmu.tlb_data_l1_age[slot] = 0;
     g_assert(env->mmu.tlb_data_l1_count > 0);
     env->mmu.tlb_data_l1_count--;
+    ia64_merced_dtlb1_bump_generation(env);
 }
 
 static void ia64_merced_dtlb1_invalidate_copy(CPUIA64State *env,
@@ -335,6 +387,7 @@ static void ia64_merced_dtlb1_touch_one(CPUIA64State *env, uint64_t va)
     int empty = -1;
     uint64_t oldest_age = UINT64_MAX;
     uint8_t oldest = 0;
+    uint8_t cached_slot;
     uint32_t rid = ia64_region_rid(env, va);
     uint16_t i;
 
@@ -342,8 +395,13 @@ static void ia64_merced_dtlb1_touch_one(CPUIA64State *env, uint64_t va)
         env->mmu.tlb_data_l1_count == 0) {
         goto find_dtlb2;
     }
+    if (ia64_merced_dtlb1_lookup_micro(env, va, rid, &cached_slot)) {
+        ia64_merced_dtlb1_stamp(env, cached_slot);
+        return;
+    }
     for (i = 0; i < IA64_DTLB1_MAX; i++) {
         if (ia64_tlb_match(&env->mmu.tlb_data_l1[i], va, rid)) {
+            ia64_merced_dtlb1_cache_page(env, va, rid, i);
             ia64_merced_dtlb1_stamp(env, i);
             return;
         }
@@ -367,6 +425,7 @@ find_dtlb2:
         if (ia64_tlb_match(entry, va, rid)) {
             if (ia64_tlb_entries_equivalent(entry, source)) {
                 *entry = *source;
+                ia64_merced_dtlb1_cache_page(env, va, rid, i);
                 ia64_merced_dtlb1_stamp(env, i);
                 return;
             }
@@ -388,6 +447,8 @@ find_dtlb2:
     }
     env->mmu.tlb_data_l1[empty] = *source;
     env->mmu.tlb_data_l1_count++;
+    ia64_merced_dtlb1_bump_generation(env);
+    ia64_merced_dtlb1_cache_page(env, va, rid, empty);
     ia64_merced_dtlb1_stamp(env, empty);
 }
 

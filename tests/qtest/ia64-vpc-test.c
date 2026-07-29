@@ -1002,8 +1002,9 @@ static bool socket_receive_all(int fd, void *buffer, size_t length)
     return true;
 }
 
-static void test_e1000_packet_transfer(void)
+static void test_e1000_packet_transfer(gconstpointer opaque)
 {
+    const char *model = opaque;
     static const uint8_t packet[64] = {
         0x52, 0x54, 0x00, 0x12, 0x34, 0x56,
         0x52, 0x54, 0x00, 0x65, 0x43, 0x21,
@@ -1023,8 +1024,8 @@ static void test_e1000_packet_transfer(void)
 
     g_assert_cmpint(qemu_socketpair(PF_UNIX, SOCK_STREAM, 0, sockets), ==, 0);
     qemu_clear_cloexec(sockets[1]);
-    args = g_strdup_printf("-nic socket,fd=%d,model=e1000,"
-                           "mac=52:54:00:12:34:56", sockets[1]);
+    args = g_strdup_printf("-nic socket,fd=%d,model=%s,"
+                           "mac=52:54:00:12:34:56", sockets[1], model);
     qts = qtest_initf("-machine ia64-vpc -m 256M %s", args);
     close(sockets[1]);
 
@@ -1475,8 +1476,10 @@ int main(int argc, char **argv)
                    test_e1000_resources_survive_reset);
     qtest_add_func("/ia64-vpc/network/intx-route",
                    test_e1000_intx_route);
-    qtest_add_func("/ia64-vpc/network/packet-transfer",
-                   test_e1000_packet_transfer);
+    qtest_add_data_func("/ia64-vpc/network/packet-transfer/82540em",
+                        "e1000", test_e1000_packet_transfer);
+    qtest_add_data_func("/ia64-vpc/network/packet-transfer/82543gc",
+                        "e1000-82543gc", test_e1000_packet_transfer);
     qtest_add_func("/ia64-vpc/lsi/async-nodata-command",
                    test_lsi_async_nodata_command);
     qtest_add_func("/ia64-vpc/iosapic/level-remote-irr",
