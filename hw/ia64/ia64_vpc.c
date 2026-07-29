@@ -1242,10 +1242,9 @@ static void ia64_vpc_install_int10(IA64VpcMachineState *s)
     cpu_physical_memory_write(IA64_INT10_ROM_BASE, rom, sizeof(rom));
 
     /*
-     * Keep the interrupt entry inside its option ROM.  In addition to being
-     * the conventional PC BIOS layout, Windows videoprt validates that the
-     * INT 10h vector resolves into the C0000h-CFFFFh video-ROM window before
-     * it enables its x86 BIOS emulator.
+     * Keep the interrupt entry inside its option ROM, following the
+     * conventional PC BIOS layout and the read-only ROM resource exposed by
+     * the PCI root bridge.
      */
     stw_le_p(vector, IA64_INT10_ROM_HANDLER_OFFSET);
     stw_le_p(vector + 2, IA64_INT10_ROM_BASE >> 4);

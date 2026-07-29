@@ -463,7 +463,8 @@ static bool ia64_try_defer_sal_speculative_alt_dtlb(
 
     if (excp != IA64_EXCP_ALT_DTLB ||
         !ia64_sal_boot_environment_active(&cpu->env) ||
-        !(cpu->env.cr_isr & IA64_ISR_SP)) {
+        !(cpu->env.cr_isr & IA64_ISR_SP) ||
+        (cpu->env.cr_isr & IA64_ISR_RS)) {
         return false;
     }
 

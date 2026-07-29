@@ -2913,6 +2913,10 @@ typedef struct {
 #define SAL_FREQ_BASE_PLATFORM      0
 #define PLATFORM_BASE_FREQUENCY     100000000ULL
 #define SAL_UPDATE_PAL_WRITE_FAILURE ((UINT64)-10)
+#define SAL_VECTOR_LENGTH_MASK      0x00000000ffffffffULL
+#define SAL_VECTOR_CHECKSUM_PRESENT (1ULL << 32)
+#define SAL_VECTOR_CHECKSUM_SHIFT   40U
+#define SAL_VECTOR_LENGTH_CS_RESERVED_MASK 0xffff00fe00000000ULL
 
 #define SAL_VECTOR_OS_MCA           0
 #define SAL_VECTOR_OS_INIT          1
@@ -2945,12 +2949,20 @@ typedef struct {
     UINT64 Gp1;
     UINT64 HandlerLen1;
     UINT8 Checksum1;
+    BOOLEAN ChecksumPresent1;
     UINT64 HandlerAddr2;
     UINT64 Gp2;
     UINT64 HandlerLen2;
     UINT8 Checksum2;
+    BOOLEAN ChecksumPresent2;
     BOOLEAN Valid;
 } SAL_VECTOR_REGISTRATION;
+
+typedef struct {
+    UINT64 Length;
+    UINT8 Checksum;
+    BOOLEAN ChecksumPresent;
+} SAL_VECTOR_LENGTH;
 
 typedef struct {
     UINT64 Mechanism;
@@ -3031,53 +3043,108 @@ sal_vector_registration_authentic(const SAL_VECTOR_REGISTRATION *Entry,
     UINT64 address = Secondary ? Entry->HandlerAddr2 : Entry->HandlerAddr1;
     UINT64 length = Secondary ? Entry->HandlerLen2 : Entry->HandlerLen1;
     UINT8 checksum = Secondary ? Entry->Checksum2 : Entry->Checksum1;
+    BOOLEAN checksum_present =
+        Secondary ? Entry->ChecksumPresent2 : Entry->ChecksumPresent1;
+    UINT8 code_checksum;
 
     if (!Entry->Valid || address == 0) {
         return 0;
     }
-    return length == 0 ||
-           sal_vector_code_checksum(address, length) == checksum;
+    if (!checksum_present) {
+        return 1;
+    }
+
+    code_checksum = sal_vector_code_checksum(address, length);
+    if (SAL_REVISION < 0x0300U) {
+        return code_checksum == checksum;
+    }
+    return (UINT8)(code_checksum + checksum) == 0;
+}
+
+static BOOLEAN sal_decode_vector_length(UINT64 LengthArg,
+                                        SAL_VECTOR_LENGTH *Decoded)
+{
+    if (SAL_REVISION < 0x0300U) {
+        Decoded->Length = LengthArg;
+        Decoded->Checksum = 0;
+        Decoded->ChecksumPresent = LengthArg != 0;
+        return 1;
+    }
+
+    if ((LengthArg & SAL_VECTOR_LENGTH_CS_RESERVED_MASK) != 0) {
+        return 0;
+    }
+
+    Decoded->Length = LengthArg & SAL_VECTOR_LENGTH_MASK;
+    if ((Decoded->Length & 0xfU) != 0) {
+        return 0;
+    }
+    Decoded->Checksum =
+        (UINT8)(LengthArg >> SAL_VECTOR_CHECKSUM_SHIFT);
+    Decoded->ChecksumPresent =
+        (LengthArg & SAL_VECTOR_CHECKSUM_PRESENT) != 0;
+    return 1;
 }
 
 static SAL_RETURN_VALUE __attribute__((noinline))
 sal_set_vectors(UINT64 VectorType, UINT64 PhysAddr1, UINT64 Gp1,
-                UINT64 Length1, UINT64 PhysAddr2, UINT64 Gp2,
-                UINT64 Length2)
+                UINT64 LengthArg1, UINT64 PhysAddr2, UINT64 Gp2,
+                UINT64 LengthArg2)
 {
     SAL_VECTOR_REGISTRATION *entry;
+    SAL_VECTOR_LENGTH length1;
+    SAL_VECTOR_LENGTH length2;
 
     /*
-     * Compatibility debt: SAL 3.0 names Arg4/Arg7 length_cs and packs the
-     * length, checksum-present bit, and checksum into them.  This path still
-     * accepts the older plain-length form and computes the checksum itself.
-     * Keep that distinction visible until both forms have guest coverage.
+     * SAL 2.8/2.9 pass a plain handler length and require SAL to calculate
+     * the checksum.  SAL 3.0 changed the ABI to packed length_cs fields.
+     * The advertised SAL revision is the only unambiguous decoder.
      */
-    if (VectorType >= SAL_VECTOR_COUNT ||
-        !sal_vector_entry_valid(PhysAddr1, Gp1, Length1) ||
+    if (!sal_decode_vector_length(LengthArg1, &length1) ||
+        !sal_decode_vector_length(LengthArg2, &length2) ||
+        VectorType >= SAL_VECTOR_COUNT ||
+        !sal_vector_entry_valid(PhysAddr1, Gp1, length1.Length) ||
         (VectorType == SAL_VECTOR_OS_INIT &&
          ((PhysAddr1 == 0) != (PhysAddr2 == 0) ||
-          !sal_vector_entry_valid(PhysAddr2, Gp2, Length2))) ||
+          !sal_vector_entry_valid(PhysAddr2, Gp2, length2.Length))) ||
         (VectorType != SAL_VECTOR_OS_INIT &&
-         (PhysAddr2 != 0 || Gp2 != 0 || Length2 != 0))) {
+         (PhysAddr2 != 0 || Gp2 != 0 || LengthArg2 != 0))) {
         return sal_return(SAL_STATUS_INVALID_ARGUMENT, 0, 0, 0);
     }
 
     entry = &mSalVectors[VectorType];
     entry->HandlerAddr1 = PhysAddr1;
     entry->Gp1 = Gp1;
-    entry->HandlerLen1 = PhysAddr1 != 0 ? Length1 : 0;
-    entry->Checksum1 =
-        PhysAddr1 != 0 && Length1 != 0 ?
-        sal_vector_code_checksum(PhysAddr1, Length1) : 0;
+    entry->HandlerLen1 = PhysAddr1 != 0 ? length1.Length : 0;
+    entry->ChecksumPresent1 =
+        PhysAddr1 != 0 && length1.ChecksumPresent;
+    entry->Checksum1 = length1.Checksum;
+    if (SAL_REVISION < 0x0300U && entry->ChecksumPresent1) {
+        entry->Checksum1 =
+            sal_vector_code_checksum(PhysAddr1, length1.Length);
+    }
     entry->HandlerAddr2 = PhysAddr2;
     entry->Gp2 = Gp2;
-    entry->HandlerLen2 = PhysAddr2 != 0 ? Length2 : 0;
-    entry->Checksum2 =
-        PhysAddr2 != 0 && Length2 != 0 ?
-        sal_vector_code_checksum(PhysAddr2, Length2) : 0;
+    entry->HandlerLen2 = PhysAddr2 != 0 ? length2.Length : 0;
+    entry->ChecksumPresent2 =
+        PhysAddr2 != 0 && length2.ChecksumPresent;
+    entry->Checksum2 = length2.Checksum;
+    if (SAL_REVISION < 0x0300U && entry->ChecksumPresent2) {
+        entry->Checksum2 =
+            sal_vector_code_checksum(PhysAddr2, length2.Length);
+    }
     entry->Valid = PhysAddr1 != 0;
     __asm__ volatile ("mf;;" : : : "memory");
     return sal_return(SAL_STATUS_SUCCESS, 0, 0, 0);
+}
+
+static UINT64 sal_vector_test_length_cs(UINT64 Address, UINT64 Length)
+{
+    UINT8 checksum =
+        (UINT8)(0U - sal_vector_code_checksum(Address, Length));
+
+    return Length | SAL_VECTOR_CHECKSUM_PRESENT |
+           ((UINT64)checksum << SAL_VECTOR_CHECKSUM_SHIFT);
 }
 
 static BOOLEAN __attribute__((noinline)) sal_set_vectors_selftest(void)
@@ -3092,6 +3159,8 @@ static BOOLEAN __attribute__((noinline)) sal_set_vectors_selftest(void)
     SAL_RETURN_VALUE init_checksum_valid;
     SAL_RETURN_VALUE bad_handler_alignment;
     SAL_RETURN_VALUE bad_code_range;
+    SAL_RETURN_VALUE bad_length_alignment;
+    SAL_RETURN_VALUE bad_length_reserved;
     UINT8 saved_byte;
     UINTN i;
     BOOLEAN ok;
@@ -3099,6 +3168,8 @@ static BOOLEAN __attribute__((noinline)) sal_set_vectors_selftest(void)
     for (i = 0; i < SAL_VECTOR_COUNT; i++) {
         saved[i] = mSalVectors[i];
     }
+    code1[0] = 0x5aU;
+    code2[0] = 0xa5U;
 
     mca_valid = sal_set_vectors(SAL_VECTOR_OS_MCA,
                                 (UINTN)code1, 0, sizeof(code1),
@@ -3111,22 +3182,35 @@ static BOOLEAN __attribute__((noinline)) sal_set_vectors_selftest(void)
                                     (UINTN)code2, 0, 0);
     init_checksum_valid =
         sal_set_vectors(SAL_VECTOR_OS_INIT,
-                        (UINTN)code1, 0, sizeof(code1),
-                        (UINTN)code2, 0, sizeof(code2));
+                        (UINTN)code1, 0,
+                        sal_vector_test_length_cs(
+                            (UINTN)code1, sizeof(code1)),
+                        (UINTN)code2, 0,
+                        sal_vector_test_length_cs(
+                            (UINTN)code2, sizeof(code2)));
     bad_handler_alignment =
         sal_set_vectors(SAL_VECTOR_OS_BOOT_RENDEZ,
                         (UINTN)code1 + 1U, 0, 0, 0, 0, 0);
     bad_code_range =
         sal_set_vectors(SAL_VECTOR_OS_BOOT_RENDEZ,
                         mGuestLowRamEnd & ~0xfULL, 0, 32, 0, 0, 0);
+    bad_length_alignment =
+        sal_set_vectors(SAL_VECTOR_OS_BOOT_RENDEZ,
+                        (UINTN)code1, 0, 17, 0, 0, 0);
+    bad_length_reserved =
+        sal_set_vectors(SAL_VECTOR_OS_BOOT_RENDEZ,
+                        (UINTN)code1, 0, 1ULL << 33, 0, 0, 0);
 
     ok = mca_valid.Status == SAL_STATUS_SUCCESS &&
+         !mSalVectors[SAL_VECTOR_OS_MCA].ChecksumPresent1 &&
          bad_secondary.Status == SAL_STATUS_INVALID_ARGUMENT &&
          bad_type.Status == SAL_STATUS_INVALID_ARGUMENT &&
          init_mismatch.Status == SAL_STATUS_INVALID_ARGUMENT &&
          init_checksum_valid.Status == SAL_STATUS_SUCCESS &&
          bad_handler_alignment.Status == SAL_STATUS_INVALID_ARGUMENT &&
          bad_code_range.Status == SAL_STATUS_INVALID_ARGUMENT &&
+         bad_length_alignment.Status == SAL_STATUS_INVALID_ARGUMENT &&
+         bad_length_reserved.Status == SAL_STATUS_INVALID_ARGUMENT &&
          sal_vector_registration_authentic(
              &mSalVectors[SAL_VECTOR_OS_INIT], 0) &&
          sal_vector_registration_authentic(
@@ -3262,6 +3346,12 @@ sal_cache_flush(UINT64 IorD, UINT64 Reserved1, UINT64 Reserved2,
         return sal_return(SAL_STATUS_INVALID_ARGUMENT, 0, 0, 0);
     }
 
+    /*
+     * The machine has no platform cache, and QEMU makes guest RAM stores
+     * coherent with translated instructions.  Retire preceding memory
+     * accesses before reporting that the architected effect is complete.
+     */
+    __asm__ volatile ("mf;;" : : : "memory");
     return sal_return(SAL_STATUS_SUCCESS, 0, 0, 0);
 }
 
@@ -3308,7 +3398,7 @@ sal_mc_rendez(UINT64 Reserved1, UINT64 Reserved2, UINT64 Reserved3,
     if (Reserved1 != 0 || Reserved2 != 0 || Reserved3 != 0 ||
         Reserved4 != 0 || Reserved5 != 0 || Reserved6 != 0 ||
         Reserved7 != 0) {
-        return sal_return(SAL_STATUS_ERROR, 0, 0, 0);
+        return sal_return(SAL_STATUS_INVALID_ARGUMENT, 0, 0, 0);
     }
 
     return sal_return(SAL_STATUS_SUCCESS, 0, 0, 0);
@@ -3326,7 +3416,7 @@ static BOOLEAN __attribute__((noinline)) sal_mc_rendez_selftest(void)
     }
 
     invalid = sal_mc_rendez(1, 0, 0, 0, 0, 0, 0);
-    return invalid.Status == SAL_STATUS_ERROR &&
+    return invalid.Status == SAL_STATUS_INVALID_ARGUMENT &&
            invalid.Value0 == 0 && invalid.Value1 == 0 && invalid.Value2 == 0;
 }
 
@@ -3475,6 +3565,14 @@ sal_physical_id_info(UINT64 Reserved1, UINT64 Reserved2, UINT64 Reserved3,
                      UINT64 Reserved4, UINT64 Reserved5, UINT64 Reserved6,
                      UINT64 Reserved7)
 {
+    /*
+     * SAL_PHYSICAL_ID_INFO was added after SAL 3.0.  A caller must not infer
+     * a later procedure set from this firmware's single-domain topology.
+     */
+    if (SAL_REVISION < 0x0340U) {
+        return sal_return(SAL_STATUS_NOT_IMPLEMENTED, 0, 0, 0);
+    }
+
     if (Reserved7 != 0 ||
         !sal_reserved_args_are_zero(Reserved1, Reserved2, Reserved3,
                                     Reserved4, Reserved5, Reserved6)) {
@@ -3517,8 +3615,12 @@ static BOOLEAN __attribute__((noinline)) sal_physical_services_selftest(void)
         sal_register_physical_addr(SAL_PHYSICAL_ENTITY_PAL_PROC,
                                    0x2000, 0, 0, 1, 0, 0);
 
-    ok = id.Status == SAL_STATUS_SUCCESS && id.Value0 == 0 &&
-         id_bad_reserved.Status == SAL_STATUS_INVALID_ARGUMENT &&
+    ok = ((SAL_REVISION < 0x0340U &&
+           id.Status == SAL_STATUS_NOT_IMPLEMENTED &&
+           id_bad_reserved.Status == SAL_STATUS_NOT_IMPLEMENTED) ||
+          (SAL_REVISION >= 0x0340U &&
+           id.Status == SAL_STATUS_SUCCESS && id.Value0 == 0 &&
+           id_bad_reserved.Status == SAL_STATUS_INVALID_ARGUMENT)) &&
          reg.Status == SAL_STATUS_SUCCESS &&
          reg_bad_entity.Status == SAL_STATUS_INVALID_ARGUMENT &&
          reg_bad_reserved.Status == SAL_STATUS_INVALID_ARGUMENT;
@@ -33151,34 +33253,6 @@ static EFI_STATUS rs_convert_runtime_tables(void)
         }
     }
 
-    /*
-     * HalpCallEfiVirtual dereferences the descriptor and branches to the raw
-     * entry point, so a fault or an unexpected device access inside a runtime
-     * service reports an address that belongs to no loaded guest module.
-     * Publish the post-conversion entry points once, while the descriptors
-     * are still reachable physically, so such an address can be attributed.
-     */
-    {
-        static const char *const service_names[] = {
-            "GetTime", "SetTime", "GetWakeupTime", "SetWakeupTime",
-            "GetVariable", "GetNextVariableName", "SetVariable",
-            "GetNextHighMonotonicCount", "ResetSystem", "QueryVariableInfo",
-            "Fpswa",
-        };
-
-        for (i = 0; i < FW_ARRAY_SIZE(function_descriptors); i++) {
-            const UINTN *descriptor = (const UINTN *)function_descriptors[i];
-
-            uart_puts("EFI runtime ");
-            uart_puts(service_names[i]);
-            uart_puts(" entry=0x");
-            uart_put_hex64(descriptor[0]);
-            uart_puts(" gp=0x");
-            uart_put_hex64(descriptor[1]);
-            uart_puts("\r\n");
-        }
-    }
-
     mRuntimeServices.GetTime = get_time;
     mRuntimeServices.SetTime = set_time;
     mRuntimeServices.GetWakeupTime = get_wakeup_time;
@@ -35368,7 +35442,8 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
     uart_puts(sal_mc_set_params_selftest() ? "argument checks verified\r\n" :
               "verification failed\r\n");
     uart_puts("SAL Physical IDs:     ");
-    uart_puts(sal_physical_services_selftest() ? "argument checks verified\r\n" :
+    uart_puts(sal_physical_services_selftest() ?
+              "revision and argument checks verified\r\n" :
               "verification failed\r\n");
     uart_puts("SAL Cache Services:   ");
     uart_puts(sal_cache_services_selftest() ? "argument checks verified\r\n" :

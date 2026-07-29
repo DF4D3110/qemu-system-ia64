@@ -742,8 +742,11 @@ static void ia64_cpu_apply_boot_info(IA64CPU *cpu)
     env->ip = info->firmware_entry;
     env->br[IA64_BR_RETURN_LINK] = info->firmware_entry;
     env->cr_iva = info->iva;
-    /* Preserve the platform's historical boot-time PTA value. */
-    env->cr_pta = 0x0000000000000030ULL;
+    /*
+     * Start with the VHPT walker disabled and the architected minimum table
+     * size.  A size smaller than 15 is a reserved PTA encoding.
+     */
+    env->cr_pta = 15ULL << IA64_PTA_SIZE_SHIFT;
     env->cr_dcr = IA64_DCR_DM | IA64_DCR_DP;
     env->ar_kr0 =
         ia64_cpu_default_io_block_pa(IA64_CPU_GET_CLASS(cpu));
