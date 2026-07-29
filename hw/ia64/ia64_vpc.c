@@ -96,8 +96,9 @@
 #define IA64_VGA_LEGACY_SIZE   0x00020000U
 #ifdef CONFIG_IA64_VPC_GRAPHICS
 #define IA64_INT10_ROM_BASE     0x000c0000U
-#define IA64_INT10_ROM_SIZE     0x00000200U
+#define IA64_INT10_ROM_SIZE     0x00000800U
 #define IA64_INT10_ROM_PCIR_OFFSET    0x0020U
+#define IA64_INT10_ROM_ATI_SIGNATURE_OFFSET 0x0074U
 #define IA64_INT10_ROM_ATI_HEADER_OFFSET 0x0080U
 #define IA64_INT10_ROM_ATI_PLL_OFFSET 0x00c0U
 #define IA64_INT10_ROM_HANDLER_OFFSET 0x0100U
@@ -1128,6 +1129,8 @@ static void ia64_int10_install_ati_bios_info(uint8_t *rom,
                                              uint16_t vendor,
                                              uint16_t device)
 {
+    static const char ati_bios_signature[] = "761295520";
+
     if (vendor != IA64_ATI_VENDOR_ID || device != IA64_ATI_RAGE128_PF_ID) {
         return;
     }
@@ -1143,7 +1146,15 @@ static void ia64_int10_install_ati_bios_info(uint8_t *rom,
      * Values use the units defined by the Rage128 BIOS interface: clocks
      * are in 10 kHz units.  They match the range supported by QEMU's
      * Rage128-compatible display model and its existing VGA BIOS.
+     *
+     * Early IA-64 Rage128 miniports also use VideoPortScanRom() to locate
+     * this ATI BIOS identifier in the first 256 bytes, then reject ROMs
+     * smaller than four 512-byte blocks.  Keep the identifier immediately
+     * before the ATI header; IA64_INT10_ROM_SIZE supplies the required
+     * minimum image length.
      */
+    memcpy(rom + IA64_INT10_ROM_ATI_SIGNATURE_OFFSET,
+           ati_bios_signature, sizeof(ati_bios_signature));
     stw_le_p(rom + 0x48, IA64_INT10_ROM_ATI_HEADER_OFFSET);
     stw_le_p(rom + IA64_INT10_ROM_ATI_HEADER_OFFSET + 0x30,
              IA64_INT10_ROM_ATI_PLL_OFFSET);

@@ -44,9 +44,10 @@
 #define IA64_IOSAPIC_RTE_MASKED      BIT(16)
 #define IA64_TEST_RAM_SIZE           (256 * MiB)
 #define IA64_INT10_ROM_BASE          0x000c0000ULL
-#define IA64_INT10_ROM_SIZE          0x00000200U
+#define IA64_INT10_ROM_SIZE          0x00000800U
 #define IA64_INT10_VECTOR_ADDR       0x00000040ULL
 #define IA64_INT10_ROM_PCIR_OFFSET   0x0020U
+#define IA64_INT10_ROM_ATI_SIGNATURE_OFFSET 0x0074U
 #define IA64_INT10_ROM_ATI_HEADER_OFFSET 0x0080U
 #define IA64_INT10_ROM_ATI_PLL_OFFSET 0x00c0U
 #define IA64_INT10_ROM_HANDLER_OFFSET 0x0100U
@@ -285,7 +286,7 @@ static void test_int10_rom(void)
     qtest_memread(qts, IA64_INT10_ROM_BASE, rom, sizeof(rom));
     g_assert_cmphex(rom[0], ==, 0x55);
     g_assert_cmphex(rom[1], ==, 0xaa);
-    g_assert_cmphex(rom[2], ==, 1);
+    g_assert_cmphex(rom[2], ==, IA64_INT10_ROM_SIZE / 512);
     g_assert_cmphex(lduw_le_p(rom + 0x0d), ==,
                     IA64_INT10_ROM_HANDLER_OFFSET);
     g_assert_cmphex(lduw_le_p(rom + 0x13), ==,
@@ -297,7 +298,11 @@ static void test_int10_rom(void)
                     ==, 0x1002);
     g_assert_cmphex(lduw_le_p(rom + IA64_INT10_ROM_PCIR_OFFSET + 6),
                     ==, 0x5046);
+    g_assert_cmphex(lduw_le_p(rom + IA64_INT10_ROM_PCIR_OFFSET + 0x10),
+                    ==, IA64_INT10_ROM_SIZE / 512);
     g_assert_cmpmem(rom + 0x60, 19, "QEMU IA64 VBE INT10", 19);
+    g_assert_cmpmem(rom + IA64_INT10_ROM_ATI_SIGNATURE_OFFSET, 10,
+                    "761295520", 10);
     ati_header = lduw_le_p(rom + 0x48);
     g_assert_cmphex(ati_header, ==, IA64_INT10_ROM_ATI_HEADER_OFFSET);
     ati_pll = lduw_le_p(rom + ati_header + 0x30);

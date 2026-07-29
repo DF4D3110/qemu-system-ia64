@@ -207,6 +207,8 @@ typedef struct {
 #define TEST_ECAM_SIZE               0x0000000010000000ULL
 #define TEST_PCI_MMIO_BASE           0x00000000c1000000ULL
 #define TEST_PCI_MMIO_SIZE           0x0000000010000000ULL
+#define TEST_VGA_ROM_BASE            0x00000000000c0000ULL
+#define TEST_VGA_ROM_SIZE            0x0000000000008000ULL
 #define TEST_SPARSE_IO_BASE          IA64_TEST_LEGACY_IO_BASE
 #define TEST_SPARSE_IO_SIZE          IA64_TEST_LEGACY_IO_SIZE
 #define TEST_PM_IO_BASE              0x2000U
@@ -1921,6 +1923,7 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
     BOOLEAN bus = 0;
     BOOLEAN io = 0;
     BOOLEAN legacy_memory = 0;
+    BOOLEAN rom_memory = 0;
     BOOLEAN memory = 0;
     BOOLEAN uart_window = 0;
     BOOLEAN end_tag = 0;
@@ -1970,6 +1973,16 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
                        get_u32(descriptor + 18U) == 0 &&
                        get_u32(descriptor + 22U) == 0x00020000U) {
                 legacy_memory = 1;
+            } else if (descriptor[0] == 0x87U && length == 23U &&
+                       descriptor[3] == 0U && descriptor[4] == 0x0cU &&
+                       descriptor[5] == 0x02U &&
+                       get_u32(descriptor + 6U) == 0 &&
+                       get_u32(descriptor + 10U) == TEST_VGA_ROM_BASE &&
+                       get_u32(descriptor + 14U) ==
+                           TEST_VGA_ROM_BASE + TEST_VGA_ROM_SIZE - 1U &&
+                       get_u32(descriptor + 18U) == 0 &&
+                       get_u32(descriptor + 22U) == TEST_VGA_ROM_SIZE) {
+                rom_memory = 1;
             } else if (descriptor[0] == 0x8aU && length == 43U &&
                        descriptor[3] == 0U &&
                        get_u64(descriptor + 6U) == 0 &&
@@ -2000,7 +2013,8 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
             offset += 1U + length;
         }
     }
-    return bus && io && legacy_memory && memory && uart_window && end_tag;
+    return bus && io && legacy_memory && rom_memory && memory &&
+           uart_window && end_tag;
 }
 
 static BOOLEAN test_ssdt_uart_crs(const TEST_TABLE_CONTEXT *Context)

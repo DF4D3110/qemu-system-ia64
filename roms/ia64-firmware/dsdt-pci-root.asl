@@ -30,6 +30,13 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                 DWordMemory (ResourceProducer, PosDecode, MinFixed,
                     MaxFixed, Cacheable, ReadWrite,
                     0, 0x000A0000, 0x000BFFFF, 0, 0x00020000)
+                /*
+                 * VideoPortGetDeviceBase() translates legacy option-ROM
+                 * addresses through the PCI root bridge.
+                 */
+                DWordMemory (ResourceProducer, PosDecode, MinFixed,
+                    MaxFixed, Cacheable, ReadOnly,
+                    0, 0x000C0000, 0x000C7FFF, 0, 0x00008000)
                 QWordMemory (ResourceProducer, PosDecode, MinFixed,
                     MaxFixed, NonCacheable, ReadWrite,
                     0, 0xC1000000, 0xD0FFFFFF, 0, 0x10000000)
