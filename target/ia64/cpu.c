@@ -914,6 +914,7 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
     cc->gdb_write_register = ia64_cpu_gdb_write_register;
     cc->gdb_num_core_regs = IA64_GDB_NUM_CORE_REGS;
     cc->tcg_ops = &ia64_tcg_ops;
+    dc->vmsd = &vmstate_ia64_cpu;
 
     icc->model = IA64_CPU_MODEL_MONTECITO;
     icc->cpuid_version = 0x0000000020000704ULL;

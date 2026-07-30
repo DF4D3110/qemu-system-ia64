@@ -1276,6 +1276,7 @@ typedef enum IA64CPUModel {
 
 void ia64_cpu_set_boot_info(IA64CPU *cpu, const IA64BootInfo *info);
 void ia64_cpu_reset_to_boot_info(IA64CPU *cpu);
+extern const VMStateDescription vmstate_ia64_cpu;
 
 struct IA64CPUClass {
     CPUClass parent_class;
