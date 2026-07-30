@@ -168,7 +168,8 @@ static bool ia64_reserved_pfs_field(uint64_t value)
 {
     uint32_t sof = value & 0x7f;
     uint32_t sol = (value >> 7) & 0x7f;
-    uint32_t sor = ((value >> 14) & 0xf) << 3;
+    uint32_t sor = (value >> 14) & 0xf;
+    uint32_t sor_regs = sor << 3;
     uint32_t rrb_gr = (value >> 18) & 0x7f;
     uint32_t rrb_fr = (value >> 25) & 0x7f;
     uint32_t rrb_pr = (value >> 32) & 0x3f;
@@ -177,8 +178,8 @@ static bool ia64_reserved_pfs_field(uint64_t value)
         (value & (0x3fffULL << 38))) {
         return true;
     }
-    return sof > IA64_STACKED_GR_COUNT || sol > sof || sor > sof ||
-           (sor ? rrb_gr >= sor : rrb_gr != 0) ||
+    return !ia64_cfm_frame_fields_valid(sof, sol, sor) ||
+           (sor_regs ? rrb_gr >= sor_regs : rrb_gr != 0) ||
            rrb_fr >= 96 || rrb_pr >= 48;
 }
 
@@ -898,20 +899,6 @@ void ia64_system_rsm(CPUIA64State *env, uint64_t imm)
 /* ---- Probe helper (optionally writes r1 and returns the probe result) ---- */
 /* ---- tak / thash / ttag helpers ---- */
 
-
-/* ---- mov from PSR helper ---- */
-
-uint64_t ia64_system_mov_psrgr_read(CPUIA64State *env, uint32_t unused)
-{
-    (void)unused;
-    /*
-     * PSR.ri is only defined as an rfi restart selector and becomes
-     * undefined after the restarted IA-64 instruction begins execution.
-     * The translator keeps it live internally to select a nonzero TB entry
-     * slot, so expose the chosen architectural undefined value of zero.
-     */
-    return env->psr & ~IA64_PSR_RI_MASK;
-}
 
 /* ---- mov to PSR helper ---- */
 

@@ -31,6 +31,11 @@
 #define IA64_GR_COUNT    128
 #define IA64_STACKED_GR_BASE   32
 #define IA64_STACKED_GR_COUNT  (IA64_GR_COUNT - IA64_STACKED_GR_BASE)
+/*
+ * Every suspended partial collection owns at least one record in the
+ * physical stacked-register window, so that window also bounds the cache.
+ */
+#define IA64_RSE_RNAT_SHADOW_COUNT IA64_STACKED_GR_COUNT
 #define IA64_PR_COUNT    64
 #define IA64_BR_COUNT    8
 #define IA64_AR_COUNT    128
@@ -49,7 +54,6 @@
 #define IA64_TLB_MAX     128
 /* Merced's non-architectural first-level data TLB. */
 #define IA64_DTLB1_MAX   32
-#define IA64_DTLB1_MICRO_SIZE 64
 
 /*
  * CPUID register 4 general features/capability bits.  A model advertises
@@ -233,6 +237,17 @@ static inline uint8_t ia64_rsc_pl(uint64_t rsc)
 #define IA64_IFS_IFM_MASK     (IA64_CFM_SOF_MASK | IA64_CFM_SOL_MASK | \
                                IA64_CFM_SOR_MASK | IA64_CFM_RRB_GR_MASK | \
                                IA64_CFM_RRB_FR_MASK | IA64_CFM_RRB_PR_MASK)
+
+/*
+ * CFM.sor is encoded in groups of eight general registers.  These are the
+ * frame-size constraints shared by alloc, AR.PFS and CR.IFS validation.
+ */
+static inline bool ia64_cfm_frame_fields_valid(uint32_t sof, uint32_t sol,
+                                               uint32_t sor)
+{
+    return sof <= IA64_STACKED_GR_COUNT && sol <= sof &&
+           (sor << 3) <= sof;
+}
 
 /* ---- PFS field definitions ---- */
 #define IA64_PFS_PFM_MASK     ((1ULL << 38) - 1)
@@ -653,6 +668,13 @@ typedef struct IA64MicroTlbEntry {
     bool valid;
 } IA64MicroTlbEntry;
 
+typedef struct IA64RnatShadowEntry {
+    uint64_t value;
+    uint64_t addr;
+    uint64_t defined;
+    bool valid;
+} IA64RnatShadowEntry;
+
 /*
  * The EFI 1.10 native debug-support ABI uses a fixed 1192-byte IA-64
  * context record.  Firmware places one record per vCPU immediately after
@@ -686,6 +708,8 @@ typedef struct IA64FirmwareDebugRseState {
     uint64_t load_rnat_addr;
     uint64_t load_rnat_defined;
     bool load_rnat_valid;
+    IA64RnatShadowEntry rnat_shadow[IA64_RSE_RNAT_SHADOW_COUNT];
+    uint8_t rnat_shadow_count;
     uint8_t cfm_sof;
     uint8_t cfm_sol;
     uint8_t cfm_sor;

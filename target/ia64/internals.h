@@ -52,13 +52,6 @@ typedef struct IA64MMUState {
     IA64TlbEntry tlb_data_l1[IA64_DTLB1_MAX];
     uint64_t tlb_data_l1_age[IA64_DTLB1_MAX];
     uint64_t tlb_data_l1_clock;
-    /*
-     * Derived last-page hints for the per-access DTLB1 LRU update.  Keep
-     * these separate from tlb_data_micro: the latter addresses DTLB2 slots,
-     * while a non-inclusive DTLB1 copy can outlive its DTLB2 source.
-     */
-    IA64MicroTlbEntry tlb_data_l1_micro[IA64_DTLB1_MICRO_SIZE];
-    uint32_t tlb_data_l1_generation;
     uint16_t tlb_data_count;
     uint16_t tlb_inst_count;
     uint8_t tlb_data_l1_count;
@@ -136,10 +129,13 @@ typedef struct IA64RSEState {
      *
      * RSE.BspLoad can walk a different collection from AR.BSPSTORE.  Its
      * value and defined mask therefore live in a separate fill-side latch.
-     * These latches model externally visible RSE effects; they are not new
-     * architectural registers.  UINT64_MAX rse_rnat_addr denotes an
-     * entirely undefined spill-side RNAT after mov-to-BSPSTORE, loadrs, or
-     * an RNAT collection spill.
+     * Internal partition movement can also suspend more than one partial
+     * collection.  The shadow entries retain both their values and explicit
+     * defined masks until the store pointer returns to them.  These latches
+     * model externally visible RSE effects; they are not new architectural
+     * registers.  UINT64_MAX rse_rnat_addr denotes an entirely undefined
+     * spill-side RNAT after mov-to-BSPSTORE, loadrs, or an RNAT collection
+     * spill.
      */
     uint64_t rse_rnat_addr;
     uint64_t rse_rnat_defined;
@@ -147,6 +143,8 @@ typedef struct IA64RSEState {
     uint64_t rse_load_rnat_addr;
     uint64_t rse_load_rnat_defined;
     bool rse_load_rnat_valid;
+    IA64RnatShadowEntry rse_rnat_shadow[IA64_RSE_RNAT_SHADOW_COUNT];
+    uint8_t rse_rnat_shadow_count;
 } IA64RSEState;
 
 typedef struct IA64AlatState {

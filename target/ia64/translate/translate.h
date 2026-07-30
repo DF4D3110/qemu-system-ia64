@@ -34,6 +34,7 @@ typedef struct IA64TranslationMemoryState {
     bool be_data;
     bool full_alat;
     uint64_t nat_known_clear[2];
+    uint64_t nat_known_set[2];
 } IA64TranslationMemoryState;
 
 typedef struct IA64TranslationRestartState {
@@ -58,12 +59,25 @@ typedef struct IA64TranslationBranchState {
     uint8_t cloop_zero_st1_slot;
 } IA64TranslationBranchState;
 
+typedef struct IA64TranslationRegisterState {
+    TCGv_i32 cfm_sof;
+    uint64_t pr_known_zero;
+    uint64_t pr_known_one;
+    uint64_t rse_dirty_known[2];
+    uint8_t cpl;
+    bool cfm_sof_valid;
+    bool cpl_known;
+    bool current_qp_known;
+    bool current_qp_value;
+} IA64TranslationRegisterState;
+
 typedef struct DisasContext {
     DisasContextBase base;
     CPUIA64State *env;
     IA64TranslationMemoryState memory;
     IA64TranslationRestartState restart;
     IA64TranslationBranchState branch;
+    IA64TranslationRegisterState reg;
 } DisasContext;
 
 typedef enum IA64GenResult {
@@ -108,12 +122,21 @@ TCGv_i64 ia64_gr_src(uint8_t reg);
 TCGv_i64 ia64_gen_fr_sig_read(uint8_t reg);
 TCGv_i64 ia64_fr_significand_src(uint8_t reg);
 TCGv_i64 ia64_gen_fr_nat_read(uint8_t reg);
+TCGv_i64 ia64_gen_fr_special_read(uint8_t reg);
+TCGv_i64 ia64_fr_binary_src(uint8_t reg);
 TCGv_i64 ia64_gen_gr_nat_read(uint8_t reg);
-void ia64_gen_gr_nat_clear(uint8_t reg);
-void ia64_gen_gr_nat_set(uint8_t reg);
-void ia64_gen_gr_nat_assign(uint8_t reg, TCGv_i64 bit);
-void ia64_gen_gr_nat_from_1(uint8_t dst, uint8_t src);
-void ia64_gen_gr_nat_from_2(uint8_t dst, uint8_t src1, uint8_t src2);
+bool ia64_gr_nat_is_known_clear(const Ia64Instruction *insn, uint8_t reg);
+bool ia64_gr_nat_is_known_set(const Ia64Instruction *insn, uint8_t reg);
+void ia64_gen_gr_nat_clear(const Ia64Instruction *insn, uint8_t reg);
+void ia64_gen_gr_nat_set(const Ia64Instruction *insn, uint8_t reg);
+void ia64_gen_gr_nat_assign(const Ia64Instruction *insn, uint8_t reg,
+                            TCGv_i64 bit);
+void ia64_gen_gr_nat_from_1(const Ia64Instruction *insn, uint8_t dst,
+                            uint8_t src);
+void ia64_gen_gr_nat_from_2(const Ia64Instruction *insn, uint8_t dst,
+                            uint8_t src1, uint8_t src2);
+void ia64_gen_gr_nat_from_3(const Ia64Instruction *insn, uint8_t dst,
+                            uint8_t src1, uint8_t src2, uint8_t src3);
 void ia64_gen_fr_nat_from_gr(uint8_t dst, uint8_t src);
 void ia64_gen_fr_mov(uint8_t reg, TCGv_i64 value);
 void ia64_gen_fr_mov_sig(uint8_t reg, TCGv_i64 value);
@@ -137,13 +160,15 @@ void ia64_gen_fr_load(DisasContext *ctx, uint8_t reg, TCGv_i64 addr,
 void ia64_gen_fr_set_nat(uint8_t reg);
 void ia64_gen_predicate_test_write(const Ia64Instruction *insn,
                                    TCGv_i64 cond, TCGv_i64 not_cond);
-void ia64_gen_gr_write_nat_clear(uint8_t reg, TCGv_i64 value);
+void ia64_gen_gr_write_nat_clear(const Ia64Instruction *insn, uint8_t reg,
+                                 TCGv_i64 value);
 void ia64_gen_check_nat_register(const Ia64Instruction *insn, uint8_t reg);
 void ia64_gen_check_nat_consumption(const Ia64Instruction *insn,
                                     uint8_t reg, uint64_t isr_access,
                                     Ia64NatConsumptionKind kind);
-void ia64_gen_gr_nat_from_1_or_unimplemented_va(uint8_t dst, uint8_t src,
-                                                uint8_t impl_va_msb);
+void ia64_gen_gr_nat_from_1_or_unimplemented_va(
+    const Ia64Instruction *insn, uint8_t dst, uint8_t src,
+    uint8_t impl_va_msb);
 MemOp ia64_data_memop(DisasContext *ctx, MemOp memop);
 void ia64_gen_check_alignment_access(const Ia64Instruction *insn,
                                      TCGv_i64 addr, uint32_t size,
@@ -185,7 +210,7 @@ void ia64_gen_exit_to_slot_completed(DisasContext *ctx, uint64_t ip,
                                      bool record_iipa,
                                      bool track_psr_suppression);
 void ia64_gen_sync_ip_for_helper(const Ia64Instruction *insn);
-void ia64_gen_note_stacked_gr_write(uint8_t reg);
+void ia64_gen_note_stacked_gr_write(const Ia64Instruction *insn, uint8_t reg);
 bool ia64_insn_must_start_group(const Ia64Instruction *insn);
 bool ia64_insn_must_end_group(const Ia64Instruction *insn);
 bool ia64_insn_requires_slot2(const Ia64Instruction *insn);

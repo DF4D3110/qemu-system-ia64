@@ -14,7 +14,6 @@ ia64_ss.add(files(
   'arch/pal.c',
   'arch/rse.c',
   'arch/simd-ops.c',
-  'arch/simd.c',
   'arch/system.c',
   'decode/decode.c',
   '../i386/tcg/translate.c',

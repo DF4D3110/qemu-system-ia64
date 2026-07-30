@@ -129,6 +129,23 @@ test_alloc_predicated_illegal = require_exception(
          nop_i()),
     ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
 
+test_alloc_rejects_frame_larger_than_register_stack = require_exception(
+    "alloc_rejects_frame_larger_than_register_stack", [
+        (0x10, 0x00, alloc_m(5, 97, 0, 0, 0), nop_i(), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+test_alloc_rejects_locals_larger_than_frame = require_exception(
+    "alloc_rejects_locals_larger_than_frame", [
+        (0x10, 0x00, alloc_m(5, 8, 9, 0, 0), nop_i(), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+test_alloc_rejects_rotating_region_larger_than_frame = require_exception(
+    "alloc_rejects_rotating_region_larger_than_frame", [
+        # In particular, SOF=0 used to expose count - 1 in GR rotation if
+        # malformed CFM state reached the RSE implementation.
+        (0x10, 0x00, alloc_m(5, 0, 0, 1, 0), nop_i(), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
 test_rse_alloc_call_ret = require_registers("rse_alloc_call_ret", [
     (0x10, 0x00, nop_m(), alloc(2, 1, 1, 0, 0),
      adds(1, 0x42, 0)),
@@ -728,6 +745,28 @@ test_rse_merced_flushrs_invalidates_spilled_frame = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x10, cpu="merced")
 
+"""A backing-store switch makes RNAT undefined on every processor model.
+Even when a later spill only defines a high suffix, ordinary data left in
+the collection-word location must not become NaT state."""
+test_rse_merced_partial_rnat_store_drops_undefined_prefix = require_registers(
+    "rse_merced_partial_rnat_store_drops_undefined_prefix", [
+        (0x10, *movl_mlx(3, 0x1001f8)),
+        (0x20, *movl_mlx(4, 1 << 11)),
+        (0x30, 0x00, st8(3, 4), nop_i(), nop_i()),
+        (0x40, *movl_mlx(3, 0x100160)),
+        (0x50, 0x00, mov_ar(3, 18), nop_i(), nop_i()),
+        (0x60, 0x00, nop_m(), alloc(1, 19, 0, 0, 0), nop_i()),
+        (0x70, 0x18, nop_m(), nop_m(), cover_b()),
+        (0x80, 0x00, flushrs_enc(), nop_i(), nop_i()),
+        (0x90, *movl_mlx(3, 0x1001f8)),
+        (0xa0, 0x00, ld8(8, 3), nop_i(), nop_i()),
+        (0xb0, 0x10, nop_m(), nop_i(), br_cond(0xb0, 0xb0)),
+    ], {
+        "ip": 0xb0,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0,
+    }, entry=0x10, cpu="merced")
+
 test_rse_merced_return_publishes_filled_rnat_collection = require_registers(
     "rse_merced_return_publishes_filled_rnat_collection", [
         (0x10, *movl_mlx(3, 0x100000)),
@@ -751,6 +790,44 @@ test_rse_merced_return_publishes_filled_rnat_collection = require_registers(
         "r8": 1 << 56,
         "cfm_sof": 40,
         "cfm_sol": 40,
+    }, entry=0x10, cpu="merced")
+
+"""A mandatory return fill publishes the completed NaT collection in RNAT.
+If the restored suffix of that collection is covered and spilled again, the
+RSE must preserve the already-backed lower prefix when it writes the
+collection word.  In particular, rebinding the spill state must not discard
+the matching fill-side collection that mov-from-RNAT just exposed."""
+test_rse_merced_respill_preserves_filled_rnat_prefix = require_registers(
+    "rse_merced_respill_preserves_filled_rnat_prefix", [
+        (0x10, *movl_mlx(3, 0x100000)),
+        (0x20, 0x00, mov_ar(3, 18), nop_i(), nop_i()),
+        (0x30, 0x00, nop_m(), alloc(1, 63, 0, 0, 0), nop_i()),
+        (0x40, 0x00, mov_m_imm_ar(36, 1), addl(6, 0x400, 0), nop_i()),
+        (0x50, 0x08, ld8_fill_postinc(42, 6, 0), nop_i(), nop_i()),
+        (0x60, 0x18, nop_m(), nop_m(), cover_b()),
+        (0x70, 0x00, flushrs_enc(), nop_i(), nop_i()),
+        (0x80, *movl_mlx(3, 0x1001f8)),
+        (0x90, 0x00, ld8(8, 3), nop_i(), nop_i()),
+        (0xa0, *movl_mlx(4, 40 | (40 << 7))),
+        (0xb0, 0x00, mov_m_gr_ar(4, 64), nop_i(), nop_i()),
+        (0xc0, *movl_mlx(5, 0x100)),
+        (0xd0, 0x09, nop_m(), nop_m(), mov_b_gr(0, 5)),
+        (0xe0, 0x10, nop_m(), nop_i(), br_ret(0)),
+        (0x100, 0x00, mov_m_ar_gr(9, 19), nop_i(), nop_i()),
+        (0x110, 0x18, nop_m(), nop_m(), cover_b()),
+        (0x120, 0x00, flushrs_enc(), nop_i(), nop_i()),
+        (0x130, *movl_mlx(3, 0x1001f8)),
+        (0x140, 0x00, ld8(10, 3), nop_i(), nop_i()),
+        (0x150, 0x10, nop_m(), nop_i(), br_cond(0x150, 0x150)),
+        (0x400, 0x00, 0, 0, 0),
+    ], {
+        "ip": 0x150,
+        "exception": IA64_EXCP_NONE,
+        "r8": 1 << 10,
+        "r9": 1 << 10,
+        "r10": 1 << 10,
+        "cfm_sof": 0,
+        "cfm_sol": 0,
     }, entry=0x10, cpu="merced")
 
 test_rse_cover_flushrs_spills_covered_frame = require_registers(
@@ -1001,12 +1078,11 @@ test_rse_return_reclaims_clean_keeps_unreached_rnat = require_registers(
     }, entry=0x10)
 
 """A br.ret that reclaims clean registers moves AR.BSPSTORE down without
-any RSE traffic.  When it lands in a different NaT collection group the
-bits AR.RNAT accumulated for the group it left describe registers this
-group never held.  Here r111 is spilled with its NaT set into the second
-collection (bit 16), the return rebases BSPSTORE into the first collection
-at bit 56, and the following complete RNAT spill must materialize undefined
-bits as zero rather than merging the old word at 0x1001f8."""
+any RSE traffic.  Here r95 is spilled with its NaT set into the second
+collection (bit 0), the return rebases BSPSTORE into the first collection
+at bit 56, and a shortened frame completes exactly that first collection.
+The partial second collection must remain visible when BSPSTORE reaches it
+again even though no register from that collection was spilled twice."""
 test_rse_return_reclaims_clean_rebases_rnat_collection = require_registers(
     "rse_return_reclaims_clean_rebases_rnat_collection", [
         (0x10, *movl_mlx(3, 0x100000)),
@@ -1016,7 +1092,7 @@ test_rse_return_reclaims_clean_rebases_rnat_collection = require_registers(
          nop_i()),
         (0x40, 0x00, mov_m_imm_ar(36, 1), addl(6, 0x200, 0),
          nop_i()),
-        (0x50, 0x08, ld8_fill_postinc(111, 6, 0), nop_i(),
+        (0x50, 0x08, ld8_fill_postinc(95, 6, 0), nop_i(),
          nop_i()),
         (0x60, 0x18, nop_m(), nop_m(),
          cover_b()),
@@ -1030,23 +1106,25 @@ test_rse_return_reclaims_clean_rebases_rnat_collection = require_registers(
          mov_b_gr(0, 5)),
         (0xc0, 0x10, nop_m(), nop_i(),
          br_ret(0)),
-        (0x100, 0x00, mov_m_ar_gr(8, 19), nop_i(),
+        (0x100, 0x00, nop_m(), alloc(1, 7, 0, 0, 0),
          nop_i()),
         (0x110, 0x18, nop_m(), nop_m(),
          cover_b()),
         (0x120, 0x00, flushrs_enc(), nop_i(),
          nop_i()),
-        (0x130, *movl_mlx(7, 0x1001f8)),
-        (0x140, 0x00, ld8(10, 7), nop_i(),
+        (0x130, 0x00, mov_m_ar_gr(8, 19), nop_i(),
          nop_i()),
-        (0x150, 0x10, nop_m(), nop_i(),
-         br_cond(0x150, 0x150)),
+        (0x140, *movl_mlx(7, 0x1001f8)),
+        (0x150, 0x00, ld8(10, 7), nop_i(),
+         nop_i()),
+        (0x160, 0x10, nop_m(), nop_i(),
+         br_cond(0x160, 0x160)),
         (0x200, 0x00, 0, 0,
          0),
     ], {
-        "ip": 0x150,
+        "ip": 0x160,
         "exception": IA64_EXCP_NONE,
-        "r8": 0,
+        "r8": 1,
         "r10": 0,
     }, entry=0x10)
 
@@ -4230,6 +4308,24 @@ test_predicated_off_stacked_gr_destination_does_not_fault = require_registers(
         "r32": 0,
     }, entry=0x10)
 
+test_predicated_off_stacked_write_keeps_following_write_valid = \
+    require_registers(
+        "predicated_off_stacked_write_keeps_following_write_valid", [
+            (0x10, 0x00, alloc_m(9, 2, 2, 0, 0), nop_i(), nop_i()),
+            (0x20, 0x01, nop_m(), cmp_eq_imm(6, 7, 0, 0), nop_i()),
+            (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x50)),
+            # The p7 write is the first frame check in this translation
+            # block.  Its false predicate must not affect the next check.
+            (0x50, 0x01, nop_m(), adds(32, 1, 0, qp=7),
+             adds(33, 2, 0)),
+            (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+        ], {
+            "ip": 0x60,
+            "exception": IA64_EXCP_NONE,
+            "r32": 0,
+            "r33": 2,
+        }, entry=0x10)
+
 test_postincrement_base_out_of_frame = require_exception(
     "postincrement_base_out_of_frame", [
         (0x10, 0x08, lfetch_postinc(32, 8), nop_m(), nop_i()),
@@ -4331,6 +4427,9 @@ CASE_NAMES = (
 
     'alloc_m34_ignored_bits_decode',
     'alloc_predicated_illegal',
+    'alloc_rejects_frame_larger_than_register_stack',
+    'alloc_rejects_locals_larger_than_frame',
+    'alloc_rejects_rotating_region_larger_than_frame',
     'alloc_requires_group_start',
     'br_call_ret_rebases_rotating_floating_registers',
     'br_ctop_strcpy_pipeline_survives_cover_rfi',
@@ -4344,6 +4443,7 @@ CASE_NAMES = (
     'loadrs_rejects_nonzero_rsc_mode',
     'postincrement_base_out_of_frame',
     'predicated_off_stacked_gr_destination_does_not_fault',
+    'predicated_off_stacked_write_keeps_following_write_valid',
     'rsc_reserved_field_fault',
     'rsc_write_clips_pl_to_cpl',
     'rse_alloc_call_ret',
@@ -4396,6 +4496,8 @@ CASE_NAMES = (
     'rse_loadrs_zero_current_frame_invalidates_parents',
     'rse_loadrs_zero_sol_return_keeps_bsp_without_cover',
     'rse_merced_flushrs_invalidates_spilled_frame',
+    'rse_merced_partial_rnat_store_drops_undefined_prefix',
+    'rse_merced_respill_preserves_filled_rnat_prefix',
     'rse_merced_return_publishes_filled_rnat_collection',
     'rse_manual_rfi_loadrs_restores_current_frame_base',
     'rse_manual_rfi_smaller_frame_restores_current_frame_base',

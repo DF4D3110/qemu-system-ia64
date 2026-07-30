@@ -125,6 +125,10 @@ static inline uint64_t ia64_rse_rnat_low_mask(uint32_t bit)
     return bit >= 62 ? INT64_MAX : (1ULL << (bit + 1)) - 1;
 }
 
+static void ia64_rse_rnat_shadow_overlay(const CPUIA64State *env,
+                                         uint64_t addr, uint64_t *value,
+                                         uint64_t *defined);
+
 static uint64_t ia64_rse_compose_rnat(const CPUIA64State *env,
                                       uint64_t *defined_out)
 {
@@ -137,6 +141,7 @@ static uint64_t ia64_rse_compose_rnat(const CPUIA64State *env,
         defined = env->rse.rse_load_rnat_defined & INT64_MAX;
         value = env->rse.rse_load_rnat & defined;
     }
+    ia64_rse_rnat_shadow_overlay(env, collection_addr, &value, &defined);
     if (env->rse.rse_rnat_addr == collection_addr) {
         uint64_t spill_defined = env->rse.rse_rnat_defined & INT64_MAX;
 
@@ -187,6 +192,197 @@ static void ia64_rse_invalidate_load_rnat(CPUIA64State *env)
     env->rse.rse_load_rnat_valid = false;
 }
 
+static int ia64_rse_rnat_shadow_find(const CPUIA64State *env, uint64_t addr)
+{
+    unsigned i;
+
+    for (i = 0; i < env->rse.rse_rnat_shadow_count; i++) {
+        const IA64RnatShadowEntry *entry =
+            &env->rse.rse_rnat_shadow[i];
+
+        if (entry->valid && entry->addr == addr) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void ia64_rse_rnat_shadow_delete(CPUIA64State *env, unsigned slot)
+{
+    unsigned last = --env->rse.rse_rnat_shadow_count;
+
+    if (slot != last) {
+        env->rse.rse_rnat_shadow[slot] =
+            env->rse.rse_rnat_shadow[last];
+    }
+    memset(&env->rse.rse_rnat_shadow[last], 0,
+           sizeof(env->rse.rse_rnat_shadow[last]));
+}
+
+static void ia64_rse_rnat_shadow_clear_all(CPUIA64State *env)
+{
+    memset(env->rse.rse_rnat_shadow, 0,
+           sizeof(env->rse.rse_rnat_shadow));
+    env->rse.rse_rnat_shadow_count = 0;
+}
+
+static void ia64_rse_rnat_shadow_remove(CPUIA64State *env, uint64_t addr,
+                                        const char *operation)
+{
+    int slot = ia64_rse_rnat_shadow_find(env, addr);
+
+    if (slot >= 0) {
+        IA64RnatShadowEntry *entry = &env->rse.rse_rnat_shadow[slot];
+
+        trace_ia64_rse_rnat_shadow(env_cpu(env)->cpu_index, operation,
+                                   env->ip, slot, entry->addr, entry->value,
+                                   entry->defined);
+        ia64_rse_rnat_shadow_delete(env, slot);
+    }
+}
+
+static void ia64_rse_rnat_shadow_overlay(const CPUIA64State *env,
+                                         uint64_t addr, uint64_t *value,
+                                         uint64_t *defined)
+{
+    int slot = ia64_rse_rnat_shadow_find(env, addr);
+
+    if (slot >= 0) {
+        const IA64RnatShadowEntry *entry =
+            &env->rse.rse_rnat_shadow[slot];
+        uint64_t shadow_defined = entry->defined & INT64_MAX;
+
+        *value = (*value & ~shadow_defined) |
+                 (entry->value & shadow_defined);
+        *defined |= shadow_defined;
+    }
+}
+
+static void ia64_rse_rnat_shadow_stash(CPUIA64State *env)
+{
+    IA64RnatShadowEntry *entry;
+    uint64_t defined = env->rse.rse_rnat_defined & INT64_MAX;
+    int slot;
+
+    if (env->rse.rse_rnat_addr == UINT64_MAX || defined == 0) {
+        return;
+    }
+
+    slot = ia64_rse_rnat_shadow_find(env, env->rse.rse_rnat_addr);
+    if (slot < 0) {
+        if (env->rse.rse_rnat_shadow_count ==
+            IA64_RSE_RNAT_SHADOW_COUNT) {
+            /*
+             * The physical stacked-register window bounds the number of
+             * live partial collections.  Keep execution deterministic if
+             * that invariant is broken and emit the displaced address.
+             */
+            slot = 0;
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "ia64 RSE RNAT shadow overflow at ip=%016" PRIx64
+                          ", replacing collection %016" PRIx64 "\n",
+                          env->ip, env->rse.rse_rnat_shadow[slot].addr);
+        } else {
+            slot = env->rse.rse_rnat_shadow_count++;
+        }
+    }
+
+    entry = &env->rse.rse_rnat_shadow[slot];
+    if (entry->valid && entry->addr == env->rse.rse_rnat_addr) {
+        entry->value = (entry->value & ~defined) |
+                       (env->ar_rnat & defined);
+        entry->defined |= defined;
+    } else {
+        entry->value = env->ar_rnat & defined;
+        entry->addr = env->rse.rse_rnat_addr;
+        entry->defined = defined;
+        entry->valid = true;
+    }
+    entry->value &= entry->defined & INT64_MAX;
+    entry->defined &= INT64_MAX;
+    trace_ia64_rse_rnat_shadow(env_cpu(env)->cpu_index, "stash", env->ip,
+                               slot, entry->addr, entry->value,
+                               entry->defined);
+}
+
+static bool ia64_rse_rnat_shadow_take(CPUIA64State *env, uint64_t addr,
+                                      uint64_t *value, uint64_t *defined)
+{
+    int slot = ia64_rse_rnat_shadow_find(env, addr);
+    IA64RnatShadowEntry *entry;
+
+    if (slot < 0) {
+        *value = 0;
+        *defined = 0;
+        return false;
+    }
+
+    entry = &env->rse.rse_rnat_shadow[slot];
+    *defined = entry->defined & INT64_MAX;
+    *value = entry->value & *defined;
+    trace_ia64_rse_rnat_shadow(env_cpu(env)->cpu_index, "restore", env->ip,
+                               slot, entry->addr, *value, *defined);
+    ia64_rse_rnat_shadow_delete(env, slot);
+    return true;
+}
+
+static void ia64_rse_rnat_shadow_clip(CPUIA64State *env, uint64_t addr,
+                                      uint64_t keep)
+{
+    int slot = ia64_rse_rnat_shadow_find(env, addr);
+    IA64RnatShadowEntry *entry;
+
+    if (slot < 0) {
+        return;
+    }
+    entry = &env->rse.rse_rnat_shadow[slot];
+    entry->defined &= keep & INT64_MAX;
+    entry->value &= entry->defined;
+    if (entry->defined == 0) {
+        ia64_rse_rnat_shadow_delete(env, slot);
+    }
+}
+
+static void ia64_rse_rnat_bind(CPUIA64State *env, uint64_t collection_addr)
+{
+    uint64_t value = 0;
+    uint64_t defined = 0;
+    uint64_t shadow_value;
+    uint64_t shadow_defined;
+
+    if (env->rse.rse_rnat_addr == collection_addr) {
+        return;
+    }
+    trace_ia64_rse_rnat_rebind(env_cpu(env)->cpu_index, env->ip,
+                               env->rse.rse_rnat_addr, env->ar_rnat,
+                               env->rse.rse_rnat_defined, collection_addr);
+    ia64_rse_rnat_shadow_stash(env);
+    /*
+     * A completed collection obtained by a mandatory fill remains the
+     * authoritative backing-store image for bits below BSPSTORE.  When the
+     * store pointer later re-enters that collection part-way through, seed
+     * the spill latch from the matching fill-side value so the eventual
+     * collection store cannot erase the untouched prefix.
+     *
+     * A shadow entry contains newer, explicitly accumulated spill bits and
+     * therefore overlays the fill-side image.
+     */
+    if (env->rse.rse_load_rnat_valid &&
+        env->rse.rse_load_rnat_addr == collection_addr) {
+        defined = env->rse.rse_load_rnat_defined & INT64_MAX;
+        value = env->rse.rse_load_rnat & defined;
+    }
+    if (ia64_rse_rnat_shadow_take(env, collection_addr, &shadow_value,
+                                  &shadow_defined)) {
+        value = (value & ~shadow_defined) |
+                (shadow_value & shadow_defined);
+        defined |= shadow_defined;
+    }
+    env->ar_rnat = value;
+    env->rse.rse_rnat_addr = collection_addr;
+    env->rse.rse_rnat_defined = defined;
+}
+
 /*
  * Software has supplied AR.RNAT for the partial spill collection containing
  * AR.BSPSTORE.  Track the full collection address as well as RNATBitIndex:
@@ -207,6 +403,10 @@ void ia64_rse_rnat_reloaded(CPUIA64State *env)
         env->rse.rse_load_rnat_addr == collection_addr) {
         ia64_rse_invalidate_load_rnat(env);
     }
+    if (env->rse.rse_rnat_addr != collection_addr) {
+        ia64_rse_rnat_shadow_stash(env);
+    }
+    ia64_rse_rnat_shadow_remove(env, collection_addr, "reload-discard");
     env->rse.rse_rnat_addr = collection_addr;
     env->rse.rse_rnat_defined = ia64_rse_rnat_low_mask(bit);
     env->ar_rnat &= env->rse.rse_rnat_defined;
@@ -226,11 +426,14 @@ void ia64_rse_rnat_undefined(CPUIA64State *env)
     env->rse.rse_rnat_addr = UINT64_MAX;
     env->rse.rse_rnat_defined = 0;
     ia64_rse_invalidate_load_rnat(env);
+    ia64_rse_rnat_shadow_clear_all(env);
 }
 
 static void ia64_rse_rnat_move_bspstore(CPUIA64State *env, uint64_t bspstore)
 {
     uint64_t collection_addr = ia64_rse_collect_word(bspstore);
+    uint32_t bit = ia64_rse_collect_bit(bspstore);
+    uint64_t keep = ia64_rse_rnat_low_mask(bit);
 
     /*
      * This is internal br.ret/rfi partition movement, not architected
@@ -240,11 +443,10 @@ static void ia64_rse_rnat_move_bspstore(CPUIA64State *env, uint64_t bspstore)
      * incomplete frame temporarily moves BSPSTORE upward.
      */
     if (env->rse.rse_rnat_addr == collection_addr) {
-        uint32_t bit = ia64_rse_collect_bit(bspstore);
-
-        env->rse.rse_rnat_defined &= ia64_rse_rnat_low_mask(bit);
+        env->rse.rse_rnat_defined &= keep;
         env->ar_rnat &= env->rse.rse_rnat_defined;
     }
+    ia64_rse_rnat_shadow_clip(env, collection_addr, keep);
     env->ar_bspstore = bspstore;
 }
 
@@ -274,9 +476,23 @@ static inline uint32_t ia64_rse_nat_words_shrink(uint64_t addr, uint32_t nregs)
  * modulo the region size before the bottom-of-frame bias is applied
  * (register rotation, SDM Vol.1 4.5.3).
  */
+static uint32_t ia64_rse_rotating_gr_count(const CPUIA64State *env)
+{
+    uint32_t count = (uint32_t)env->cfm_sor << 3;
+
+    /*
+     * Architected writers reject a rotating region larger than SOF.  Treat
+     * malformed implementation state as having no rotating GRs so mapping
+     * and physical rotation remain consistent and cannot address outside
+     * the frame.
+     */
+    return count <= env->cfm_sof && count <= IA64_STACKED_GR_COUNT ?
+           count : 0;
+}
+
 static uint32_t ia64_rse_virt_to_phys(const CPUIA64State *env, uint32_t v)
 {
-    uint32_t sor_regs = (uint32_t)env->cfm_sor << 3;
+    uint32_t sor_regs = ia64_rse_rotating_gr_count(env);
     uint32_t p;
 
     if (v < sor_regs) {
@@ -295,7 +511,7 @@ static uint32_t ia64_rse_phys_to_virt(const CPUIA64State *env, uint32_t p)
     uint32_t off = p >= env->rse.rse_bol ?
                    p - env->rse.rse_bol :
                    p + IA64_STACKED_GR_COUNT - env->rse.rse_bol;
-    uint32_t sor_regs = (uint32_t)env->cfm_sor << 3;
+    uint32_t sor_regs = ia64_rse_rotating_gr_count(env);
 
     if (off < sor_regs) {
         off += sor_regs - env->cfm_rrb_gr;
@@ -311,9 +527,16 @@ static bool ia64_rse_pgr_nat_get(const CPUIA64State *env, uint32_t p)
     return (env->rse.rse_pgr_nat[p / 64] >> (p % 64)) & 1;
 }
 
-static void ia64_rse_pgr_nat_set(CPUIA64State *env, uint32_t p, bool nat)
+static void ia64_rse_pgr_nat_set(CPUIA64State *env, uint32_t p, bool nat,
+                                 const char *operation, uint64_t source)
 {
     uint64_t mask = 1ULL << (p % 64);
+    bool old_nat = (env->rse.rse_pgr_nat[p / 64] & mask) != 0;
+
+    if (old_nat != nat) {
+        trace_ia64_rse_pgr_nat_update(env_cpu(env)->cpu_index, operation,
+                                      env->ip, p, source, old_nat, nat);
+    }
 
     if (nat) {
         env->rse.rse_pgr_nat[p / 64] |= mask;
@@ -386,9 +609,15 @@ ia64_rse_sync_frame_out_slow(CPUIA64State *env, uint64_t dirty0,
             if (v < sof) {
                 uint32_t p = ia64_rse_virt_to_phys(env, v);
                 uint32_t reg = IA64_STACKED_GR_BASE + v;
+                bool nat = ia64_gr_nat_get(env, reg);
 
                 env->rse.rse_pgr[p] = env->gr[reg];
-                ia64_rse_pgr_nat_set(env, p, ia64_gr_nat_get(env, reg));
+                if (nat) {
+                    trace_ia64_rse_pgr_sync_out(
+                        env_cpu(env)->cpu_index, env->ip, reg, p,
+                        env->gr[reg], nat);
+                }
+                ia64_rse_pgr_nat_set(env, p, nat, "sync-out", reg);
             }
         }
     }
@@ -520,15 +749,13 @@ static int ia64_rse_store_one(CPUIA64State *env, uintptr_t ra)
      * collection in the implementation state.  No bit follows the latch to
      * a different collection.
      */
-    if (env->rse.rse_rnat_addr != collection_addr) {
-        env->ar_rnat = 0;
-        env->rse.rse_rnat_addr = collection_addr;
-        env->rse.rse_rnat_defined = 0;
-    }
+    ia64_rse_rnat_bind(env, collection_addr);
 
     if (ncb == 63) {
         uint64_t defined = env->rse.rse_rnat_defined & INT64_MAX;
         uint64_t collection = env->ar_rnat & defined;
+        trace_ia64_rse_rnat_store(env_cpu(env)->cpu_index, env->ip,
+                                  bspstore, defined, 0, collection);
 
         /*
          * SDM Vol.2 6.5.2 requires a complete RNAT store and then leaves
@@ -538,6 +765,8 @@ static int ia64_rse_store_one(CPUIA64State *env, uintptr_t ra)
          * zero; bit 63 is consequently always zero.
          */
         ia64_rse_write_u64(env, bspstore, collection, ra);
+        ia64_rse_rnat_shadow_remove(env, collection_addr,
+                                    "store-discard");
         env->rse.rse_load_rnat = collection;
         env->rse.rse_load_rnat_addr = collection_addr;
         env->rse.rse_load_rnat_defined = INT64_MAX;
@@ -588,16 +817,19 @@ static int ia64_rse_store_one(CPUIA64State *env, uintptr_t ra)
  * collection becomes current.
  */
 static uint64_t ia64_rse_fill_collection(CPUIA64State *env, uint64_t addr,
-                                         uintptr_t ra)
+                                         uintptr_t ra, uint64_t *defined_out,
+                                         uint32_t *sources_out)
 {
     uint64_t collection_addr = ia64_rse_collect_word(addr);
     uint64_t collection = 0;
     uint64_t defined = 0;
+    uint32_t sources = 0;
 
     if (env->rse.rse_load_rnat_valid &&
         env->rse.rse_load_rnat_addr == collection_addr) {
         defined = env->rse.rse_load_rnat_defined & INT64_MAX;
         collection = env->rse.rse_load_rnat & defined;
+        sources |= 1;
     } else if (env->ar_bspstore > collection_addr) {
         /*
          * AR.BSPSTORE has advanced past the collection word, so the RSE
@@ -607,7 +839,14 @@ static uint64_t ia64_rse_fill_collection(CPUIA64State *env, uint64_t addr,
         collection = ia64_rse_read_u64(env, collection_addr, ra) &
                      INT64_MAX;
         defined = INT64_MAX;
+        sources |= 2;
     }
+
+    if (ia64_rse_rnat_shadow_find(env, collection_addr) >= 0) {
+        sources |= 4;
+    }
+    ia64_rse_rnat_shadow_overlay(env, collection_addr, &collection,
+                                 &defined);
 
     /*
      * SDM Vol.2 6.5.2: "The RSE never saves partial NaT collections to
@@ -618,6 +857,7 @@ static uint64_t ia64_rse_fill_collection(CPUIA64State *env, uint64_t addr,
     if (env->rse.rse_rnat_addr == collection_addr) {
         uint64_t spill_defined = env->rse.rse_rnat_defined & INT64_MAX;
 
+        sources |= 8;
         /*
          * SDM Vol.2 6.5.2 defines RNAT{RSE.RNATBitIndex:0} and leaves
          * every higher bit undefined in the ordinary partial-collection
@@ -634,6 +874,8 @@ static uint64_t ia64_rse_fill_collection(CPUIA64State *env, uint64_t addr,
     env->rse.rse_load_rnat_addr = collection_addr;
     env->rse.rse_load_rnat_defined = defined;
     env->rse.rse_load_rnat_valid = true;
+    *defined_out = defined;
+    *sources_out = sources;
     return collection;
 }
 
@@ -666,7 +908,9 @@ static int ia64_rse_load_one(CPUIA64State *env, uintptr_t ra)
     } else {
         uint64_t value;
         uint64_t collection;
+        uint64_t defined;
         bool nat;
+        uint32_t sources;
         uint32_t p;
         uint32_t v;
 
@@ -675,14 +919,20 @@ static int ia64_rse_load_one(CPUIA64State *env, uintptr_t ra)
             (int32_t)env->rse.rse_bol -
             (env->rse.rse_clean + env->rse.rse_dirty + 1));
 
-        collection = ia64_rse_fill_collection(env, bspload, ra);
+        collection = ia64_rse_fill_collection(env, bspload, ra, &defined,
+                                              &sources);
         nat = (collection >> ncb) & 1;
+        v = ia64_rse_phys_to_virt(env, p);
+        if (nat) {
+            trace_ia64_rse_nat_fill(env_cpu(env)->cpu_index, env->ip, p,
+                                    v, env->rse.rse_bol, env->cfm_sof,
+                                    bspload, collection, defined, sources);
+        }
         env->rse.rse_pgr[p] = value;
-        ia64_rse_pgr_nat_set(env, p, nat);
+        ia64_rse_pgr_nat_set(env, p, nat, "load", bspload);
         env->rse.rse_clean++;
         env->rse.rse_invalid--;
 
-        v = ia64_rse_phys_to_virt(env, p);
         if (v < env->cfm_sof) {
             env->gr[IA64_STACKED_GR_BASE + v] = value;
             ia64_gr_nat_set(env, IA64_STACKED_GR_BASE + v,
@@ -950,6 +1200,9 @@ void ia64_rse_check(CPUIA64State *env, const char *site)
 {
 #ifdef CONFIG_DEBUG_TCG
     static unsigned reported;
+    unsigned shadow_count = env->rse.rse_rnat_shadow_count;
+    unsigned i;
+    unsigned j;
     int64_t total = (int64_t)env->cfm_sof + env->rse.rse_dirty +
                     env->rse.rse_clean + env->rse.rse_invalid;
     uint64_t expected_bspstore = env->ar_bsp -
@@ -959,6 +1212,13 @@ void ia64_rse_check(CPUIA64State *env, const char *site)
                env->rse.rse_clean < 0 || env->rse.rse_invalid < 0 ||
                env->rse.rse_bol >= IA64_STACKED_GR_COUNT;
 
+    bad |= !ia64_cfm_frame_fields_valid(env->cfm_sof, env->cfm_sol,
+                                        env->cfm_sor);
+    bad |= env->cfm_sor ?
+           env->cfm_rrb_gr >= ((uint32_t)env->cfm_sor << 3) :
+           env->cfm_rrb_gr != 0;
+    bad |= env->cfm_rrb_fr >= IA64_ROTATING_FR_COUNT ||
+           env->cfm_rrb_pr >= IA64_PR_COUNT - IA64_PR_ROTATING_BASE;
     bad |= (env->ar_rnat | env->rse.rse_rnat_defined |
             env->rse.rse_load_rnat |
             env->rse.rse_load_rnat_defined) & ~INT64_MAX;
@@ -978,6 +1238,29 @@ void ia64_rse_check(CPUIA64State *env, const char *site)
         bad |= env->rse.rse_load_rnat != 0 ||
                env->rse.rse_load_rnat_addr != 0 ||
                env->rse.rse_load_rnat_defined != 0;
+    }
+    bad |= shadow_count > IA64_RSE_RNAT_SHADOW_COUNT;
+    for (i = 0; i < IA64_RSE_RNAT_SHADOW_COUNT; i++) {
+        const IA64RnatShadowEntry *entry =
+            &env->rse.rse_rnat_shadow[i];
+
+        if (i >= shadow_count) {
+            bad |= entry->valid;
+            bad |= entry->value != 0 || entry->addr != 0 ||
+                   entry->defined != 0;
+            continue;
+        }
+        bad |= !entry->valid;
+        bad |= (entry->value | entry->defined) & ~INT64_MAX;
+        bad |= entry->value & ~entry->defined;
+        bad |= entry->defined == 0;
+        bad |= ia64_rse_collect_word(entry->addr) != entry->addr;
+        bad |= entry->addr == env->rse.rse_rnat_addr;
+        for (j = i + 1;
+             j < MIN(shadow_count, IA64_RSE_RNAT_SHADOW_COUNT); j++) {
+            bad |= env->rse.rse_rnat_shadow[j].valid &&
+                   env->rse.rse_rnat_shadow[j].addr == entry->addr;
+        }
     }
 
     if (!bad && !ia64_rse_has_clean_partition(env)) {
@@ -1008,7 +1291,7 @@ void ia64_rse_check(CPUIA64State *env, const char *site)
                       "@%016" PRIx64 "/%016" PRIx64
                       " load-rnat=%016" PRIx64 "@%016" PRIx64
                       "/%016" PRIx64 "/%u"
-                      " cfle=%d\n",
+                      " shadow=%u cfle=%d\n",
                       site, env->exception_state.exception, env->ip,
                       env->cfm_sof, env->cfm_sol,
                       env->cfm_sor, env->cfm_rrb_gr, env->rse.rse_bol,
@@ -1021,7 +1304,8 @@ void ia64_rse_check(CPUIA64State *env, const char *site)
                       env->rse.rse_load_rnat,
                       env->rse.rse_load_rnat_addr,
                       env->rse.rse_load_rnat_defined,
-                      env->rse.rse_load_rnat_valid, env->rse.rse_cfle);
+                      env->rse.rse_load_rnat_valid, shadow_count,
+                      env->rse.rse_cfle);
     }
 #else
     (void)env;
@@ -1149,7 +1433,7 @@ void ia64_gr_nat_set(CPUIA64State *env, uint32_t reg, bool nat)
 static void ia64_rotate_rotating_gr_right(CPUIA64State *env)
 {
     const __uint128_t all_mask = (((__uint128_t)1 << 96) - 1);
-    uint32_t count = env->cfm_sor * 8;
+    uint32_t count = ia64_rse_rotating_gr_count(env);
     __uint128_t nat;
     __uint128_t mask;
     __uint128_t rotating_nat;
@@ -1157,12 +1441,6 @@ static void ia64_rotate_rotating_gr_right(CPUIA64State *env)
 
     if (count == 0) {
         return;
-    }
-    if (count > env->cfm_sof) {
-        count = env->cfm_sof;
-    }
-    if (count > IA64_STACKED_GR_COUNT) {
-        count = IA64_STACKED_GR_COUNT;
     }
 
     last = env->gr[IA64_STACKED_GR_BASE + count - 1];
@@ -1197,15 +1475,15 @@ static void ia64_rotate_predicates_right(CPUIA64State *env)
 
 static void ia64_rotate_loop_regs(CPUIA64State *env)
 {
+    uint32_t rotating_gr_count = ia64_rse_rotating_gr_count(env);
+
     ia64_rse_check(env, "ctop");
     ia64_rse_sync_frame_out(env);
     ia64_rotate_rotating_gr_right(env);
     ia64_rotate_predicates_right(env);
-    if (env->cfm_sor != 0) {
-        uint8_t count = env->cfm_sor << 3;
-
+    if (rotating_gr_count != 0) {
         env->cfm_rrb_gr = env->cfm_rrb_gr ?
-                          env->cfm_rrb_gr - 1 : count - 1;
+                          env->cfm_rrb_gr - 1 : rotating_gr_count - 1;
     }
     ia64_set_cfm_rrb_fr(env, env->cfm_rrb_fr ?
                              env->cfm_rrb_fr - 1 :
@@ -1359,6 +1637,17 @@ void ia64_rse_alloc(CPUIA64State *env, uint32_t r1, uint32_t pfm,
     uint32_t new_sol = (pfm >> 7) & 0x7f;
     uint32_t new_sor = (pfm >> 14) & 0x0f;
     int32_t growth = (int32_t)new_sof - (int32_t)env->cfm_sof;
+
+    /*
+     * Translation rejects these immediate combinations before calling the
+     * helper.  Keep the architectural entry point defensive as well: an
+     * invalid CFM must never reach register mapping or rotation.
+     */
+    if (!ia64_cfm_frame_fields_valid(new_sof, new_sol, new_sor)) {
+        env->cr_isr = 0;
+        ia64_raise_exception(env, IA64_EXCP_ILLEGAL, fault_ip, 0, slot);
+    }
+
     /*
      * SDM Vol.2 6.6: alloc raises a Reserved Register/Field fault when
      * it changes the rotating-region size while any RRB is non-zero.

@@ -336,6 +336,17 @@ static void hid_keyboard_process_keycode(HIDState *hs)
     }
 }
 
+static void hid_keyboard_report(HIDState *hs, uint8_t report[8])
+{
+    report[0] = hs->kbd.modifiers & 0xff;
+    report[1] = 0;
+    if (hs->kbd.keys > 6) {
+        memset(report + 2, HID_USAGE_ERROR_ROLLOVER, 6);
+    } else {
+        memcpy(report + 2, hs->kbd.key, 6);
+    }
+}
+
 static inline int int_clamp(int val, int vmin, int vmax)
 {
     if (val < vmin) {
@@ -439,21 +450,21 @@ int hid_pointer_poll(HIDState *hs, uint8_t *buf, int len)
 
 int hid_keyboard_poll(HIDState *hs, uint8_t *buf, int len)
 {
+    uint8_t previous[8], report[8];
+
     hs->idle_pending = false;
 
     if (len < 2) {
         return 0;
     }
 
-    hid_keyboard_process_keycode(hs);
+    hid_keyboard_report(hs, previous);
+    do {
+        hid_keyboard_process_keycode(hs);
+        hid_keyboard_report(hs, report);
+    } while (hs->n && !memcmp(previous, report, sizeof(report)));
 
-    buf[0] = hs->kbd.modifiers & 0xff;
-    buf[1] = 0;
-    if (hs->kbd.keys > 6) {
-        memset(buf + 2, HID_USAGE_ERROR_ROLLOVER, MIN(8, len) - 2);
-    } else {
-        memcpy(buf + 2, hs->kbd.key, MIN(8, len) - 2);
-    }
+    memcpy(buf, report, MIN(8, len));
 
     return MIN(8, len);
 }

@@ -334,6 +334,9 @@ static void ia64_fw_debug_save_rse(CPUIA64State *env)
     state->load_rnat_addr = env->rse.rse_load_rnat_addr;
     state->load_rnat_defined = env->rse.rse_load_rnat_defined;
     state->load_rnat_valid = env->rse.rse_load_rnat_valid;
+    memcpy(state->rnat_shadow, env->rse.rse_rnat_shadow,
+           sizeof(state->rnat_shadow));
+    state->rnat_shadow_count = env->rse.rse_rnat_shadow_count;
     state->cfm_sof = env->cfm_sof;
     state->cfm_sol = env->cfm_sol;
     state->cfm_sor = env->cfm_sor;
@@ -367,6 +370,9 @@ static void ia64_fw_debug_restore_rse(CPUIA64State *env)
     env->rse.rse_load_rnat_addr = state->load_rnat_addr;
     env->rse.rse_load_rnat_defined = state->load_rnat_defined;
     env->rse.rse_load_rnat_valid = state->load_rnat_valid;
+    memcpy(env->rse.rse_rnat_shadow, state->rnat_shadow,
+           sizeof(env->rse.rse_rnat_shadow));
+    env->rse.rse_rnat_shadow_count = state->rnat_shadow_count;
     env->cfm_sof = state->cfm_sof;
     env->cfm_sol = state->cfm_sol;
     env->cfm_sor = state->cfm_sor;

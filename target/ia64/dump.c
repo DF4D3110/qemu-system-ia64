@@ -200,6 +200,50 @@ void ia64_cpu_dump_state(CPUState *cs, FILE *f, int flags)
                  cpu->env.rse.rse_load_rnat_addr,
                  cpu->env.rse.rse_load_rnat_defined,
                  cpu->env.rse.rse_load_rnat_valid);
+    for (i = 0; i < cpu->env.rse.rse_rnat_shadow_count; i++) {
+        const IA64RnatShadowEntry *entry =
+            &cpu->env.rse.rse_rnat_shadow[i];
+
+        if (entry->valid) {
+            qemu_fprintf(f, "RSE-RNAT-SHADOW[%d]: RNAT=0x%016" PRIx64
+                         " ADDR=0x%016" PRIx64
+                         " DEFINED=0x%016" PRIx64 "\n",
+                         i, entry->value, entry->addr, entry->defined);
+        }
+    }
+    if (cpu->firmware_debug.rse_valid) {
+        const IA64FirmwareDebugRseState *rse =
+            &cpu->firmware_debug.rse;
+
+        qemu_fprintf(f, "DEBUG-SAVED-RSE: BOL=%u SOF=%u SOL=%u"
+                     " BSP=0x%016" PRIx64 " BSPSTORE=0x%016" PRIx64
+                     " DIRTY=%d/%d CLEAN=%d/%d INVALID=%d"
+                     " PGRNAT=0x%016" PRIx64 "/0x%016" PRIx64 "\n",
+                     rse->bol, rse->cfm_sof, rse->cfm_sol,
+                     rse->bsp, rse->bspstore, rse->dirty, rse->dirty_nat,
+                     rse->clean, rse->clean_nat, rse->invalid,
+                     rse->pgr_nat[0], rse->pgr_nat[1]);
+        qemu_fprintf(f, "DEBUG-SAVED-RNAT: RNAT=0x%016" PRIx64
+                     " ADDR=0x%016" PRIx64
+                     " DEFINED=0x%016" PRIx64
+                     " LOAD=0x%016" PRIx64 "@0x%016" PRIx64
+                     "/0x%016" PRIx64 "/%u SHADOW=%u\n",
+                     rse->rnat, rse->rnat_addr, rse->rnat_defined,
+                     rse->load_rnat, rse->load_rnat_addr,
+                     rse->load_rnat_defined, rse->load_rnat_valid,
+                     rse->rnat_shadow_count);
+        for (i = 0; i < rse->rnat_shadow_count; i++) {
+            const IA64RnatShadowEntry *entry = &rse->rnat_shadow[i];
+
+            if (entry->valid) {
+                qemu_fprintf(f, "DEBUG-SAVED-RNAT-SHADOW[%d]:"
+                             " RNAT=0x%016" PRIx64
+                             " ADDR=0x%016" PRIx64
+                             " DEFINED=0x%016" PRIx64 "\n",
+                             i, entry->value, entry->addr, entry->defined);
+            }
+        }
+    }
     ia64_dump_tlb(f, "ITLB", cpu->env.mmu.tlb_inst,
                   cpu->env.mmu.tlb_inst_count);
     ia64_dump_tlb(f, "DTLB", cpu->env.mmu.tlb_data,

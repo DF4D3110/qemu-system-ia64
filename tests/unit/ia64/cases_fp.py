@@ -181,6 +181,7 @@ from .encoding import (
     stfs,
     sub_reg,
     sum_um,
+    tf_z,
     xma_h,
     xma_hu,
     xma_l,
@@ -1076,6 +1077,18 @@ test_fmerge_forms_decode = require_registers("fmerge_forms_decode", [
     "ar_fpsr": DEFAULT_FPSR,
     "exception": IA64_EXCP_NONE,
 }, entry=0x10)
+
+test_fmerge_se_fixed_register_format_edges = require_registers(
+    "fmerge_se_fixed_register_format_edges", [
+        (0x10, 0x0d, nop_m(), fmerge_se(8, 1, 0), nop_i()),
+        (0x20, 0x0d, nop_m(), fmerge_se(9, 0, 1), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+    ], {
+        "ip": 0x30,
+        "f8": ExpectedFP(0, 0xffff),
+        "f9": ExpectedFP(1 << 63, 0),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
 
 test_fmerge_natval_propagates = require_registers(
     "fmerge_natval_propagates", [
@@ -2034,6 +2047,19 @@ test_fprsqrta_decode = require_registers("fprsqrta_decode", [
     "ar_fpsr": DEFAULT_FPSR,
     "exception": IA64_EXCP_NONE,
 }, entry=0x10)
+
+test_fprsqrta_invalidates_known_predicate = require_registers(
+    "fprsqrta_invalidates_known_predicate", [
+        (0x10, 0x00, nop_m(), tf_z(6, 7, 35), nop_i()),
+        (0x20, 0x0d, nop_m(), fprsqrta(8, 6, 0), nop_i()),
+        (0x30, 0x00, adds(4, 1, 0, qp=6), nop_i(), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x40)),
+    ], {
+        "ip": 0x40,
+        "r4": 0,
+        "pr_mask": ExpectedBits(mask=1 << 6, value=0),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
 
 test_fprsqrta_simd_high_lane_fault_isr = require_registers(
     "fprsqrta_simd_high_lane_fault_isr", [
@@ -3184,6 +3210,7 @@ CASE_NAMES = (
     'fma_preserves_extended_precision',
     'fmerge_forms_decode',
     'fmerge_natval_propagates',
+    'fmerge_se_fixed_register_format_edges',
     'fminmax_scalar_decode',
     'fminmax_scalar_tie_uses_f3',
     'fmpy_s0_decode',
@@ -3268,6 +3295,7 @@ CASE_NAMES = (
     'fprcpa_decode',
     'fprcpa_simd_high_lane_fault_isr',
     'fprsqrta_decode',
+    'fprsqrta_invalidates_known_predicate',
     'fprsqrta_simd_high_lane_fault_isr',
     'fpsr_status_field_controls',
     'fpsr_td_suppresses_fp_fault',

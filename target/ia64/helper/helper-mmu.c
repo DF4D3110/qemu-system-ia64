@@ -4,6 +4,7 @@
 #include "cpu.h"
 #include "exec/helper-proto.h"
 #include "arch/arch.h"
+#include "trace.h"
 
 void helper_tlb_serialize(CPUIA64State *env, uint32_t include_data,
                           uint32_t include_inst)
@@ -78,7 +79,14 @@ uint64_t helper_speculative_probe(CPUIA64State *env, uint64_t va,
                                   uint32_t is_write, uint32_t is_ifetch,
                                   uint32_t size)
 {
-    return ia64_mmu_speculative_probe(env, va, is_write, is_ifetch, size);
+    uint64_t result =
+        ia64_mmu_speculative_probe(env, va, is_write, is_ifetch, size);
+
+    if (!result) {
+        trace_ia64_speculative_probe_defer(
+            env_cpu(env)->cpu_index, env->ip, va, size);
+    }
+    return result;
 }
 
 uint64_t helper_advanced_load_allowed(CPUIA64State *env, uint64_t va)

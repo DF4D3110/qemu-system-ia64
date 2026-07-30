@@ -174,11 +174,6 @@ void helper_rsm(CPUIA64State *env, uint64_t imm)
     ia64_system_rsm(env, imm);
 }
 
-uint64_t helper_mov_psrgr_read(CPUIA64State *env, uint32_t unused)
-{
-    return ia64_system_mov_psrgr_read(env, unused);
-}
-
 void helper_mov_psr_write(CPUIA64State *env, uint64_t value, uint32_t unused)
 {
     ia64_system_mov_psr_write(env, value, unused);

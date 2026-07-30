@@ -1813,6 +1813,23 @@ test_br_ctop_self_loop_budgeted = require_registers(
         "r5": 0,
     }, entry=0x10)
 
+test_br_ctop_self_loop_rotates_predicates = require_registers(
+    "br_ctop_self_loop_rotates_predicates", [
+        (0x10, 0x00, nop_m(), mov_lc_imm(0),
+         mov_i_imm_ar(66, 6)),
+        (0x20, 0x00, nop_m(), mov_pr_rot_imm(0x10000), nop_i()),
+        # p21 starts clear and becomes set while br.ctop drains AR.EC.
+        # A translated internal back edge must read the rotated value.
+        (0x30, 0x10, nop_m(), adds(8, 1, 8, qp=21),
+         br_ctop_many(0x30, 0x30)),
+        (0x40, 0x10, nop_m(), nop_i(),
+         br_cond(0x40, 0x40)),
+    ], {
+        "ip": 0x40,
+        "exception": IA64_EXCP_NONE,
+        "r8": 1,
+    }, entry=0x10)
+
 test_brl_call_mlx_decode = require_registers("brl_call_mlx_decode", [
     (0x10, *brl_call_mlx(6, 0x10, 0x40)),
     (0x20, 0x00, adds(8, 1, 0), nop_i(),
@@ -2898,6 +2915,7 @@ CASE_NAMES = (
     'br_ctop_many_decode',
     'br_ctop_rotating_pipeline',
     'br_ctop_self_loop_budgeted',
+    'br_ctop_self_loop_rotates_predicates',
     'br_ctop_strcpy_pipeline_stops_on_first_zero_word',
     'br_ia_executes_ia32_and_jmpe_returns_to_ia64',
     'br_ia_invalidates_global_alat_entries',

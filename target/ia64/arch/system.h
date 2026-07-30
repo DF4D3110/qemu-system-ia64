@@ -53,7 +53,6 @@ void ia64_system_clear_psr_fault_suppression(CPUIA64State *env);
 void ia64_system_set_psr_bn(CPUIA64State *env, uint32_t bank1);
 void ia64_system_ssm(CPUIA64State *env, uint64_t imm);
 void ia64_system_rsm(CPUIA64State *env, uint64_t imm);
-uint64_t ia64_system_mov_psrgr_read(CPUIA64State *env, uint32_t unused);
 void ia64_system_mov_psr_write(CPUIA64State *env, uint64_t value,
                                uint32_t unused);
 uint64_t ia64_system_mov_rrgr_read(CPUIA64State *env, uint64_t rr_addr);

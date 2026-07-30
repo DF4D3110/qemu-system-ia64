@@ -1,8 +1,7 @@
 # qemu-system-ia64
 
 Experimental QEMU full-system emulation target for IA-64/Itanium guests.
-This codebase is written using LLMs. Therefore, do not send any pull requests
-related to this project to the QEMU upstream.
+This codebase is written using LLMs. Therefore, do not send any pull requests related to this project to the QEMU upstream.
 
 ## Emulated Platform
 
@@ -36,15 +35,45 @@ For guest-performance measurements, use an IA-64-only build without the compiler
   --enable-lto \
   --disable-qom-cast-debug \
   --disable-stack-protector \
-  --extra-cflags='-O2 -fno-stack-protector -fzero-call-used-regs=skip -ftrivial-auto-var-init=uninitialized' \
+  --extra-cflags='-fno-stack-protector -fzero-call-used-regs=skip -ftrivial-auto-var-init=uninitialized' \
+  -Doptimization=2 \
   --enable-gtk
 ninja -C build qemu-system-ia64 roms/ia64-firmware/ia64-firmware.bin
 ```
 
 This configuration is intended for performance testing.
+Keep a separate debug build for development and correctness testing.
 
-The firmware build requires an IA-64 ELF cross toolchain named
-`ia64-linux-gnu-*` in `PATH`.
+For profile-guided optimization, use a dedicated build directory and the same compiler for both stages:
+
+```sh
+mkdir build-ia64-pgo
+cd build-ia64-pgo
+../configure --target-list=ia64-softmmu \
+  --enable-lto \
+  --disable-qom-cast-debug \
+  --disable-stack-protector \
+  --extra-cflags='-fno-stack-protector -fzero-call-used-regs=skip -ftrivial-auto-var-init=uninitialized' \
+  -Doptimization=2 \
+  -Db_pgo=generate
+ninja qemu-system-ia64 roms/ia64-firmware/ia64-firmware.bin
+```
+
+Run representative guest workloads with the instrumented binary.
+The training set should cover boot, integer, floating-point, SIMD, MMU-intensive, and RSE-intensive code paths.
+Then consume the generated profiles:
+
+```sh
+meson configure -Db_pgo=use
+ninja qemu-system-ia64 roms/ia64-firmware/ia64-firmware.bin
+```
+
+Profiles are tied to the exact build tree, compiler, and source revision; do not copy stale profile data between builds.
+
+On hosts that all support the x86-64-v3 ISA level, add `--x86-version=3` to a separate comparison build.
+This changes the minimum host ISA for QEMU and its C helpers; TCG-generated guest code still selects host vector features at runtime.
+
+The firmware build requires an IA-64 ELF cross toolchain named `ia64-linux-gnu-*` in `PATH`.
 
 ## Run
 
@@ -56,16 +85,31 @@ The firmware build requires an IA-64 ELF cross toolchain named
   -display gtk
 ```
 
+### Machine profiles
+
+`itanium2-vpc` is the standards-oriented profile and is also available under
+the backward-compatible `ia64-vpc` alias.  It selects `montecito` by default
+and leaves early-firmware compatibility workarounds disabled.
+
+`itanium-vpc` selects `merced` by default and enables the narrowly scoped
+firmware and SAL compatibility required by first-generation systems such as
+Windows XP for Itanium.
+
+The machine and CPU selections are intentionally independent.  A `-cpu`
+override changes processor-generation behavior, but it does not enable or
+disable the selected machine profile's firmware compatibility flags.
+
 ### CPU model selection
 
-The `ia64-vpc` machine uses the `montecito` CPU model by default.
+The `ia64-vpc`/`itanium2-vpc` machine uses the `montecito` CPU model by
+default, while `itanium-vpc` uses `merced`.
 Select a different model with `-cpu`.
-For example, use `-cpu merced` for first-generation guests:
+For example, use the early-generation machine profile for a first-generation
+guest:
 
 ```sh
 ./build/qemu-system-ia64 \
-  -machine ia64-vpc \
-  -cpu merced \
+  -machine itanium-vpc \
   -bios ./build/roms/ia64-firmware/ia64-firmware.bin \
   ...
 ```
@@ -87,14 +131,11 @@ The later 16-byte operations and virtualization instructions are not available a
 
 #### `merced`
 
-Merced provides its native IA-32 execution environment and reports the
-generation-specific CPUID, PAL, cache, translation-cache, page-size, address,
-protection-key, performance-monitor, and register-stack characteristics.
-Later long-branch, 16-byte atomic, and virtualization facilities are not
-available.
+Merced provides its native IA-32 execution environment and reports the generation-specific CPUID, PAL, cache, translation-cache, page-size, address, protection-key, performance-monitor, and register-stack characteristics.
+Later long-branch, 16-byte atomic, and virtualization facilities are not available.
 
-`-cpu help` lists exactly `merced`, `madison`, `montecito`, `itanium`, and
-`itanium2`. `itanium` aliases `merced`; `itanium2` aliases `montecito`.
+`-cpu help` lists exactly `merced`, `madison`, `montecito`, `itanium`, and `itanium2`.
+`itanium` aliases `merced`; `itanium2` aliases `montecito`.
 
 For four vCPUs, MTTCG, 8 GiB of RAM, and USB input without the PS/2 controller:
 
@@ -125,14 +166,16 @@ For a host TAP interface, use:
 -nic tap,model=e1000,ifname=tap0,script=no,downscript=no
 ```
 
-Use `-nic none` to omit the controller. EFI network boot is not currently
-provided; the controller is available to the guest operating system.
+Use `-nic none` to omit the controller.
+EFI network boot is not currently provided; the controller is available to the guest operating system.
 
-Use `-serial stdio` to view serial output. 
+Use `-serial stdio` to view serial output.
 The `-debug-port` option publishes the guest debug transport described by the ACPI DBGP table; for example, `-debug-port tcp::4444,server=on,wait=on,nodelay=on`.
 
-EFI variables are persistent. By default, `ia64-vpc` loads and saves a 64 KiB file named `nvram` in the directory containing the firmware selected by `-bios`. Use a separate file for each virtual machine with
-`-machine ia64-vpc,nvram=<path>`, or specify `nvram=none` for volatile EFI variables. Relative paths are resolved from QEMU's current working directory.
+EFI variables are persistent.
+By default, `ia64-vpc` loads and saves a 64 KiB file named `nvram` in the directory containing the firmware selected by `-bios`.
+Use a separate file for each virtual machine with `-machine ia64-vpc,nvram=<path>`, or specify `nvram=none` for volatile EFI variables.
+Relative paths are resolved from QEMU's current working directory.
 
 At each startup, the firmware waits three seconds for F2, F12, or Delete before continuing normal boot. Any of these keys opens the embedded EFI shell on the graphical and serial consoles. The shell can inspect the machine and its filesystems, launch an EFI application, select a boot target, update the boot order, and set the real-time clock. For example:
 
@@ -159,8 +202,7 @@ An installed EFI system can be attached with an ordinary disk drive:
 -drive file=/path/to/guest-disk.qcow2,format=qcow2
 ```
 
-The firmware supports persistent EFI boot entries, including short-form hard
-drive device paths, and can boot supported loaders from FAT partitions.
+The firmware supports persistent EFI boot entries, including short-form hard drive device paths, and can boot supported loaders from FAT partitions.
 
 <img width="692" height="598" alt="Microsoft Windows Server 2008 for Itanium-Based Systems is running on qemu-system-ia64, showing winver and task manager." src="https://github.com/user-attachments/assets/cbf318e6-1202-4a11-95ed-a62f105a8f64" />
 <img width="692" height="598" alt="Microsoft Windows Server 2008 for Itanium-Based Systems is running on qemu-system-ia64, executing systeminfo" src="https://github.com/user-attachments/assets/ce893757-a4b0-4003-8ba8-87fad23d739c" />
@@ -176,14 +218,14 @@ build/pyvenv/bin/meson test -C build --suite func-ia64 --print-errorlogs
 build/pyvenv/bin/meson test -C build --suite func-ia64-thorough --print-errorlogs
 ```
 
-Use the build-local Meson shown above. 
+Use the build-local Meson shown above.
 
 It is the same version selected by QEMU's configure process; a host `meson` of another version may be unable to read `build/meson-private/build.dat`.
- 
+
 Plain `meson test` from the source directory is not valid because the Meson build data lives under `build`.
 
-The TCG registry currently contains 1058 architectural microprograms divided between core, memory/NaT, floating-point,
-RSE, MMU, interruption, and PAL groups. Machine tests cover platform wiring and display behavior.
+The TCG registry currently contains 1188 architectural microprograms divided between core, memory/NaT, floating-point, RSE, MMU, interruption, and PAL groups.
+Machine tests cover platform wiring and display behavior.
 
 The functional suite builds project-owned EFI applications and boots them from deterministic FAT, GPT, MBR, El Torito, and UDF media. It also exercises the firmware shell through PS/2, USB, and serial input, including direct application execution and NVRAM persistence across restarts.
 
@@ -192,8 +234,7 @@ See [`docs/devel/testing/ia64.rst`](docs/devel/testing/ia64.rst) for focused run
 ## Status
 
 The current implementation boots several IA-64 operating-system installers and supports up to four guest processors.
-Instruction coverage, privileged behavior, floating-point corner cases, and device compatibility still 
-require validation against the IA-64, EFI, SAL, and ACPI specifications.
+Instruction coverage, privileged behavior, floating-point corner cases, and device compatibility still require validation against the IA-64, EFI, SAL, and ACPI specifications.
 
 ## Legal disclaimer
 
@@ -204,8 +245,6 @@ Guest operating system images, firmware, installation media, and other third-par
 This project is an independent experimental QEMU IA-64 system emulation project. It is not affiliated with, endorsed by, sponsored by, or supported by Intel, HPE, the QEMU Project, the Gentoo Foundation, the Gentoo Project, or Microsoft Corporation.
 
 QEMU is used as the upstream base for this fork. QEMU as a whole is licensed under the GNU General Public License, version 2. See the license files in this repository for details.
-
-Gentoo is a trademark of the Gentoo Foundation, Inc. and of Förderverein Gentoo e.V.
 
 Microsoft and Windows are trademarks of the Microsoft group of companies.
 

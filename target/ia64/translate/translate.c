@@ -38,6 +38,9 @@ static TCGv_i64 cpu_rse_gr_dirty[2];
 #define IA64_COUNTED_SELF_BUDGET 4096
 #define IA64_CLOOP_ZERO_ST1_MAX IA64_COUNTED_SELF_BUDGET
 
+static bool ia64_current_insn_cannot_execute(
+    const DisasContext *ctx, const Ia64Instruction *insn);
+
 static void ia64_gen_merced_dtlb1_touch(DisasContext *ctx, TCGv_i64 addr,
                                         int mmu_idx, MemOp memop)
 {
@@ -132,6 +135,66 @@ static bool ia64_insn_may_modify_psr_ic(const Ia64Instruction *insn)
 static bool ia64_insn_may_modify_psr_ri(const Ia64Instruction *insn)
 {
     return insn->opcode == IA64_OP_MOV_GRPSR;
+}
+
+static bool ia64_insn_may_modify_cpl(const Ia64Instruction *insn)
+{
+    switch (insn->opcode) {
+    case IA64_OP_MOV_GRPSR:
+    case IA64_OP_SSM:
+    case IA64_OP_RSM:
+    case IA64_OP_EPC:
+    case IA64_OP_RFI:
+    case IA64_OP_BREAK:
+    case IA64_OP_BR_IA:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool ia64_insn_may_modify_cfm_sof(const Ia64Instruction *insn)
+{
+    switch (insn->opcode) {
+    case IA64_OP_ALLOC:
+    case IA64_OP_COVER:
+    case IA64_OP_LOADRS:
+    case IA64_OP_RFI:
+    case IA64_OP_BREAK:
+    case IA64_OP_BR_CALL:
+    case IA64_OP_BRL_CALL:
+    case IA64_OP_BR_CALL_INDIRECT:
+    case IA64_OP_BR_RET:
+    case IA64_OP_BR_IA:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void ia64_update_cached_register_state(
+    DisasContext *ctx, const Ia64Instruction *insn)
+{
+    if (ia64_current_insn_cannot_execute(ctx, insn)) {
+        return;
+    }
+    if (ia64_insn_may_modify_cpl(insn)) {
+        ctx->reg.cpl_known = false;
+    }
+    if (ia64_insn_may_modify_cfm_sof(insn)) {
+        ctx->reg.cfm_sof_valid = false;
+    }
+
+    /*
+     * ALLOC is architecturally unpredicated and installs an immediate SOF,
+     * so retain that value rather than reloading it for the next frame
+     * check.
+     */
+    if (insn->opcode == IA64_OP_ALLOC) {
+        ctx->reg.cfm_sof =
+            tcg_constant_i32(insn->operands.common.immediate & 0x7f);
+        ctx->reg.cfm_sof_valid = true;
+    }
 }
 
 bool ia64_insn_is_empty_hint(const Ia64Instruction *insn)
@@ -366,26 +429,63 @@ static bool ia64_insn_writes_gr_r1(const Ia64Instruction *insn)
     }
 }
 
-static bool ia64_nat_is_known_clear(const DisasContext *ctx, uint8_t reg)
+typedef enum IA64KnownNat {
+    IA64_NAT_UNKNOWN = -1,
+    IA64_NAT_CLEAR = 0,
+    IA64_NAT_SET = 1,
+} IA64KnownNat;
+
+static IA64KnownNat ia64_nat_known(const DisasContext *ctx, uint8_t reg)
 {
-    return reg == 0 ||
-           (ctx->memory.nat_known_clear[reg / 64] & (1ULL << (reg % 64)));
+    uint64_t bit;
+
+    if (reg == 0) {
+        return IA64_NAT_CLEAR;
+    }
+    bit = UINT64_C(1) << (reg % 64);
+    if (ctx->memory.nat_known_clear[reg / 64] & bit) {
+        return IA64_NAT_CLEAR;
+    }
+    if (ctx->memory.nat_known_set[reg / 64] & bit) {
+        return IA64_NAT_SET;
+    }
+    return IA64_NAT_UNKNOWN;
 }
 
-static void ia64_nat_set_known_clear(DisasContext *ctx, uint8_t reg,
-                                     bool known_clear)
+static void ia64_nat_set_known(DisasContext *ctx, uint8_t reg,
+                               IA64KnownNat value)
 {
+    uint32_t word;
     uint64_t bit;
 
     if (reg == 0) {
         return;
     }
+    word = reg / 64;
     bit = 1ULL << (reg % 64);
-    if (known_clear) {
-        ctx->memory.nat_known_clear[reg / 64] |= bit;
-    } else {
-        ctx->memory.nat_known_clear[reg / 64] &= ~bit;
+    ctx->memory.nat_known_clear[word] &= ~bit;
+    ctx->memory.nat_known_set[word] &= ~bit;
+    if (value == IA64_NAT_CLEAR) {
+        ctx->memory.nat_known_clear[word] |= bit;
+    } else if (value == IA64_NAT_SET) {
+        ctx->memory.nat_known_set[word] |= bit;
     }
+}
+
+static IA64KnownNat ia64_nat_merge(IA64KnownNat a, IA64KnownNat b)
+{
+    return a == b ? a : IA64_NAT_UNKNOWN;
+}
+
+static IA64KnownNat ia64_nat_or(IA64KnownNat a, IA64KnownNat b)
+{
+    if (a == IA64_NAT_SET || b == IA64_NAT_SET) {
+        return IA64_NAT_SET;
+    }
+    if (a == IA64_NAT_CLEAR && b == IA64_NAT_CLEAR) {
+        return IA64_NAT_CLEAR;
+    }
+    return IA64_NAT_UNKNOWN;
 }
 
 typedef enum IA64NatResultPolicy {
@@ -397,6 +497,8 @@ typedef enum IA64NatResultPolicy {
     IA64_NAT_RESULT_SOURCES_R2_R3,
     IA64_NAT_RESULT_SOURCES_R1_R2_R3,
     IA64_NAT_RESULT_PRESERVE_ON_FULL_ALAT,
+    IA64_NAT_RESULT_SET_IF_R3_SET,
+    IA64_NAT_RESULT_R3_OR_UNIMPLEMENTED_VA,
 } IA64NatResultPolicy;
 
 static IA64NatResultPolicy ia64_nat_result_policy(
@@ -412,6 +514,17 @@ static IA64NatResultPolicy ia64_nat_result_policy(
     case IA64_OP_LD4A:
     case IA64_OP_LD8A:
     case IA64_OP_LD16:
+    case IA64_OP_XCHG1:
+    case IA64_OP_XCHG2:
+    case IA64_OP_XCHG4:
+    case IA64_OP_XCHG8:
+    case IA64_OP_CMPXCHG1:
+    case IA64_OP_CMPXCHG2:
+    case IA64_OP_CMPXCHG4:
+    case IA64_OP_CMPXCHG8:
+    case IA64_OP_CMP8XCHG16:
+    case IA64_OP_FETCHADD4:
+    case IA64_OP_FETCHADD8:
     case IA64_OP_MOVL:
     case IA64_OP_MOV_BRGR:
     case IA64_OP_MOV_PRGR:
@@ -436,6 +549,9 @@ static IA64NatResultPolicy ia64_nat_result_policy(
     case IA64_OP_MOV_MSRGR:
     case IA64_OP_MOV_IP:
     case IA64_OP_MOV_CURRENT_IP:
+    case IA64_OP_ALLOC:
+    case IA64_OP_TPA:
+    case IA64_OP_TAK:
     case IA64_OP_PROBE_R:
     case IA64_OP_PROBE_W:
     case IA64_OP_PROBE_RW:
@@ -450,6 +566,15 @@ static IA64NatResultPolicy ia64_nat_result_policy(
     case IA64_OP_LD8C_NC:
         /* A full-ALAT hit preserves the old destination and its NaT. */
         return IA64_NAT_RESULT_PRESERVE_ON_FULL_ALAT;
+    case IA64_OP_LD1S:
+    case IA64_OP_LD2S:
+    case IA64_OP_LD4S:
+    case IA64_OP_LD8S:
+    case IA64_OP_LD1SA:
+    case IA64_OP_LD2SA:
+    case IA64_OP_LD4SA:
+    case IA64_OP_LD8SA:
+        return IA64_NAT_RESULT_SET_IF_R3_SET;
     case IA64_OP_ADDS:
     case IA64_OP_ADDL:
     case IA64_OP_SHL_IMM:
@@ -496,9 +621,81 @@ static IA64NatResultPolicy ia64_nat_result_policy(
     case IA64_OP_MPYSH:
     case IA64_OP_MPYUH:
     case IA64_OP_ADDP4:
+    case IA64_OP_PADD1:
+    case IA64_OP_PADD2:
+    case IA64_OP_PADD4:
+    case IA64_OP_PSUB1:
+    case IA64_OP_PSUB2:
+    case IA64_OP_PSUB4:
+    case IA64_OP_PSHLADD2:
+    case IA64_OP_PSHRADD2:
+    case IA64_OP_PAVG1:
+    case IA64_OP_PAVG2:
+    case IA64_OP_PAVGSUB1:
+    case IA64_OP_PAVGSUB2:
+    case IA64_OP_PCMP1_EQ:
+    case IA64_OP_PCMP1_GT:
+    case IA64_OP_PCMP2_EQ:
+    case IA64_OP_PCMP2_GT:
+    case IA64_OP_PCMP4_EQ:
+    case IA64_OP_PCMP4_GT:
+    case IA64_OP_PMAX1_U:
+    case IA64_OP_PMAX2:
+    case IA64_OP_PMIN1_U:
+    case IA64_OP_PMIN2:
+    case IA64_OP_PMPY2_L:
+    case IA64_OP_PMPY2_R:
+    case IA64_OP_PMPYSH2:
+    case IA64_OP_PMPYSH2_U:
+    case IA64_OP_PSAD1:
+    case IA64_OP_MIX1_L:
+    case IA64_OP_MIX1_R:
+    case IA64_OP_MIX2_L:
+    case IA64_OP_MIX2_R:
+    case IA64_OP_MIX4_L:
+    case IA64_OP_MIX4_R:
+    case IA64_OP_PACK2_SSS:
+    case IA64_OP_PACK2_USS:
+    case IA64_OP_PACK4_SSS:
+    case IA64_OP_UNPACK1_H:
+    case IA64_OP_UNPACK1_L:
+    case IA64_OP_UNPACK2_H:
+    case IA64_OP_UNPACK2_L:
+    case IA64_OP_UNPACK4_H:
+    case IA64_OP_UNPACK4_L:
+    case IA64_OP_SUM:
         return IA64_NAT_RESULT_SOURCES_R2_R3;
     case IA64_OP_ADDP4_IMM:
         return IA64_NAT_RESULT_SOURCE_R3;
+    case IA64_OP_PSHR2:
+    case IA64_OP_PSHR2_U:
+    case IA64_OP_PSHR4:
+    case IA64_OP_PSHR4_U:
+        return insn->operands.common.immediate >= 0 ?
+               IA64_NAT_RESULT_SOURCE_R3 :
+               IA64_NAT_RESULT_SOURCES_R2_R3;
+    case IA64_OP_PSHL2:
+    case IA64_OP_PSHL4:
+        return insn->operands.common.immediate >= 0 ?
+               IA64_NAT_RESULT_SOURCE_R2 :
+               IA64_NAT_RESULT_SOURCES_R2_R3;
+    case IA64_OP_MUX1:
+    case IA64_OP_MUX2:
+        return IA64_NAT_RESULT_SOURCE_R2;
+    case IA64_OP_CZX1_L:
+    case IA64_OP_CZX1_R:
+    case IA64_OP_CZX2_L:
+    case IA64_OP_CZX2_R:
+        return IA64_NAT_RESULT_SOURCE_R3;
+    case IA64_OP_THASH:
+    case IA64_OP_TTAG:
+        return IA64_NAT_RESULT_R3_OR_UNIMPLEMENTED_VA;
+    case IA64_OP_GETF_D:
+    case IA64_OP_GETF_S:
+    case IA64_OP_GETF_EXP:
+    case IA64_OP_GETF_SIG:
+        return insn->operands.common.source1 <= 1 ?
+               IA64_NAT_RESULT_CLEAR : IA64_NAT_RESULT_UNKNOWN;
     case IA64_OP_MUX:
         return IA64_NAT_RESULT_SOURCES_R1_R2_R3;
     default:
@@ -506,54 +703,162 @@ static IA64NatResultPolicy ia64_nat_result_policy(
     }
 }
 
-static bool ia64_nat_result_is_known_clear(const DisasContext *ctx,
-                                           const Ia64Instruction *insn)
+static IA64KnownNat ia64_nat_result_known(const DisasContext *ctx,
+                                          const Ia64Instruction *insn,
+                                          IA64KnownNat old_r1)
 {
+    IA64KnownNat r2 =
+        ia64_nat_known(ctx, insn->operands.common.source1);
+    IA64KnownNat r3 =
+        ia64_nat_known(ctx, insn->operands.common.source2);
+
     switch (ia64_nat_result_policy(insn)) {
     case IA64_NAT_RESULT_CLEAR:
-        return true;
+        return IA64_NAT_CLEAR;
     case IA64_NAT_RESULT_SOURCE_R1:
-        return ia64_nat_is_known_clear(ctx, insn->operands.common.destination);
+        return old_r1;
     case IA64_NAT_RESULT_SOURCE_R2:
-        return ia64_nat_is_known_clear(ctx, insn->operands.common.source1);
+        return r2;
     case IA64_NAT_RESULT_SOURCE_R3:
-        return ia64_nat_is_known_clear(ctx, insn->operands.common.source2);
+        return r3;
     case IA64_NAT_RESULT_SOURCES_R2_R3:
-        return ia64_nat_is_known_clear(ctx, insn->operands.common.source1) &&
-               ia64_nat_is_known_clear(ctx, insn->operands.common.source2);
+        return ia64_nat_or(r2, r3);
     case IA64_NAT_RESULT_SOURCES_R1_R2_R3:
-        return ia64_nat_is_known_clear(
-                   ctx, insn->operands.common.destination) &&
-               ia64_nat_is_known_clear(ctx, insn->operands.common.source1) &&
-               ia64_nat_is_known_clear(ctx, insn->operands.common.source2);
+        return ia64_nat_or(old_r1, ia64_nat_or(r2, r3));
     case IA64_NAT_RESULT_PRESERVE_ON_FULL_ALAT:
-        return !ctx->memory.full_alat;
+        return ctx->memory.full_alat ?
+               ia64_nat_merge(old_r1, IA64_NAT_CLEAR) : IA64_NAT_CLEAR;
+    case IA64_NAT_RESULT_SET_IF_R3_SET:
+        return r3 == IA64_NAT_SET ?
+               IA64_NAT_SET : IA64_NAT_UNKNOWN;
+    case IA64_NAT_RESULT_R3_OR_UNIMPLEMENTED_VA:
+        if (r3 == IA64_NAT_SET) {
+            return IA64_NAT_SET;
+        }
+        return ia64_env_cpu_class(ctx->env)->impl_va_msb >= 60 ?
+               r3 : IA64_NAT_UNKNOWN;
     case IA64_NAT_RESULT_UNKNOWN:
     default:
+        return IA64_NAT_UNKNOWN;
+    }
+}
+
+static IA64KnownNat ia64_nat_after_predication(const DisasContext *ctx,
+                                               IA64KnownNat old,
+                                               IA64KnownNat executed)
+{
+    if (ctx->reg.current_qp_known) {
+        return ctx->reg.current_qp_value ? executed : old;
+    }
+    return ia64_nat_merge(old, executed);
+}
+
+static void ia64_invalidate_nat_mask(DisasContext *ctx, uint32_t word,
+                                     uint64_t mask)
+{
+    ctx->memory.nat_known_clear[word] &= ~mask;
+    ctx->memory.nat_known_set[word] &= ~mask;
+}
+
+static bool ia64_insn_may_rewrite_stacked_gr_view(
+    const Ia64Instruction *insn)
+{
+    switch (insn->opcode) {
+    case IA64_OP_CLRRRB_PR:
+        /*
+         * clrrrb.pr does not change the GR rename base, but the shared RSE
+         * helper still synchronizes the current frame out and back in.
+         */
+        return true;
+    case IA64_OP_ALLOC:
+    case IA64_OP_COVER:
+    case IA64_OP_CLRRRB:
+    case IA64_OP_LOADRS:
+    case IA64_OP_BR_CALL:
+    case IA64_OP_BRL_CALL:
+    case IA64_OP_BR_CALL_INDIRECT:
+    case IA64_OP_BR_RET:
+    case IA64_OP_BR_IA:
+    case IA64_OP_BR_CEXIT:
+    case IA64_OP_BR_CTOP:
+    case IA64_OP_BR_WEXIT:
+    case IA64_OP_BR_WTOP:
+    case IA64_OP_RFI:
+        return true;
+    default:
         return false;
+    }
+}
+
+static bool ia64_insn_may_swap_banked_gr(const Ia64Instruction *insn)
+{
+    switch (insn->opcode) {
+    case IA64_OP_BSW0:
+    case IA64_OP_BSW1:
+    case IA64_OP_MOV_GRPSR:
+    case IA64_OP_RFI:
+        return true;
+    case IA64_OP_SSM:
+    case IA64_OP_RSM:
+        return insn->operands.common.immediate & IA64_PSR_BN;
+    default:
+        return false;
+    }
+}
+
+static void ia64_invalidate_nat_known_for_insn(
+    DisasContext *ctx, const Ia64Instruction *insn)
+{
+    if (insn->opcode == IA64_OP_BREAK) {
+        ctx->memory.nat_known_clear[0] = 1;
+        ctx->memory.nat_known_clear[1] = 0;
+        ctx->memory.nat_known_set[0] = 0;
+        ctx->memory.nat_known_set[1] = 0;
+        return;
+    }
+    if (ia64_insn_may_swap_banked_gr(insn)) {
+        ia64_invalidate_nat_mask(
+            ctx, 0, MAKE_64BIT_MASK(16, 16));
+    }
+    if (ia64_insn_may_rewrite_stacked_gr_view(insn)) {
+        ia64_invalidate_nat_mask(
+            ctx, 0, MAKE_64BIT_MASK(IA64_STACKED_GR_BASE,
+                                    64 - IA64_STACKED_GR_BASE));
+        ia64_invalidate_nat_mask(ctx, 1, UINT64_MAX);
     }
 }
 
 void ia64_update_nat_known(DisasContext *ctx,
                            const Ia64Instruction *insn)
 {
-    bool old_r1 = ia64_nat_is_known_clear(
-        ctx, insn->operands.common.destination);
-    bool old_r2 = ia64_nat_is_known_clear(ctx, insn->operands.common.source1);
-    bool old_r3 = ia64_nat_is_known_clear(ctx, insn->operands.common.source2);
+    IA64KnownNat old_r1;
+    IA64KnownNat old_r2;
+    IA64KnownNat old_r3;
+
+    if (ia64_current_insn_cannot_execute(ctx, insn)) {
+        return;
+    }
+
+    ia64_invalidate_nat_known_for_insn(ctx, insn);
+    old_r1 = ia64_nat_known(ctx, insn->operands.common.destination);
+    old_r2 = ia64_nat_known(ctx, insn->operands.common.source1);
+    old_r3 = ia64_nat_known(ctx, insn->operands.common.source2);
 
     if (ia64_insn_writes_gr_r1(insn)) {
-        bool result = ia64_nat_result_is_known_clear(ctx, insn);
+        IA64KnownNat result = ia64_nat_result_known(ctx, insn, old_r1);
 
         /* A predicated-off instruction preserves the old destination. */
-        ia64_nat_set_known_clear(ctx, insn->operands.common.destination,
-                                 result && (insn->qp == 0 || old_r1));
+        ia64_nat_set_known(
+            ctx, insn->operands.common.destination,
+            ia64_nat_after_predication(ctx, old_r1, result));
     }
 
     if (insn->reg_base_update) {
         /* The executed update assigns base.NaT | increment.NaT. */
-        ia64_nat_set_known_clear(ctx, insn->operands.common.source2,
-                                 old_r3 && old_r2);
+        ia64_nat_set_known(
+            ctx, insn->operands.common.source2,
+            ia64_nat_after_predication(ctx, old_r3,
+                                       ia64_nat_or(old_r3, old_r2)));
     }
     /* An immediate base update preserves the base register's NaT bit. */
 }
@@ -731,12 +1036,13 @@ static void ia64_gen_fr_sig_set(uint8_t reg)
 
 TCGv_i64 ia64_gen_fr_sig_read(uint8_t reg)
 {
-    TCGv_i64 bit = tcg_temp_new_i64();
+    TCGv_i64 bit;
 
     if (reg <= 1) {
-        tcg_gen_movi_i64(bit, 1);
-        return bit;
+        return tcg_constant_i64(1);
     }
+
+    bit = tcg_temp_new_i64();
     tcg_gen_shri_i64(bit, cpu_fr_sig[reg / 64], reg % 64);
     tcg_gen_andi_i64(bit, bit, 1);
     return bit;
@@ -751,6 +1057,35 @@ TCGv_i64 ia64_fr_significand_src(uint8_t reg)
         return tcg_constant_i64(1ULL << 63);
     }
     return cpu_fr[reg];
+}
+
+TCGv_i64 ia64_fr_binary_src(uint8_t reg)
+{
+    if (reg == IA64_FR_ZERO_INDEX) {
+        return tcg_constant_i64(0);
+    }
+    if (reg == IA64_FR_ONE_INDEX) {
+        return tcg_constant_i64(IA64_FR_ONE);
+    }
+    return cpu_fr[reg];
+}
+
+TCGv_i64 ia64_gen_fr_special_read(uint8_t reg)
+{
+    TCGv_i64 tags;
+
+    if (reg <= 1) {
+        return tcg_constant_i64(0);
+    }
+
+    tags = tcg_temp_new_i64();
+    tcg_gen_or_i64(tags, cpu_fr_nat[reg / 64],
+                   cpu_fr_sig[reg / 64]);
+    tcg_gen_or_i64(tags, tags, cpu_fr_ext_valid[reg / 64]);
+    tcg_gen_or_i64(tags, tags, cpu_fr_int_origin[reg / 64]);
+    tcg_gen_shri_i64(tags, tags, reg % 64);
+    tcg_gen_andi_i64(tags, tags, 1);
+    return tags;
 }
 
 static void ia64_gen_fr_ext_clear(uint8_t reg)
@@ -791,13 +1126,13 @@ static void ia64_gen_fr_nat_set(uint8_t reg)
 
 TCGv_i64 ia64_gen_fr_nat_read(uint8_t reg)
 {
-    TCGv_i64 bit = tcg_temp_new_i64();
+    TCGv_i64 bit;
 
     if (reg <= 1) {
-        tcg_gen_movi_i64(bit, 0);
-        return bit;
+        return tcg_constant_i64(0);
     }
 
+    bit = tcg_temp_new_i64();
     tcg_gen_shri_i64(bit, cpu_fr_nat[reg / 64], reg % 64);
     tcg_gen_andi_i64(bit, bit, 1);
     return bit;
@@ -994,7 +1329,8 @@ void ia64_gen_invalidate_alat_store(DisasContext *ctx, TCGv_i64 addr,
     gen_set_label(done);
 }
 
-static TCGLabel *ia64_gen_predicate_skip(const Ia64Instruction *insn,
+static TCGLabel *ia64_gen_predicate_skip(DisasContext *ctx,
+                                         const Ia64Instruction *insn,
                                          TCGv_i64 qp_value)
 {
     TCGLabel *skip;
@@ -1009,9 +1345,16 @@ static TCGLabel *ia64_gen_predicate_skip(const Ia64Instruction *insn,
         insn->opcode == IA64_OP_BR_WTOP) {
         return NULL;
     }
+    if (ctx->reg.current_qp_known && ctx->reg.current_qp_value) {
+        return NULL;
+    }
 
     skip = gen_new_label();
-    tcg_gen_brcondi_i64(TCG_COND_EQ, qp_value, 0, skip);
+    if (ctx->reg.current_qp_known) {
+        tcg_gen_br(skip);
+    } else {
+        tcg_gen_brcondi_i64(TCG_COND_EQ, qp_value, 0, skip);
+    }
     return skip;
 }
 
@@ -1022,24 +1365,71 @@ static void ia64_gen_predicate_end(TCGLabel *skip)
     }
 }
 
-static void ia64_gen_clear_unc_compare_targets(const Ia64Instruction *insn)
+typedef enum IA64KnownPredicate {
+    IA64_PREDICATE_UNKNOWN = -1,
+    IA64_PREDICATE_ZERO = 0,
+    IA64_PREDICATE_ONE = 1,
+} IA64KnownPredicate;
+
+static IA64KnownPredicate ia64_predicate_known(const DisasContext *ctx,
+                                               uint8_t reg)
+{
+    uint64_t bit = UINT64_C(1) << reg;
+
+    if (ctx->reg.pr_known_zero & bit) {
+        return IA64_PREDICATE_ZERO;
+    }
+    if (ctx->reg.pr_known_one & bit) {
+        return IA64_PREDICATE_ONE;
+    }
+    return IA64_PREDICATE_UNKNOWN;
+}
+
+static void ia64_predicate_set_known(DisasContext *ctx, uint8_t reg,
+                                     IA64KnownPredicate value)
+{
+    uint64_t bit;
+
+    if (reg == 0) {
+        return;
+    }
+    bit = UINT64_C(1) << reg;
+    ctx->reg.pr_known_zero &= ~bit;
+    ctx->reg.pr_known_one &= ~bit;
+    if (value == IA64_PREDICATE_ZERO) {
+        ctx->reg.pr_known_zero |= bit;
+    } else if (value == IA64_PREDICATE_ONE) {
+        ctx->reg.pr_known_one |= bit;
+    }
+}
+
+static IA64KnownPredicate ia64_predicate_merge(IA64KnownPredicate a,
+                                               IA64KnownPredicate b)
+{
+    return a == b ? a : IA64_PREDICATE_UNKNOWN;
+}
+
+static void ia64_gen_clear_unc_compare_targets(
+    DisasContext *ctx, const Ia64Instruction *insn)
 {
     if (insn->compare_unc) {
         if (insn->operands.common.auxiliary1 != 0) {
             tcg_gen_movi_i64(cpu_pr[insn->operands.common.auxiliary1], 0);
+            ia64_predicate_set_known(
+                ctx, insn->operands.common.auxiliary1,
+                IA64_PREDICATE_ZERO);
         }
         if (insn->operands.common.auxiliary2 != 0) {
             tcg_gen_movi_i64(cpu_pr[insn->operands.common.auxiliary2], 0);
+            ia64_predicate_set_known(
+                ctx, insn->operands.common.auxiliary2,
+                IA64_PREDICATE_ZERO);
         }
     }
 }
 
-static bool ia64_compare_has_equal_targets(const Ia64Instruction *insn)
+static bool ia64_insn_writes_predicate_pair(const Ia64Instruction *insn)
 {
-    if (insn->operands.common.auxiliary1 != insn->operands.common.auxiliary2) {
-        return false;
-    }
-
     switch (insn->opcode) {
     case IA64_OP_CMP_EQ:
     case IA64_OP_CMP_LT:
@@ -1131,6 +1521,49 @@ static bool ia64_compare_has_equal_targets(const Ia64Instruction *insn)
     }
 }
 
+static bool ia64_insn_is_integer_compare(const Ia64Instruction *insn)
+{
+    return (insn->opcode >= IA64_OP_CMP_EQ &&
+            insn->opcode <= IA64_OP_CMP_LTU_IMM) ||
+           (insn->opcode >= IA64_OP_CMP4_EQ &&
+            insn->opcode <= IA64_OP_CMP4_NE_OR_IMM);
+}
+
+static bool ia64_integer_compare_uses_immediate(
+    const Ia64Instruction *insn)
+{
+    switch (insn->opcode) {
+    case IA64_OP_CMP_EQ_IMM:
+    case IA64_OP_CMP_LT_IMM:
+    case IA64_OP_CMP_EQ_AND_IMM:
+    case IA64_OP_CMP_NE_AND_IMM:
+    case IA64_OP_CMP_EQ_OR_IMM:
+    case IA64_OP_CMP_NE_OR_IMM:
+    case IA64_OP_CMP_EQ_OR_ANDCM_IMM:
+    case IA64_OP_CMP_NE_OR_ANDCM_IMM:
+    case IA64_OP_CMP4_EQ_OR_ANDCM_IMM:
+    case IA64_OP_CMP4_NE_OR_ANDCM_IMM:
+    case IA64_OP_CMP_LTU_IMM:
+    case IA64_OP_CMP4_EQ_IMM:
+    case IA64_OP_CMP4_LT_IMM:
+    case IA64_OP_CMP4_LTU_IMM:
+    case IA64_OP_CMP4_EQ_AND_IMM:
+    case IA64_OP_CMP4_NE_AND_IMM:
+    case IA64_OP_CMP4_EQ_OR_IMM:
+    case IA64_OP_CMP4_NE_OR_IMM:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool ia64_compare_has_equal_targets(const Ia64Instruction *insn)
+{
+    return insn->operands.common.auxiliary1 ==
+               insn->operands.common.auxiliary2 &&
+           ia64_insn_writes_predicate_pair(insn);
+}
+
 void ia64_gen_predicate_test_write(const Ia64Instruction *insn,
                                    TCGv_i64 cond, TCGv_i64 not_cond)
 {
@@ -1182,6 +1615,337 @@ void ia64_gen_predicate_test_write(const Ia64Instruction *insn,
             tcg_gen_mov_i64(cpu_pr[insn->operands.common.auxiliary2], not_cond);
         }
         break;
+    }
+}
+
+static Ia64PredicateUpdate ia64_effective_predicate_update(
+    const Ia64Instruction *insn)
+{
+    switch (insn->opcode) {
+    case IA64_OP_TNAT_NZ_AND:
+        return IA64_PRED_UPDATE_AND;
+    case IA64_OP_TBIT_Z_OR_ANDCM:
+    case IA64_OP_TBIT_NZ_OR_ANDCM:
+        return IA64_PRED_UPDATE_OR_ANDCM;
+    default:
+        return insn->pred_update;
+    }
+}
+
+static IA64KnownPredicate ia64_predicate_dynamic_result(
+    IA64KnownPredicate old, Ia64PredicateUpdate update, bool second)
+{
+    switch (update) {
+    case IA64_PRED_UPDATE_AND:
+        return old == IA64_PREDICATE_ZERO ?
+               IA64_PREDICATE_ZERO : IA64_PREDICATE_UNKNOWN;
+    case IA64_PRED_UPDATE_OR:
+        return old == IA64_PREDICATE_ONE ?
+               IA64_PREDICATE_ONE : IA64_PREDICATE_UNKNOWN;
+    case IA64_PRED_UPDATE_OR_ANDCM:
+        if ((!second && old == IA64_PREDICATE_ONE) ||
+            (second && old == IA64_PREDICATE_ZERO)) {
+            return old;
+        }
+        return IA64_PREDICATE_UNKNOWN;
+    case IA64_PRED_UPDATE_NORMAL:
+    default:
+        return IA64_PREDICATE_UNKNOWN;
+    }
+}
+
+static IA64KnownPredicate ia64_predicate_known_result(
+    IA64KnownPredicate old, Ia64PredicateUpdate update, bool second,
+    bool condition)
+{
+    switch (update) {
+    case IA64_PRED_UPDATE_AND:
+        return condition ? old : IA64_PREDICATE_ZERO;
+    case IA64_PRED_UPDATE_OR:
+        return condition ? IA64_PREDICATE_ONE : old;
+    case IA64_PRED_UPDATE_OR_ANDCM:
+        if (!condition) {
+            return old;
+        }
+        return second ? IA64_PREDICATE_ZERO : IA64_PREDICATE_ONE;
+    case IA64_PRED_UPDATE_NORMAL:
+    default:
+        return (condition ^ second) ?
+               IA64_PREDICATE_ONE : IA64_PREDICATE_ZERO;
+    }
+}
+
+static bool ia64_predicate_nullifies_insn(const Ia64Instruction *insn)
+{
+    return insn->opcode != IA64_OP_BR_WEXIT &&
+           insn->opcode != IA64_OP_BR_WTOP;
+}
+
+static bool ia64_current_insn_cannot_execute(
+    const DisasContext *ctx, const Ia64Instruction *insn)
+{
+    return ia64_predicate_nullifies_insn(insn) &&
+           ctx->reg.current_qp_known &&
+           !ctx->reg.current_qp_value;
+}
+
+static bool ia64_current_insn_definitely_executes(
+    const DisasContext *ctx, const Ia64Instruction *insn)
+{
+    return !ia64_predicate_nullifies_insn(insn) ||
+           (ctx->reg.current_qp_known && ctx->reg.current_qp_value);
+}
+
+static void ia64_predicate_commit_result(
+    DisasContext *ctx, uint8_t reg, IA64KnownPredicate old,
+    IA64KnownPredicate executed, bool definitely_executes)
+{
+    ia64_predicate_set_known(
+        ctx, reg, definitely_executes ?
+        executed : ia64_predicate_merge(old, executed));
+}
+
+static void ia64_update_predicate_pair_known(
+    DisasContext *ctx, const Ia64Instruction *insn)
+{
+    Ia64PredicateUpdate update = ia64_effective_predicate_update(insn);
+    uint8_t p1 = insn->operands.common.auxiliary1;
+    uint8_t p2 = insn->operands.common.auxiliary2;
+    IA64KnownPredicate old1 = ia64_predicate_known(ctx, p1);
+    IA64KnownPredicate old2 = ia64_predicate_known(ctx, p2);
+    IA64KnownPredicate result1;
+    IA64KnownPredicate result2;
+    bool definitely_executes =
+        ia64_current_insn_definitely_executes(ctx, insn);
+
+    if (insn->opcode == IA64_OP_TF_Z ||
+        insn->opcode == IA64_OP_TF_NZ) {
+        bool bit = extract64(
+            ia64_env_cpu_class(ctx->env)->cpuid_features,
+            insn->operands.common.immediate, 1);
+        bool condition = insn->opcode == IA64_OP_TF_NZ ? bit : !bit;
+
+        result1 = ia64_predicate_known_result(old1, update, false,
+                                               condition);
+        result2 = ia64_predicate_known_result(old2, update, true,
+                                               condition);
+    } else if (insn->opcode == IA64_OP_TNAT_Z ||
+               insn->opcode == IA64_OP_TNAT_NZ ||
+               insn->opcode == IA64_OP_TNAT_NZ_AND) {
+        IA64KnownNat nat = ia64_nat_known(
+            ctx, insn->operands.common.source2);
+
+        if (nat == IA64_NAT_UNKNOWN) {
+            result1 = ia64_predicate_dynamic_result(old1, update, false);
+            result2 = ia64_predicate_dynamic_result(old2, update, true);
+        } else {
+            bool is_nz = insn->opcode != IA64_OP_TNAT_Z;
+            bool condition = is_nz ?
+                nat == IA64_NAT_SET : nat == IA64_NAT_CLEAR;
+
+            result1 = ia64_predicate_known_result(
+                old1, update, false, condition);
+            result2 = ia64_predicate_known_result(
+                old2, update, true, condition);
+        }
+    } else if ((insn->opcode == IA64_OP_TBIT_Z ||
+                insn->opcode == IA64_OP_TBIT_NZ ||
+                insn->opcode == IA64_OP_TBIT_Z_OR_ANDCM ||
+                insn->opcode == IA64_OP_TBIT_NZ_OR_ANDCM) &&
+               ia64_nat_known(ctx, insn->operands.common.source2) ==
+               IA64_NAT_SET) {
+        if (update == IA64_PRED_UPDATE_OR ||
+            update == IA64_PRED_UPDATE_OR_ANDCM) {
+            result1 = old1;
+            result2 = old2;
+        } else {
+            result1 = IA64_PREDICATE_ZERO;
+            result2 = IA64_PREDICATE_ZERO;
+        }
+    } else if (ia64_insn_is_integer_compare(insn)) {
+        bool immediate = ia64_integer_compare_uses_immediate(insn);
+        bool nat_set =
+            ia64_nat_known(ctx, insn->operands.common.source2) ==
+                IA64_NAT_SET ||
+            (!immediate &&
+             ia64_nat_known(ctx, insn->operands.common.source1) ==
+                IA64_NAT_SET);
+
+        if (nat_set &&
+            (update == IA64_PRED_UPDATE_OR ||
+             update == IA64_PRED_UPDATE_OR_ANDCM)) {
+            result1 = old1;
+            result2 = old2;
+        } else if (nat_set) {
+            result1 = IA64_PREDICATE_ZERO;
+            result2 = IA64_PREDICATE_ZERO;
+        } else {
+            result1 = ia64_predicate_dynamic_result(old1, update, false);
+            result2 = ia64_predicate_dynamic_result(old2, update, true);
+        }
+    } else {
+        result1 = ia64_predicate_dynamic_result(old1, update, false);
+        result2 = ia64_predicate_dynamic_result(old2, update, true);
+    }
+
+    ia64_predicate_commit_result(ctx, p1, old1, result1,
+                                 definitely_executes);
+    ia64_predicate_commit_result(ctx, p2, old2, result2,
+                                 definitely_executes);
+}
+
+static void ia64_invalidate_predicate_mask(DisasContext *ctx, uint64_t mask)
+{
+    mask &= ~UINT64_C(1);
+    ctx->reg.pr_known_zero &= ~mask;
+    ctx->reg.pr_known_one &= ~mask;
+}
+
+static void ia64_update_predicate_known(DisasContext *ctx,
+                                        const Ia64Instruction *insn)
+{
+    uint64_t rotating_mask = ~UINT64_C(0xffff);
+
+    if (ia64_current_insn_cannot_execute(ctx, insn)) {
+        return;
+    }
+    if (ia64_insn_writes_predicate_pair(insn)) {
+        ia64_update_predicate_pair_known(ctx, insn);
+        return;
+    }
+
+    switch (insn->opcode) {
+    case IA64_OP_FRCPA:
+        ia64_predicate_set_known(
+            ctx, insn->operands.common.auxiliary1,
+            IA64_PREDICATE_UNKNOWN);
+        break;
+    case IA64_OP_FPRCPA:
+    case IA64_OP_FPRSQRTA:
+    case IA64_OP_FRSQRTA:
+        ia64_predicate_set_known(
+            ctx, insn->operands.common.auxiliary2,
+            IA64_PREDICATE_UNKNOWN);
+        break;
+    case IA64_OP_MOV_GRPR:
+        ia64_invalidate_predicate_mask(
+            ctx, (uint64_t)insn->operands.common.immediate);
+        break;
+    case IA64_OP_MOV_PR_ROT_IMM: {
+        bool definitely_executes =
+            ia64_current_insn_definitely_executes(ctx, insn);
+        uint64_t value = (uint64_t)insn->operands.common.immediate;
+
+        for (uint8_t reg = 16; reg < IA64_PR_COUNT; reg++) {
+            IA64KnownPredicate old = ia64_predicate_known(ctx, reg);
+            IA64KnownPredicate result = (value & (UINT64_C(1) << reg)) ?
+                IA64_PREDICATE_ONE : IA64_PREDICATE_ZERO;
+
+            ia64_predicate_commit_result(ctx, reg, old, result,
+                                         definitely_executes);
+        }
+        break;
+    }
+    case IA64_OP_CLRRRB:
+    case IA64_OP_CLRRRB_PR:
+    case IA64_OP_ALLOC:
+    case IA64_OP_COVER:
+    case IA64_OP_BR_CALL:
+    case IA64_OP_BRL_CALL:
+    case IA64_OP_BR_CALL_INDIRECT:
+    case IA64_OP_BR_RET:
+    case IA64_OP_BR_CEXIT:
+    case IA64_OP_BR_CTOP:
+    case IA64_OP_BR_WEXIT:
+    case IA64_OP_BR_WTOP:
+        ia64_invalidate_predicate_mask(ctx, rotating_mask);
+        break;
+    case IA64_OP_BREAK:
+    case IA64_OP_RFI:
+        ia64_invalidate_predicate_mask(ctx, UINT64_MAX);
+        break;
+    default:
+        break;
+    }
+}
+
+static void ia64_rse_dirty_set_known(DisasContext *ctx, uint8_t reg)
+{
+    uint32_t bit;
+
+    if (reg < IA64_STACKED_GR_BASE) {
+        return;
+    }
+    bit = reg - IA64_STACKED_GR_BASE;
+    ctx->reg.rse_dirty_known[bit / 64] |= UINT64_C(1) << (bit % 64);
+}
+
+static bool ia64_insn_may_preserve_gr_destination(
+    const Ia64Instruction *insn)
+{
+    switch (insn->opcode) {
+    case IA64_OP_LD1C_CLR:
+    case IA64_OP_LD2C_CLR:
+    case IA64_OP_LD4C_CLR:
+    case IA64_OP_LD8C_CLR:
+    case IA64_OP_LD1C_NC:
+    case IA64_OP_LD2C_NC:
+    case IA64_OP_LD4C_NC:
+    case IA64_OP_LD8C_NC:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool ia64_insn_resets_rse_dirty(const Ia64Instruction *insn)
+{
+    switch (insn->opcode) {
+    case IA64_OP_ALLOC:
+    case IA64_OP_COVER:
+    case IA64_OP_CLRRRB:
+    case IA64_OP_CLRRRB_PR:
+    case IA64_OP_FLUSHRS:
+    case IA64_OP_LOADRS:
+    case IA64_OP_BR_CALL:
+    case IA64_OP_BRL_CALL:
+    case IA64_OP_BR_CALL_INDIRECT:
+    case IA64_OP_BR_RET:
+    case IA64_OP_BR_IA:
+    case IA64_OP_BR_CEXIT:
+    case IA64_OP_BR_CTOP:
+    case IA64_OP_BR_WEXIT:
+    case IA64_OP_BR_WTOP:
+    case IA64_OP_RFI:
+    case IA64_OP_BREAK:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void ia64_update_rse_dirty_known(DisasContext *ctx,
+                                        const Ia64Instruction *insn)
+{
+    if (ia64_current_insn_cannot_execute(ctx, insn)) {
+        return;
+    }
+    if (ia64_insn_resets_rse_dirty(insn)) {
+        ctx->reg.rse_dirty_known[0] = 0;
+        ctx->reg.rse_dirty_known[1] = 0;
+    }
+    if (!ia64_current_insn_definitely_executes(ctx, insn)) {
+        return;
+    }
+    if (ia64_insn_writes_gr_r1(insn) &&
+        !ia64_insn_may_preserve_gr_destination(insn)) {
+        ia64_rse_dirty_set_known(
+            ctx, insn->operands.common.destination);
+    }
+    if (insn->reg_base_update || insn->imm_base_update ||
+        (insn->opcode == IA64_OP_HINT_M &&
+         insn->hint_m_reg_increment)) {
+        ia64_rse_dirty_set_known(ctx, insn->operands.common.source2);
     }
 }
 
@@ -1560,6 +2324,22 @@ void ia64_prepare_self_counted_loop(
         return;
     }
 
+    /*
+     * The generated TCG back edge reuses this bundle after architectural
+     * state has changed.  Values learned before the loop therefore do not
+     * necessarily describe later iterations.
+     */
+    ctx->memory.nat_known_clear[0] = 1;
+    ctx->memory.nat_known_clear[1] = 0;
+    ctx->memory.nat_known_set[0] = 0;
+    ctx->memory.nat_known_set[1] = 0;
+    ctx->reg.cfm_sof_valid = false;
+    ctx->reg.cpl_known = false;
+    ctx->reg.pr_known_zero = 0;
+    ctx->reg.pr_known_one = 1;
+    ctx->reg.rse_dirty_known[0] = 0;
+    ctx->reg.rse_dirty_known[1] = 0;
+
     ctx->branch.counted_self_label = gen_new_label();
     ctx->branch.counted_self_budget = tcg_temp_new_i64();
     ctx->branch.counted_self_ip = bundle_ip;
@@ -1642,50 +2422,81 @@ bool ia64_clock_access_needs_io(const DisasContext *ctx)
     return tb_cflags(ctx->base.tb) & CF_USE_ICOUNT;
 }
 
-void ia64_gen_note_stacked_gr_write(uint8_t reg)
+void ia64_gen_note_stacked_gr_write(const Ia64Instruction *insn, uint8_t reg)
 {
+    DisasContext *ctx = insn ? insn->ctx : NULL;
     uint32_t bit;
 
     if (reg < IA64_STACKED_GR_BASE) {
         return;
     }
     bit = reg - IA64_STACKED_GR_BASE;
+    if (ctx && (ctx->reg.rse_dirty_known[bit / 64] &
+                (UINT64_C(1) << (bit % 64)))) {
+        return;
+    }
     tcg_gen_ori_i64(cpu_rse_gr_dirty[bit / 64],
                     cpu_rse_gr_dirty[bit / 64], 1ULL << (bit % 64));
 }
 
-void ia64_gen_gr_nat_clear(uint8_t reg)
+static IA64KnownNat ia64_insn_nat_known(const Ia64Instruction *insn,
+                                        uint8_t reg)
+{
+    const DisasContext *ctx = insn ? insn->ctx : NULL;
+
+    return ctx ? ia64_nat_known(ctx, reg) : IA64_NAT_UNKNOWN;
+}
+
+bool ia64_gr_nat_is_known_clear(const Ia64Instruction *insn, uint8_t reg)
+{
+    return ia64_insn_nat_known(insn, reg) == IA64_NAT_CLEAR;
+}
+
+bool ia64_gr_nat_is_known_set(const Ia64Instruction *insn, uint8_t reg)
+{
+    return ia64_insn_nat_known(insn, reg) == IA64_NAT_SET;
+}
+
+void ia64_gen_gr_nat_clear(const Ia64Instruction *insn, uint8_t reg)
 {
     if (reg == 0) {
         return;
     }
 
-    ia64_gen_note_stacked_gr_write(reg);
+    ia64_gen_note_stacked_gr_write(insn, reg);
+    if (ia64_insn_nat_known(insn, reg) == IA64_NAT_CLEAR) {
+        return;
+    }
     tcg_gen_andi_i64(cpu_nat[reg / 64], cpu_nat[reg / 64],
                      ~(1ULL << (reg % 64)));
 }
 
-void ia64_gen_gr_nat_set(uint8_t reg)
+void ia64_gen_gr_nat_set(const Ia64Instruction *insn, uint8_t reg)
 {
     if (reg == 0) {
         return;
     }
 
-    ia64_gen_note_stacked_gr_write(reg);
+    ia64_gen_note_stacked_gr_write(insn, reg);
+    if (ia64_insn_nat_known(insn, reg) == IA64_NAT_SET) {
+        return;
+    }
     tcg_gen_ori_i64(cpu_nat[reg / 64], cpu_nat[reg / 64],
                     1ULL << (reg % 64));
 }
 
-void ia64_gen_gr_write_nat_clear(uint8_t reg, TCGv_i64 value)
+void ia64_gen_gr_write_nat_clear(const Ia64Instruction *insn, uint8_t reg,
+                                 TCGv_i64 value)
 {
     if (reg == 0) {
         return;
     }
     tcg_gen_mov_i64(cpu_gr[reg], value);
-    ia64_gen_gr_nat_clear(reg);
+    ia64_gen_gr_nat_clear(insn, reg);
 }
 
-void ia64_gen_gr_nat_assign(uint8_t reg, TCGv_i64 bit)
+void ia64_gen_gr_nat_assign(const Ia64Instruction *insn, uint8_t reg,
+                            TCGv_i64 bit)
 {
     TCGv_i64 shifted;
 
@@ -1693,7 +2504,7 @@ void ia64_gen_gr_nat_assign(uint8_t reg, TCGv_i64 bit)
         return;
     }
 
-    ia64_gen_note_stacked_gr_write(reg);
+    ia64_gen_note_stacked_gr_write(insn, reg);
     shifted = tcg_temp_new_i64();
     tcg_gen_andi_i64(shifted, bit, 1);
     tcg_gen_shli_i64(shifted, shifted, reg % 64);
@@ -1704,25 +2515,35 @@ void ia64_gen_gr_nat_assign(uint8_t reg, TCGv_i64 bit)
 
 TCGv_i64 ia64_gen_gr_nat_read(uint8_t reg)
 {
-    TCGv_i64 bit = tcg_temp_new_i64();
+    TCGv_i64 bit;
 
     if (reg == 0) {
-        tcg_gen_movi_i64(bit, 0);
-        return bit;
+        return tcg_constant_i64(0);
     }
 
+    bit = tcg_temp_new_i64();
     tcg_gen_shri_i64(bit, cpu_nat[reg / 64], reg % 64);
     tcg_gen_andi_i64(bit, bit, 1);
     return bit;
 }
 
-void ia64_gen_gr_nat_from_1(uint8_t dst, uint8_t src)
+void ia64_gen_gr_nat_from_1(const Ia64Instruction *insn, uint8_t dst,
+                            uint8_t src)
 {
+    IA64KnownNat known;
+
     if (dst == 0) {
         return;
     }
 
-    ia64_gen_gr_nat_assign(dst, ia64_gen_gr_nat_read(src));
+    known = ia64_insn_nat_known(insn, src);
+    if (known == IA64_NAT_CLEAR) {
+        ia64_gen_gr_nat_clear(insn, dst);
+    } else if (known == IA64_NAT_SET) {
+        ia64_gen_gr_nat_set(insn, dst);
+    } else {
+        ia64_gen_gr_nat_assign(insn, dst, ia64_gen_gr_nat_read(src));
+    }
 }
 
 static TCGv_i64 ia64_gen_va_unimplemented(TCGv_i64 va, uint8_t impl_va_msb)
@@ -1750,9 +2571,11 @@ static TCGv_i64 ia64_gen_va_unimplemented(TCGv_i64 va, uint8_t impl_va_msb)
     return result;
 }
 
-void ia64_gen_gr_nat_from_1_or_unimplemented_va(uint8_t dst, uint8_t src,
-                                                uint8_t impl_va_msb)
+void ia64_gen_gr_nat_from_1_or_unimplemented_va(
+    const Ia64Instruction *insn, uint8_t dst, uint8_t src,
+    uint8_t impl_va_msb)
 {
+    IA64KnownNat known;
     TCGv_i64 nat;
     TCGv_i64 unimplemented;
 
@@ -1760,11 +2583,20 @@ void ia64_gen_gr_nat_from_1_or_unimplemented_va(uint8_t dst, uint8_t src,
         return;
     }
 
-    nat = ia64_gen_gr_nat_read(src);
+    known = ia64_insn_nat_known(insn, src);
+    if (known == IA64_NAT_SET) {
+        ia64_gen_gr_nat_set(insn, dst);
+        return;
+    }
     unimplemented = ia64_gen_va_unimplemented(ia64_gr_src(src),
                                               impl_va_msb);
+    if (known == IA64_NAT_CLEAR) {
+        ia64_gen_gr_nat_assign(insn, dst, unimplemented);
+        return;
+    }
+    nat = ia64_gen_gr_nat_read(src);
     tcg_gen_or_i64(nat, nat, unimplemented);
-    ia64_gen_gr_nat_assign(dst, nat);
+    ia64_gen_gr_nat_assign(insn, dst, nat);
 }
 
 void ia64_gen_fr_nat_from_gr(uint8_t dst, uint8_t src)
@@ -1776,8 +2608,11 @@ void ia64_gen_fr_nat_from_gr(uint8_t dst, uint8_t src)
     ia64_gen_fr_nat_assign(dst, ia64_gen_gr_nat_read(src));
 }
 
-void ia64_gen_gr_nat_from_2(uint8_t dst, uint8_t src1, uint8_t src2)
+void ia64_gen_gr_nat_from_2(const Ia64Instruction *insn, uint8_t dst,
+                            uint8_t src1, uint8_t src2)
 {
+    IA64KnownNat known1;
+    IA64KnownNat known2;
     TCGv_i64 bit;
     TCGv_i64 src_bit;
 
@@ -1785,10 +2620,73 @@ void ia64_gen_gr_nat_from_2(uint8_t dst, uint8_t src1, uint8_t src2)
         return;
     }
 
+    known1 = ia64_insn_nat_known(insn, src1);
+    known2 = ia64_insn_nat_known(insn, src2);
+    if (known1 == IA64_NAT_SET || known2 == IA64_NAT_SET) {
+        ia64_gen_gr_nat_set(insn, dst);
+        return;
+    }
+    if (known1 == IA64_NAT_CLEAR) {
+        ia64_gen_gr_nat_from_1(insn, dst, src2);
+        return;
+    }
+    if (known2 == IA64_NAT_CLEAR) {
+        ia64_gen_gr_nat_from_1(insn, dst, src1);
+        return;
+    }
     bit = ia64_gen_gr_nat_read(src1);
     src_bit = ia64_gen_gr_nat_read(src2);
     tcg_gen_or_i64(bit, bit, src_bit);
-    ia64_gen_gr_nat_assign(dst, bit);
+    ia64_gen_gr_nat_assign(insn, dst, bit);
+}
+
+void ia64_gen_gr_nat_from_3(const Ia64Instruction *insn, uint8_t dst,
+                            uint8_t src1, uint8_t src2, uint8_t src3)
+{
+    IA64KnownNat known1;
+    IA64KnownNat known2;
+    IA64KnownNat known3;
+    TCGv_i64 bit = NULL;
+
+    if (dst == 0) {
+        return;
+    }
+
+    known1 = ia64_insn_nat_known(insn, src1);
+    known2 = ia64_insn_nat_known(insn, src2);
+    known3 = ia64_insn_nat_known(insn, src3);
+    if (known1 == IA64_NAT_SET ||
+        known2 == IA64_NAT_SET ||
+        known3 == IA64_NAT_SET) {
+        ia64_gen_gr_nat_set(insn, dst);
+        return;
+    }
+    if (known1 == IA64_NAT_UNKNOWN) {
+        bit = ia64_gen_gr_nat_read(src1);
+    }
+    if (known2 == IA64_NAT_UNKNOWN) {
+        if (bit == NULL) {
+            bit = ia64_gen_gr_nat_read(src2);
+        } else {
+            TCGv_i64 src_bit = ia64_gen_gr_nat_read(src2);
+
+            tcg_gen_or_i64(bit, bit, src_bit);
+        }
+    }
+    if (known3 == IA64_NAT_UNKNOWN) {
+        if (bit == NULL) {
+            bit = ia64_gen_gr_nat_read(src3);
+        } else {
+            TCGv_i64 src_bit = ia64_gen_gr_nat_read(src3);
+
+            tcg_gen_or_i64(bit, bit, src_bit);
+        }
+    }
+    if (bit == NULL) {
+        ia64_gen_gr_nat_clear(insn, dst);
+    } else {
+        ia64_gen_gr_nat_assign(insn, dst, bit);
+    }
 }
 
 
@@ -1797,13 +2695,23 @@ void ia64_gen_check_nat_consumption(const Ia64Instruction *insn,
                                     Ia64NatConsumptionKind kind)
 {
     const DisasContext *ctx = insn->ctx;
+    IA64KnownNat known = ctx ?
+        ia64_nat_known(ctx, reg) : IA64_NAT_UNKNOWN;
     TCGv_i64 nat;
     TCGLabel *ok;
 
-    if (reg == 0 ||
-        (ctx &&
-         (ctx->memory.nat_known_clear[reg / 64] &
-          (1ULL << (reg % 64))))) {
+    if (known == IA64_NAT_CLEAR) {
+        return;
+    }
+
+    if (kind == IA64_NAT_NON_ACCESS) {
+        isr_access |= IA64_ISR_NA;
+    }
+    if (known == IA64_NAT_SET) {
+        tcg_gen_movi_i64(cpu_ip, insn->address);
+        gen_helper_raise_nat_consumption(
+            tcg_env, tcg_constant_i64(isr_access),
+            tcg_constant_i64(insn->address | insn->slot));
         return;
     }
 
@@ -1811,9 +2719,6 @@ void ia64_gen_check_nat_consumption(const Ia64Instruction *insn,
     ok = gen_new_label();
     tcg_gen_brcondi_i64(TCG_COND_EQ, nat, 0, ok);
     tcg_gen_movi_i64(cpu_ip, insn->address);
-    if (kind == IA64_NAT_NON_ACCESS) {
-        isr_access |= IA64_ISR_NA;
-    }
     gen_helper_raise_nat_consumption(
         tcg_env, tcg_constant_i64(isr_access),
         tcg_constant_i64(insn->address | insn->slot));
@@ -1841,6 +2746,8 @@ void ia64_gen_check_fr_nat_consumption(const Ia64Instruction *insn,
 static void ia64_gen_check_gr_in_frame(const Ia64Instruction *insn,
                                        uint8_t reg)
 {
+    DisasContext *ctx = insn->ctx;
+
     if (reg == 0) {
         ia64_gen_raise_exception(IA64_EXCP_ILLEGAL, insn->address,
                                   insn->raw, insn->slot);
@@ -1848,11 +2755,26 @@ static void ia64_gen_check_gr_in_frame(const Ia64Instruction *insn,
     }
 
     if (reg >= IA64_STACKED_GR_BASE) {
-        TCGv_i32 sof = tcg_temp_new_i32();
         TCGLabel *valid = gen_new_label();
+        TCGv_i32 cfm_sof;
 
-        tcg_gen_ld8u_i32(sof, tcg_env, offsetof(CPUIA64State, cfm_sof));
-        tcg_gen_brcondi_i32(TCG_COND_GTU, sof,
+        if (ctx->reg.cfm_sof_valid) {
+            cfm_sof = ctx->reg.cfm_sof;
+        } else {
+            cfm_sof = tcg_temp_new_i32();
+            tcg_gen_ld8u_i32(cfm_sof, tcg_env,
+                             offsetof(CPUIA64State, cfm_sof));
+            /*
+             * A load emitted below an unknown predicate does not dominate
+             * later instructions: the predicated instruction may skip it.
+             * Cache only values whose defining load certainly executes.
+             */
+            if (ia64_current_insn_definitely_executes(ctx, insn)) {
+                ctx->reg.cfm_sof = cfm_sof;
+                ctx->reg.cfm_sof_valid = true;
+            }
+        }
+        tcg_gen_brcondi_i32(TCG_COND_GTU, cfm_sof,
                             reg - IA64_STACKED_GR_BASE, valid);
         ia64_gen_raise_exception(IA64_EXCP_ILLEGAL, insn->address,
                                   insn->raw, insn->slot);
@@ -1862,8 +2784,8 @@ static void ia64_gen_check_gr_in_frame(const Ia64Instruction *insn,
 
 void ia64_gen_check_privileged(const Ia64Instruction *insn)
 {
-    TCGv_i64 cpl = tcg_temp_new_i64();
-    TCGLabel *allowed = gen_new_label();
+    const DisasContext *ctx = insn->ctx;
+    TCGLabel *allowed = NULL;
     uint64_t isr = 0x10;
 
     if (insn->opcode == IA64_OP_TAK) {
@@ -1872,13 +2794,23 @@ void ia64_gen_check_privileged(const Ia64Instruction *insn)
         isr |= IA64_ISR_NA;
     }
 
-    tcg_gen_andi_i64(cpl, cpu_psr, IA64_PSR_CPL_MASK);
-    tcg_gen_brcondi_i64(TCG_COND_EQ, cpl, 0, allowed);
+    if (ctx && ctx->reg.cpl_known && ctx->reg.cpl == 0) {
+        return;
+    }
+    if (!ctx || !ctx->reg.cpl_known) {
+        TCGv_i64 cpl = tcg_temp_new_i64();
+
+        allowed = gen_new_label();
+        tcg_gen_andi_i64(cpl, cpu_psr, IA64_PSR_CPL_MASK);
+        tcg_gen_brcondi_i64(TCG_COND_EQ, cpl, 0, allowed);
+    }
     tcg_gen_st_i64(tcg_constant_i64(isr), tcg_env,
                    offsetof(CPUIA64State, cr_isr));
     ia64_gen_raise_exception(IA64_EXCP_PRIVILEGED_OP, insn->address,
                               insn->raw, insn->slot);
-    gen_set_label(allowed);
+    if (allowed != NULL) {
+        gen_set_label(allowed);
+    }
 }
 
 void ia64_gen_check_register_index(const Ia64Instruction *insn,
@@ -2050,7 +2982,8 @@ bool ia64_gen_zero_st1_cloop(DisasContext *ctx,
                               tcg_constant_i32(ctx->branch.cloop_zero_st1_base),
                               tcg_constant_i32(ctx->memory.mmu_idx),
                               tcg_constant_i32(IA64_CLOOP_ZERO_ST1_MAX));
-    ia64_gen_note_stacked_gr_write(ctx->branch.cloop_zero_st1_base);
+    ia64_gen_note_stacked_gr_write(insn,
+                                   ctx->branch.cloop_zero_st1_base);
     ia64_gen_force_ri_tracked(ctx, insn->slot);
 
     tcg_gen_brcondi_i64(TCG_COND_EQ, taken, 0, l_nobr);
@@ -2403,6 +3336,7 @@ static IA64GenResult ia64_gen_dispatch(DisasContext *ctx,
 
 typedef enum IA64PrepareResult {
     IA64_PREPARE_DISPATCH,
+    IA64_PREPARE_NULLIFIED,
     IA64_PREPARE_COMPLETE,
     IA64_PREPARE_NORETURN,
 } IA64PrepareResult;
@@ -2411,6 +3345,7 @@ static IA64PrepareResult ia64_gen_prepare_insn(
     DisasContext *ctx, const Ia64Instruction *insn,
     TCGLabel **predicate_skip)
 {
+    IA64KnownPredicate qp_known;
     TCGLabel *skip;
     TCGv_i64 qp_value;
 
@@ -2429,7 +3364,16 @@ static IA64PrepareResult ia64_gen_prepare_insn(
         return IA64_PREPARE_NORETURN;
     }
 
-    qp_value = insn->qp == 0 ? tcg_constant_i64(1) : cpu_pr[insn->qp];
+    qp_known = ia64_predicate_known(ctx, insn->qp);
+    ctx->reg.current_qp_known = qp_known != IA64_PREDICATE_UNKNOWN;
+    ctx->reg.current_qp_value = qp_known == IA64_PREDICATE_ONE;
+    if (qp_known == IA64_PREDICATE_ONE) {
+        qp_value = tcg_constant_i64(1);
+    } else if (qp_known == IA64_PREDICATE_ZERO) {
+        qp_value = tcg_constant_i64(0);
+    } else {
+        qp_value = cpu_pr[insn->qp];
+    }
     if ((insn->compare_unc ||
          (insn->clear_p2_before_predicate &&
           insn->qp == insn->operands.common.auxiliary2)) &&
@@ -2449,12 +3393,18 @@ static IA64PrepareResult ia64_gen_prepare_insn(
                                   insn->raw, insn->slot);
         return IA64_PREPARE_NORETURN;
     }
-    ia64_gen_clear_unc_compare_targets(insn);
+    ia64_gen_clear_unc_compare_targets(ctx, insn);
     if (insn->clear_p2_before_predicate &&
         insn->operands.common.auxiliary2 != 0) {
         tcg_gen_movi_i64(cpu_pr[insn->operands.common.auxiliary2], 0);
+        ia64_predicate_set_known(
+            ctx, insn->operands.common.auxiliary2, IA64_PREDICATE_ZERO);
     }
-    skip = ia64_gen_predicate_skip(insn, qp_value);
+    if (ia64_current_insn_cannot_execute(ctx, insn)) {
+        *predicate_skip = NULL;
+        return IA64_PREPARE_NULLIFIED;
+    }
+    skip = ia64_gen_predicate_skip(ctx, insn, qp_value);
     *predicate_skip = skip;
     if (insn->placement_illegal) {
         qemu_log_mask(LOG_GUEST_ERROR,
@@ -2564,6 +3514,11 @@ bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
     if (prepare == IA64_PREPARE_NORETURN) {
         return true;
     }
+    if (prepare == IA64_PREPARE_NULLIFIED) {
+        ia64_gen_note_successful_bundle(insn->address, record_iipa,
+                                        track_psr_suppression);
+        return false;
+    }
     if (prepare == IA64_PREPARE_COMPLETE) {
         return false;
     }
@@ -2573,6 +3528,8 @@ bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
         return true;
     }
     if (result == IA64_GEN_CONTINUE) {
+        ia64_update_predicate_known(ctx, insn);
+        ia64_update_rse_dirty_known(ctx, insn);
         ia64_gen_predicate_end(skip);
         ia64_gen_note_successful_bundle(insn->address, record_iipa,
                                         track_psr_suppression);
@@ -2618,6 +3575,16 @@ static void ia64_tr_init_disas_context(DisasContextBase *db, CPUState *cs)
     ctx->memory.full_alat = ctx->env->alat_state.alat_full;
     ctx->memory.nat_known_clear[0] = 1;
     ctx->memory.nat_known_clear[1] = 0;
+    ctx->memory.nat_known_set[0] = 0;
+    ctx->memory.nat_known_set[1] = 0;
+    ctx->reg.cfm_sof_valid = false;
+    ctx->reg.pr_known_zero = 0;
+    ctx->reg.pr_known_one = 1;
+    ctx->reg.rse_dirty_known[0] = 0;
+    ctx->reg.rse_dirty_known[1] = 0;
+    ctx->reg.cpl = (flags & IA64_TB_FLAG_CPL_MASK) >>
+                   IA64_TB_FLAG_CPL_SHIFT;
+    ctx->reg.cpl_known = true;
     ctx->restart.instruction_group_start =
         ctx->base.tb->flags & IA64_TB_FLAG_GROUP_START;
     ctx->restart.next_instruction_group_start =
@@ -2686,6 +3653,7 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
         Ia64Instruction insn = ia64_decode_insn_for_model(
             ctx->env, template_info->units[slot], slots[slot],
             bundle_ip, slot);
+        bool known_nullified;
         bool stop_after;
         bool track_iipa_for_insn;
 
@@ -2703,10 +3671,13 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
             ia64_insn_has_illegal_register(&insn);
         insn.reserved_field = ia64_insn_has_reserved_mask_field(&insn);
         ctx->restart.next_instruction_group_start = stop_after;
-        if (ia64_insn_may_set_psr_ic(&insn)) {
+        known_nullified =
+            ia64_predicate_nullifies_insn(&insn) &&
+            ia64_predicate_known(ctx, insn.qp) == IA64_PREDICATE_ZERO;
+        if (!known_nullified && ia64_insn_may_set_psr_ic(&insn)) {
             ctx->restart.track_iipa = true;
         }
-        if (ia64_insn_may_modify_psr_ic(&insn)) {
+        if (!known_nullified && ia64_insn_may_modify_psr_ic(&insn)) {
             psr_ic_modified = true;
         }
         track_iipa_for_insn = ctx->restart.track_iipa;
@@ -2736,15 +3707,18 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
         }
         ia64_gen_advance_restart_point(ctx, bundle_ip, slot, skip_x_slot);
         ia64_update_nat_known(ctx, &insn);
+        ia64_update_cached_register_state(ctx, &insn);
         ctx->restart.instruction_group_start =
             ctx->restart.next_instruction_group_start;
-        if (ia64_insn_may_modify_psr_ri(&insn)) {
+        if (!ia64_current_insn_cannot_execute(ctx, &insn) &&
+            ia64_insn_may_modify_psr_ri(&insn)) {
             ctx->restart.current_ri_known = false;
         }
         if (track_iipa_for_insn && !psr_ic_modified) {
             record_iipa = false;
         }
         ctx->restart.track_psr_suppression =
+            !ia64_current_insn_cannot_execute(ctx, &insn) &&
             ia64_insn_may_set_fault_suppression(&insn);
     }
 
