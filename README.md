@@ -1,25 +1,30 @@
 # qemu-system-ia64
 
 Experimental QEMU full-system emulation target for IA-64/Itanium guests.
-This codebase is written using LLMs. Therefore, do not send any pull requests related to this project to the QEMU upstream.
 
-## Emulated Platform
+> [!IMPORTANT]
+> This codebase is written using LLMs. Do not send pull requests related to this project to the QEMU upstream.
 
-The default machine is `ia64-vpc`.
-It models an IA-64 virtual PC profile intended for firmware, boot loader, and operating-system bring-up:
+## Contents
 
-- Montecito CPU model by default, with Merced and Madison selection available.
-  All models use TCG translation and provide PAL/SAL helpers, the register stack engine, TLB/VHPT paths, and architectural floating-point state.
-- 1 vCPU by default, configurable from 1 to 4 vCPUs; MTTCG is supported with `-accel tcg,thread=multi`
-- 2 GiB default RAM
-- project-owned IA-64 EFI firmware built from source under `roms/ia64-firmware/`
-- EFI boot/runtime services, an interactive pre-boot shell, PE/COFF and EBC image loading, decompression, filesystems, graphics, storage, USB/input, and debug-support protocols
-- local SAPIC, I/O SAPIC, ACPI platform tables, RTC, watchdog, persistent NVRAM, and serial/debug ports
-- PCI root bus with LSI53C895A SCSI boot storage, ICH9 AHCI, e1000 Ethernet, OHCI/UHCI USB, and optional CMD646 IDE/ATAPI
-- ATI-compatible PCI graphics by default, with standard VGA available as an alternative
-- PS/2 input by default, or an automatically attached USB keyboard and absolute USB tablet when `i8042=off` is selected
+- [Quick start](#quick-start)
+- [Emulated platform](#emulated-platform)
+- [Machine profiles](#machine-profiles)
+- [CPU models](#cpu-models)
+- [Build configurations](#build-configurations)
+- [Runtime configuration](#runtime-configuration)
+- [EFI firmware and shell](#efi-firmware-and-shell)
+- [Tests](#tests)
+- [Status](#status)
+- [Legal disclaimer](#legal-disclaimer)
 
-## Build
+## Quick start
+
+### Prerequisite
+
+The firmware build requires an IA-64 ELF cross toolchain named `ia64-linux-gnu-*` in `PATH`.
+
+### Build
 
 Configure and build the IA-64 target with GTK:
 
@@ -28,7 +33,89 @@ Configure and build the IA-64 target with GTK:
 ninja -C build qemu-system-ia64 roms/ia64-firmware/ia64-firmware.bin
 ```
 
-For guest-performance measurements, use an IA-64-only build without the compiler hardening passes that add substantial overhead to TCG helper calls:
+### Boot installation media
+
+```sh
+./build/qemu-system-ia64 \
+  -machine ia64-vpc \
+  -bios ./build/roms/ia64-firmware/ia64-firmware.bin \
+  -drive file=/path/to/guest-media.iso,media=cdrom,format=raw,readonly=on \
+  -display gtk
+```
+
+## Emulated platform
+
+The default machine is `ia64-vpc`. It models an Itanium 2 based virtual PC intended for firmware, boot-loader, and operating-system bring-up.
+
+### Defaults
+
+| Component | Default | Available options and notes |
+| --- | --- | --- |
+| Machine | `ia64-vpc` | Backward-compatible alias of `itanium2-vpc`; `itanium-vpc` is available for first-generation compatibility |
+| CPU | `montecito` | `merced` and `madison` are also available |
+| vCPUs | 1 | Configurable from 1 to 4; MTTCG is supported with `-accel tcg,thread=multi` |
+| RAM | 2 GiB | Override with the standard QEMU `-m` option |
+| Firmware | Project-owned IA-64 EFI firmware | Built from source under `roms/ia64-firmware/` |
+| Graphics | ATI-compatible PCI graphics | Standard VGA is available with `-vga std` |
+| Input | PS/2 | Setting `i8042=off` automatically attaches a USB keyboard and absolute USB tablet |
+| Network | e1000, 82540EM-compatible | User-mode and TAP backends are supported; EFI network boot is not currently provided |
+
+### Emulated facilities
+
+- TCG translation for all CPU models, including PAL/SAL helpers, the register stack engine, TLB/VHPT paths, and architectural floating-point state
+- EFI boot and runtime services, an interactive pre-boot shell, PE/COFF and EBC image loading, decompression, filesystems, graphics, storage, USB/input, and debug-support protocols
+- Local SAPIC, I/O SAPIC, ACPI platform tables, RTC, watchdog, persistent NVRAM, and serial/debug ports
+- A PCI root bus with LSI53C895A SCSI boot storage, ICH9 AHCI, e1000 Ethernet, OHCI/UHCI USB, and optional CMD646 IDE/ATAPI
+
+## Machine profiles
+
+| Profile | Default CPU | Intended use |
+| --- | --- | --- |
+| `itanium2-vpc` | `montecito` | Standards-oriented profile with early-firmware compatibility workarounds disabled |
+| `ia64-vpc` | `montecito` | Backward-compatible alias of `itanium2-vpc` |
+| `itanium-vpc` | `merced` | First-generation systems requiring narrowly scoped firmware and SAL compatibility |
+
+Machine and CPU selection are intentionally independent. A `-cpu` override changes processor-generation behavior, but it does not enable or disable the selected machine profile's firmware compatibility flags.
+
+For a first-generation guest:
+
+```sh
+./build/qemu-system-ia64 \
+  -machine itanium-vpc \
+  -bios ./build/roms/ia64-firmware/ia64-firmware.bin \
+  -drive file=/path/to/guest-media.iso,media=cdrom,format=raw,readonly=on \
+  -display gtk
+```
+
+## CPU models
+
+The `ia64-vpc` and `itanium2-vpc` machines use `montecito` by default, while `itanium-vpc` uses `merced`. Select a different model with `-cpu`.
+
+CPU selection changes guest-visible CPUID and PAL information as well as the available instruction set.
+
+### `montecito` — default for Itanium 2 generation machines
+
+- Implements the later 16-byte operations `ld16`, `ld16.acq`, `st16`, `st16.rel`, `cmp8xchg16.acq`, and `cmp8xchg16.rel`.
+- Does not provide a hardware IA-32 execution engine. An eligible `br.ia` or `rfi` request to enter IA-32 mode raises a Disabled ISA Transition fault.
+- Recognizes `vmsw.0` and `vmsw.1` as virtualization instructions. Because the emulator does not provide an IA-64 virtual-machine environment, they produce the architecturally appropriate Privileged Operation or Virtualization fault instead of executing a mode switch.
+
+### `madison`
+
+- Provides the hardware IA-32 execution environment.
+- Does not provide the later 16-byte operations or virtualization instructions; those encodings raise an Illegal Operation fault.
+
+### `merced` - default for the Itanium (1st generation) machine
+
+- Provides its native IA-32 execution environment.
+- Does not provide later long-branch, 16-byte atomic, or virtualization facilities.
+
+`-cpu help` lists exactly `merced`, `madison`, `montecito`, `itanium`, and `itanium2`. The `itanium` name aliases `merced`, and `itanium2` aliases `montecito`.
+
+## Build configurations
+
+### Performance-testing build
+
+For guest-performance measurements, use an IA-64-only build without compiler hardening passes that add substantial overhead to TCG helper calls:
 
 ```sh
 ./configure --target-list=ia64-softmmu \
@@ -41,10 +128,13 @@ For guest-performance measurements, use an IA-64-only build without the compiler
 ninja -C build qemu-system-ia64 roms/ia64-firmware/ia64-firmware.bin
 ```
 
-This configuration is intended for performance testing.
-Keep a separate debug build for development and correctness testing.
+This configuration is intended for performance testing. Keep a separate debug build for development and correctness testing.
 
-For profile-guided optimization, use a dedicated build directory and the same compiler for both stages:
+### Profile-guided optimization
+
+Use a dedicated build directory and the same compiler for both stages.
+
+Generate profiles:
 
 ```sh
 mkdir build-ia64-pgo
@@ -59,85 +149,26 @@ cd build-ia64-pgo
 ninja qemu-system-ia64 roms/ia64-firmware/ia64-firmware.bin
 ```
 
-Run representative guest workloads with the instrumented binary.
-The training set should cover boot, integer, floating-point, SIMD, MMU-intensive, and RSE-intensive code paths.
-Then consume the generated profiles:
+Run representative guest workloads with the instrumented binary. The training set should cover boot, integer, floating-point, SIMD, MMU-intensive, and RSE-intensive code paths.
+
+Consume the generated profiles:
 
 ```sh
 meson configure -Db_pgo=use
 ninja qemu-system-ia64 roms/ia64-firmware/ia64-firmware.bin
 ```
 
-Profiles are tied to the exact build tree, compiler, and source revision; do not copy stale profile data between builds.
+Profiles are tied to the exact build tree, compiler, and source revision. Do not copy stale profile data between builds.
 
-On hosts that all support the x86-64-v3 ISA level, add `--x86-version=3` to a separate comparison build.
-This changes the minimum host ISA for QEMU and its C helpers; TCG-generated guest code still selects host vector features at runtime.
+### x86-64-v3 comparison build
 
-The firmware build requires an IA-64 ELF cross toolchain named `ia64-linux-gnu-*` in `PATH`.
+On hosts that all support the x86-64-v3 ISA level, add `--x86-version=3` to a separate comparison build. This changes the minimum host ISA for QEMU and its C helpers; TCG-generated guest code still selects host vector features at runtime.
 
-## Run
+## Runtime configuration
 
-```sh
-./build/qemu-system-ia64 \
-  -machine ia64-vpc \
-  -bios ./build/roms/ia64-firmware/ia64-firmware.bin \
-  -drive file=/path/to/guest-media.iso,media=cdrom,format=raw,readonly=on \
-  -display gtk
-```
+### Multiprocessing, MTTCG, memory, and USB input
 
-### Machine profiles
-
-`itanium2-vpc` is the standards-oriented profile and is also available under
-the backward-compatible `ia64-vpc` alias.  It selects `montecito` by default
-and leaves early-firmware compatibility workarounds disabled.
-
-`itanium-vpc` selects `merced` by default and enables the narrowly scoped
-firmware and SAL compatibility required by first-generation systems such as
-Windows XP for Itanium.
-
-The machine and CPU selections are intentionally independent.  A `-cpu`
-override changes processor-generation behavior, but it does not enable or
-disable the selected machine profile's firmware compatibility flags.
-
-### CPU model selection
-
-The `ia64-vpc`/`itanium2-vpc` machine uses the `montecito` CPU model by
-default, while `itanium-vpc` uses `merced`.
-Select a different model with `-cpu`.
-For example, use the early-generation machine profile for a first-generation
-guest:
-
-```sh
-./build/qemu-system-ia64 \
-  -machine itanium-vpc \
-  -bios ./build/roms/ia64-firmware/ia64-firmware.bin \
-  ...
-```
-
-CPU selection changes guest-visible CPUID and PAL information as well as the available instruction set.
-
-#### `montecito` (default)
-
-Montecito implements the later 16-byte operations `ld16`, `ld16.acq`, `st16`, `st16.rel`, `cmp8xchg16.acq`, and `cmp8xchg16.rel`.
-It has no hardware IA-32 execution engine, so an eligible `br.ia` or `rfi` request to enter IA-32 mode raises a Disabled ISA Transition fault.
-The `vmsw.0` and `vmsw.1` encodings are recognized as virtualization instructions.
-Because this emulator does not provide an IA-64 virtual-machine environment, these instructions produce the architecturally appropriate Privileged Operation or Virtualization fault instead of executing a mode switch.
-
-#### `madison`
-
-Madison provides the hardware IA-32 execution environment.
-Eligible `br.ia` and `rfi` transitions execute IA-32 code, and IA-32 `JMPE` returns to IA-64.
-The later 16-byte operations and virtualization instructions are not available and raise an Illegal Operation fault.
-
-#### `merced`
-
-Merced provides its native IA-32 execution environment and reports the generation-specific CPUID, PAL, cache, translation-cache, page-size, address, protection-key, performance-monitor, and register-stack characteristics.
-Later long-branch, 16-byte atomic, and virtualization facilities are not available.
-
-`-cpu help` lists exactly `merced`, `madison`, `montecito`, `itanium`, and `itanium2`.
-`itanium` aliases `merced`; `itanium2` aliases `montecito`.
-
-For four vCPUs, MTTCG, 8 GiB of RAM, and USB input without the PS/2 controller:
+The following example uses four vCPUs, MTTCG, 8 GiB of RAM, persistent NVRAM, and USB input without the PS/2 controller:
 
 ```sh
 ./build/qemu-system-ia64 \
@@ -150,34 +181,63 @@ For four vCPUs, MTTCG, 8 GiB of RAM, and USB input without the PS/2 controller:
   -display gtk
 ```
 
-The machine automatically attaches a USB keyboard and absolute USB tablet when `i8042=off` is used, so `-usb` is not required.
-Omitting `-vga` selects the default ATI-compatible display. This is recommended for graphical guests; use `-vga std` only when standard VGA compatibility is specifically needed.
+When `i8042=off` is used, the machine automatically attaches a USB keyboard and absolute USB tablet; `-usb` is not required.
 
-An e1000 (82540EM-compatible) PCI network controller is attached by default.
+### Graphics
+
+Omitting `-vga` selects the default ATI-compatible display. This is recommended for graphical guests. Use `-vga std` only when standard VGA compatibility is specifically needed.
+
+### Networking
+
+An e1000, 82540EM-compatible PCI network controller is attached by default.
+
 When QEMU is built with libslirp, connect it to user-mode networking with:
 
 ```sh
 -nic user,model=e1000
 ```
 
-For a host TAP interface, use:
+For a host TAP interface:
 
 ```sh
 -nic tap,model=e1000,ifname=tap0,script=no,downscript=no
 ```
 
-Use `-nic none` to omit the controller.
-EFI network boot is not currently provided; the controller is available to the guest operating system.
+Use `-nic none` to omit the controller. EFI network boot is not currently provided; the controller is available to the guest operating system.
+
+### Serial and debug output
 
 Use `-serial stdio` to view serial output.
-The `-debug-port` option publishes the guest debug transport described by the ACPI DBGP table; for example, `-debug-port tcp::4444,server=on,wait=on,nodelay=on`.
 
-EFI variables are persistent.
-By default, `ia64-vpc` loads and saves a 64 KiB file named `nvram` in the directory containing the firmware selected by `-bios`.
-Use a separate file for each virtual machine with `-machine ia64-vpc,nvram=<path>`, or specify `nvram=none` for volatile EFI variables.
+The `-debug-port` option publishes the guest debug transport described by the ACPI DBGP table. For example:
+
+```sh
+-debug-port tcp::4444,server=on,wait=on,nodelay=on
+```
+
+### EFI variable persistence
+
+EFI variables are persistent by default. Machines load and save a 64 KiB file named `nvram` in the directory containing the firmware selected by `-bios`.
+
+Use a separate file for each virtual machine:
+
+```sh
+-machine ia64-vpc,nvram=/path/to/guest.nvram
+```
+
+For volatile EFI variables:
+
+```sh
+-machine ia64-vpc,nvram=none
+```
+
 Relative paths are resolved from QEMU's current working directory.
 
-At each startup, the firmware waits three seconds for F2, F12, or Delete before continuing normal boot. Any of these keys opens the embedded EFI shell on the graphical and serial consoles. The shell can inspect the machine and its filesystems, launch an EFI application, select a boot target, update the boot order, and set the real-time clock. For example:
+## EFI firmware and shell
+
+At each startup, the firmware waits three seconds for F2, F12, or Delete before continuing normal boot. Any of these keys opens the embedded EFI shell on both the graphical and serial consoles.
+
+The shell can inspect the machine and its filesystems, launch EFI applications, select a boot target, update the boot order, and set the real-time clock. Example commands:
 
 ```text
 info
@@ -194,22 +254,32 @@ time 12:34:56
 exit
 ```
 
-`boot fsN:` launches `\EFI\BOOT\BOOTIA64.EFI` from that filesystem. `bootnext` is consumed by the next automatic boot attempt. Boot order, next-boot selection, and clock changes survive a reset when the machine has NVRAM backing; with `nvram=none`, they remain valid only for the current process.
+`boot fsN:` launches `\EFI\BOOT\BOOTIA64.EFI` from that filesystem. `bootnext` is consumed by the next automatic boot attempt.
 
-An installed EFI system can be attached with an ordinary disk drive:
+Boot order, next-boot selection, and clock changes survive a reset when the machine has NVRAM backing. With `nvram=none`, they remain valid only for the current process.
+
+### Boot an installed EFI system
+
+Attach an installed EFI system with an ordinary disk drive:
 
 ```sh
 -drive file=/path/to/guest-disk.qcow2,format=qcow2
 ```
 
-The firmware supports persistent EFI boot entries, including short-form hard drive device paths, and can boot supported loaders from FAT partitions.
+The firmware supports persistent EFI boot entries, including short-form hard-drive device paths, and can boot supported loaders from FAT partitions.
 
-<img width="692" height="598" alt="Microsoft Windows Server 2008 for Itanium-Based Systems is running on qemu-system-ia64, showing winver and task manager." src="https://github.com/user-attachments/assets/cbf318e6-1202-4a11-95ed-a62f105a8f64" />
-<img width="692" height="598" alt="Microsoft Windows Server 2008 for Itanium-Based Systems is running on qemu-system-ia64, executing systeminfo" src="https://github.com/user-attachments/assets/ce893757-a4b0-4003-8ba8-87fad23d739c" />
+### Screenshots
+
+<p align="center">
+  <img width="49%" alt="Microsoft Windows Server 2008 for Itanium-Based Systems is running on qemu-system-ia64, showing winver and task manager." src="https://github.com/user-attachments/assets/cbf318e6-1202-4a11-95ed-a62f105a8f64" />
+  <img width="49%" alt="Microsoft Windows Server 2008 for Itanium-Based Systems is running on qemu-system-ia64, executing systeminfo." src="https://github.com/user-attachments/assets/ce893757-a4b0-4003-8ba8-87fad23d739c" />
+</p>
 
 ## Tests
 
-Run the behavior-oriented IA-64 unit, TCG, and machine tests after building:
+Use the build-local Meson selected by QEMU's configure process. A host `meson` of another version may be unable to read `build/meson-private/build.dat`, and plain `meson test` from the source directory is not valid because the Meson build data lives under `build`.
+
+Run the behavior-oriented IA-64 unit, TCG, machine, and functional tests after building:
 
 ```sh
 build/pyvenv/bin/meson test -C build --suite ia64 --print-errorlogs
@@ -218,31 +288,34 @@ build/pyvenv/bin/meson test -C build --suite func-ia64 --print-errorlogs
 build/pyvenv/bin/meson test -C build --suite func-ia64-thorough --print-errorlogs
 ```
 
-Use the build-local Meson shown above.
+### Test coverage
 
-It is the same version selected by QEMU's configure process; a host `meson` of another version may be unable to read `build/meson-private/build.dat`.
-
-Plain `meson test` from the source directory is not valid because the Meson build data lives under `build`.
-
-The TCG registry currently contains 1188 architectural microprograms divided between core, memory/NaT, floating-point, RSE, MMU, interruption, and PAL groups.
-Machine tests cover platform wiring and display behavior.
-
-The functional suite builds project-owned EFI applications and boots them from deterministic FAT, GPT, MBR, El Torito, and UDF media. It also exercises the firmware shell through PS/2, USB, and serial input, including direct application execution and NVRAM persistence across restarts.
+- The TCG registry currently contains about 1,200 architectural microprograms divided between core, memory/NaT, floating-point, RSE, MMU, interruption, and PAL groups.
+- Machine tests cover platform wiring and display behavior.
+- The functional suite builds project-owned EFI applications and boots them from deterministic FAT, GPT, MBR, El Torito, and UDF media.
+- The functional suite also exercises the firmware shell through PS/2, USB, and serial input, including direct application execution and NVRAM persistence across restarts.
 
 See [`docs/devel/testing/ia64.rst`](docs/devel/testing/ia64.rst) for focused runs and test-authoring rules.
 
 ## Status
 
 The current implementation boots several IA-64 operating-system installers and supports up to four guest processors.
+
 Instruction coverage, privileged behavior, floating-point corner cases, and device compatibility still require validation against the IA-64, EFI, SAL, and ACPI specifications.
 
 ## Legal disclaimer
 
-This repository does not include third-party operating system images, disk images, firmware images, machine ROM dumps, proprietary firmware blobs, or operating system binaries.
+### Third-party materials
 
-Guest operating system images, firmware, installation media, and other third-party materials must be supplied by users under their own applicable licenses.
+This repository does not include third-party operating-system images, disk images, firmware images, machine ROM dumps, proprietary firmware blobs, or operating-system binaries.
 
-This project is an independent experimental QEMU IA-64 system emulation project. It is not affiliated with, endorsed by, sponsored by, or supported by Intel, HPE, the QEMU Project, the Gentoo Foundation, the Gentoo Project, or Microsoft Corporation.
+Guest operating-system images, firmware, installation media, and other third-party materials must be supplied by users under their own applicable licenses.
+
+### Project independence
+
+This project is an independent experimental QEMU IA-64 system-emulation project. It is not affiliated with, endorsed by, sponsored by, or supported by Intel, HPE, the QEMU Project, or Microsoft Corporation.
+
+### Licensing and trademarks
 
 QEMU is used as the upstream base for this fork. QEMU as a whole is licensed under the GNU General Public License, version 2. See the license files in this repository for details.
 

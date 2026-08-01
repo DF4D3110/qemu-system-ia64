@@ -5,6 +5,7 @@ from __future__ import annotations
 from .case import (CaseEvidence, CaseMetadata, CaseObservation, bind_cases)
 from .encoding import (
     CHECK_LOAD_DATA,
+    DTR_PTE_WB,
     EIGHT_K_ITIR,
     ExpectedFP,
     HIGH_TR_BASE,
@@ -25,6 +26,8 @@ from .encoding import (
     IA64_PSR_IC,
     IA64_PSR_PK,
     IA64_PSR_RT,
+    IA64_PKR_RD,
+    IA64_PKR_VALID,
     IA64_RSC_BE,
     IA64_RSC_PL3,
     KERNEL_TR_ITIR,
@@ -81,6 +84,7 @@ from .encoding import (
     mov_m_gr_cr,
     mov_m_imm_ar,
     mov_m_psr_gr,
+    mov_pkr_indexed,
     mov_pr_rot_imm,
     mov_rr_write,
     movl_mlx,
@@ -512,11 +516,12 @@ test_rse_bspstore_preserves_dirty_partition_across_rnat = require_registers(
         "cfm_sol": 0,
     }, entry=0x10)
 
-"""mov-to-BSPSTORE makes RNAT undefined.  The target's deterministic
-spill-side choice is zero, so a later partial-collection spill must not
-resurrect lower NaT bits from an older frame's completed backing word."""
-test_rse_bspstore_undefined_rnat_drops_stale_lower_bits = require_registers(
-    "rse_bspstore_undefined_rnat_drops_stale_lower_bits", [
+"""mov-to-BSPSTORE makes RNAT undefined to software and to mandatory fills,
+but it does not revoke the coherence guarantee for registers already backed
+below BSPSTORE.  A later suffix spill must retain their collection bits."""
+test_rse_bspstore_partial_rnat_store_preserves_backed_prefix = \
+    require_registers(
+        "rse_bspstore_partial_rnat_store_preserves_backed_prefix", [
         (0x10, *movl_mlx(3, 0x1001f8)),
         (0x20, *movl_mlx(4, 0x6)),
         (0x30, 0x00, st8(3, 4), nop_i(), nop_i()),
@@ -532,8 +537,174 @@ test_rse_bspstore_undefined_rnat_drops_stale_lower_bits = require_registers(
     ], {
         "ip": 0xb0,
         "exception": IA64_EXCP_NONE,
-        "r8": 0,
+        "r8": 0x6,
     }, entry=0x10)
+
+
+def test_rse_partial_rnat_store_merge_all_split_points(qemu):
+    """At every RNATBitIndex, preserve the backed prefix, replace the newly
+    spilled suffix, and keep collection bit 63 zero."""
+    for split in range(63):
+        if split == 0:
+            old = (1 << 64) - 1
+            expected = 0
+        else:
+            old = ((1 << 63) | (1 << (split - 1)) | (1 << split))
+            expected = 1 << (split - 1)
+        run_program(qemu, [
+            (0x10, *movl_mlx(3, 0x1001f8)),
+            (0x20, *movl_mlx(4, old)),
+            (0x30, 0x00, st8(3, 4), nop_i(), nop_i()),
+            (0x40, *movl_mlx(3, 0x100000 + split * 8)),
+            (0x50, 0x00, mov_ar(3, 18), nop_i(), nop_i()),
+            (0x60, 0x00, nop_m(), alloc(1, 63 - split, 0, 0, 0),
+             nop_i()),
+            (0x70, 0x18, nop_m(), nop_m(), cover_b()),
+            (0x80, 0x00, flushrs_enc(), nop_i(), nop_i()),
+            (0x90, *movl_mlx(3, 0x1001f8)),
+            (0xa0, 0x00, ld8(8, 3), nop_i(), nop_i()),
+            (0xb0, 0x10, nop_m(), nop_i(), br_cond(0xb0, 0xb0)),
+        ], entry=0x10, terminal_ip=0xb0, expected={
+            "exception": IA64_EXCP_NONE,
+            "r8": expected,
+        }, name=f"rse_partial_rnat_store_merge_split_{split}")
+
+
+"""A context-return sequence can leave a dirty suffix beginning at bit 31 and
+then execute loadrs, which makes AR.RNAT undefined.  The bit-24 register is
+still backed below BSPSTORE: it must survive the subsequent collection store
+even though mov-from-RNAT reads zero after loadrs."""
+test_rse_loadrs_partial_rnat_store_preserves_backed_prefix = \
+    require_registers(
+        "rse_loadrs_partial_rnat_store_preserves_backed_prefix", [
+        (0x10, *movl_mlx(3, 0x1001f8)),
+        (0x20, *movl_mlx(4, 1 << 24)),
+        (0x30, 0x00, st8(3, 4), nop_i(), nop_i()),
+        (0x40, *movl_mlx(3, 0x1000f8)),
+        (0x50, 0x00, mov_ar(3, 18), nop_i(), nop_i()),
+        (0x60, 0x00, nop_m(), alloc(1, 32, 0, 0, 0), nop_i()),
+        (0x70, 0x18, nop_m(), nop_m(), cover_b()),
+        (0x80, *movl_mlx(3, (33 * 8) << 16)),
+        (0x90, 0x00, mov_m_gr_ar(3, 16), nop_i(), nop_i()),
+        (0xa0, 0x00, loadrs_enc(), nop_i(), nop_i()),
+        (0xb0, 0x00, mov_m_ar_gr(9, 19), nop_i(), nop_i()),
+        (0xc0, 0x00, flushrs_enc(), nop_i(), nop_i()),
+        (0xd0, *movl_mlx(3, 0x1001f8)),
+        (0xe0, 0x00, ld8(8, 3), nop_i(), nop_i()),
+        (0xf0, 0x10, nop_m(), nop_i(), br_cond(0xf0, 0xf0)),
+    ], {
+        "ip": 0xf0,
+        "exception": IA64_EXCP_NONE,
+        "r8": 1 << 24,
+        "r9": 0,
+    }, entry=0x10)
+
+"""A defined clear in the physical RNAT must not be reconstructed from an
+older collection word after loadrs.  The saved image is writeback-only:
+mov-from-RNAT still returns zero, while the later completed collection also
+contains zero rather than resurrecting the stale bit-24 NaT."""
+test_rse_loadrs_writeback_preserves_defined_zero = require_registers(
+    "rse_loadrs_writeback_preserves_defined_zero", [
+        (0x10, *movl_mlx(3, 0x1001f8)),
+        (0x20, *movl_mlx(4, 1 << 24)),
+        (0x30, 0x00, st8(3, 4), nop_i(), nop_i()),
+        (0x40, *movl_mlx(3, 0x1000f8)),
+        (0x50, 0x00, mov_ar(3, 18), nop_i(), nop_i()),
+        (0x60, *movl_mlx(4, 0)),
+        (0x70, 0x00, mov_m_gr_ar(4, 19), nop_i(), nop_i()),
+        (0x80, 0x00, loadrs_enc(), nop_i(), nop_i()),
+        (0x90, 0x00, mov_m_ar_gr(9, 19), nop_i(), nop_i()),
+        (0xa0, 0x00, nop_m(), alloc(1, 32, 0, 0, 0), nop_i()),
+        (0xb0, 0x18, nop_m(), nop_m(), cover_b()),
+        (0xc0, 0x00, flushrs_enc(), nop_i(), nop_i()),
+        (0xd0, *movl_mlx(3, 0x1001f8)),
+        (0xe0, 0x00, ld8(8, 3), nop_i(), nop_i()),
+        (0xf0, 0x10, nop_m(), nop_i(), br_cond(0xf0, 0xf0)),
+    ], {
+        "ip": 0xf0,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0,
+        "r9": 0,
+    }, entry=0x10)
+
+
+"""An explicit BSPSTORE/RNAT rewrite is authoritative over a writeback image
+captured by loadrs.  This is the SDM 6.10 edit protocol with the saved image
+armed: the edited register and its cleared NaT must both win."""
+test_rse_loadrs_writeback_yields_to_bspstore_edit = require_registers(
+    "rse_loadrs_writeback_yields_to_bspstore_edit", [
+        (0x10, *movl_mlx(3, 0x1001f8)),
+        (0x20, *movl_mlx(5, 1 << 24)),
+        (0x30, 0x00, st8(3, 5), nop_i(), nop_i()),
+        (0x40, *movl_mlx(20, 0x1000f8)),
+        (0x50, 0x00, mov_m_gr_ar(20, 18), nop_i(), nop_i()),
+        (0x60, 0x00, mov_m_gr_ar(5, 19), nop_i(), nop_i()),
+        (0x70, 0x00, mov_m_ar_gr(11, 19), nop_i(), nop_i()),
+        (0x80, 0x00, loadrs_enc(), nop_i(), nop_i()),
+        (0x90, 0x00, mov_m_ar_gr(9, 19), nop_i(), nop_i()),
+        (0xa0, *movl_mlx(3, 0x1000c0)),
+        (0xb0, *movl_mlx(4, 0x1122334455667788)),
+        (0xc0, 0x00, st8(3, 4), nop_i(), nop_i()),
+        (0xd0, *movl_mlx(5, 0)),
+        (0xe0, 0x00, mov_m_gr_ar(20, 18), nop_i(), nop_i()),
+        (0xf0, 0x00, mov_m_gr_ar(5, 19), nop_i(), nop_i()),
+        (0x100, 0x00, nop_m(), alloc(1, 32, 0, 0, 0), nop_i()),
+        (0x110, 0x18, nop_m(), nop_m(), cover_b()),
+        (0x120, 0x00, flushrs_enc(), nop_i(), nop_i()),
+        (0x130, *movl_mlx(3, 0x1001f8)),
+        (0x140, 0x00, ld8(8, 3), nop_i(), nop_i()),
+        (0x150, *movl_mlx(3, 0x1000c0)),
+        (0x160, 0x00, ld8(10, 3), nop_i(), nop_i()),
+        (0x170, 0x10, nop_m(), nop_i(), br_cond(0x170, 0x170)),
+    ], {
+        "ip": 0x170,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0,
+        "r9": 0,
+        "r10": 0x1122334455667788,
+        "r11": 1 << 24,
+    }, entry=0x10)
+
+
+def test_rse_bspstore_rnat_edit_protocol_overrides_memory_image(qemu):
+    """SDM 6.10's edit protocol must win in both directions: read RNAT,
+    edit a backed register and its saved NaT, rewrite the same BSPSTORE, then
+    rewrite RNAT.  No implementation-only memory image may override it."""
+    for old_nat, new_nat in ((1, 0), (0, 1)):
+        old_collection = old_nat << 24
+        new_collection = new_nat << 24
+        edited_data = (0xaaaabbbbccccdddd if new_nat else
+                       0x1111222233334444)
+
+        run_program(qemu, [
+            (0x10, *movl_mlx(3, 0x1001f8)),
+            (0x20, *movl_mlx(4, old_collection)),
+            (0x30, 0x00, st8(3, 4), nop_i(), nop_i()),
+            (0x40, *movl_mlx(20, 0x1000f8)),
+            (0x50, 0x00, mov_m_gr_ar(20, 18), nop_i(), nop_i()),
+            (0x60, *movl_mlx(5, old_collection)),
+            (0x70, 0x00, mov_m_gr_ar(5, 19), nop_i(), nop_i()),
+            (0x80, 0x00, mov_m_ar_gr(5, 19), nop_i(), nop_i()),
+            (0x90, *movl_mlx(3, 0x1000c0)),
+            (0xa0, *movl_mlx(4, edited_data)),
+            (0xb0, 0x00, st8(3, 4), nop_i(), nop_i()),
+            (0xc0, *movl_mlx(5, new_collection)),
+            (0xd0, 0x00, mov_m_gr_ar(20, 18), nop_i(), nop_i()),
+            (0xe0, 0x00, mov_m_gr_ar(5, 19), nop_i(), nop_i()),
+            (0xf0, 0x00, nop_m(), alloc(1, 32, 0, 0, 0), nop_i()),
+            (0x100, 0x18, nop_m(), nop_m(), cover_b()),
+            (0x110, 0x00, flushrs_enc(), nop_i(), nop_i()),
+            (0x120, *movl_mlx(3, 0x1001f8)),
+            (0x130, 0x00, ld8(8, 3), nop_i(), nop_i()),
+            (0x140, *movl_mlx(3, 0x1000c0)),
+            (0x150, 0x00, ld8(9, 3), nop_i(), nop_i()),
+            (0x160, 0x10, nop_m(), nop_i(), br_cond(0x160, 0x160)),
+        ], entry=0x10, terminal_ip=0x160, expected={
+            "exception": IA64_EXCP_NONE,
+            "r8": new_collection,
+            "r9": edited_data,
+        }, name=f"rse_bspstore_rnat_edit_{old_nat}_to_{new_nat}")
+
 
 """Only RNAT{RNATBitIndex:0} has a defined source after mov-to-RNAT.
 Undefined high bits read as zero under the target policy, and even a
@@ -745,11 +916,11 @@ test_rse_merced_flushrs_invalidates_spilled_frame = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x10, cpu="merced")
 
-"""A backing-store switch makes RNAT undefined on every processor model.
-Even when a later spill only defines a high suffix, ordinary data left in
-the collection-word location must not become NaT state."""
-test_rse_merced_partial_rnat_store_drops_undefined_prefix = require_registers(
-    "rse_merced_partial_rnat_store_drops_undefined_prefix", [
+"""Merced has no clean partition, but the backing-store coherence rule is the
+same: a suffix spill retains the collection prefix below BSPSTORE."""
+test_rse_merced_partial_rnat_store_preserves_backed_prefix = \
+    require_registers(
+        "rse_merced_partial_rnat_store_preserves_backed_prefix", [
         (0x10, *movl_mlx(3, 0x1001f8)),
         (0x20, *movl_mlx(4, 1 << 11)),
         (0x30, 0x00, st8(3, 4), nop_i(), nop_i()),
@@ -764,7 +935,7 @@ test_rse_merced_partial_rnat_store_drops_undefined_prefix = require_registers(
     ], {
         "ip": 0xb0,
         "exception": IA64_EXCP_NONE,
-        "r8": 0,
+        "r8": 1 << 11,
     }, entry=0x10, cpu="merced")
 
 test_rse_merced_return_publishes_filled_rnat_collection = require_registers(
@@ -1507,6 +1678,45 @@ test_rse_rt_enables_protection_key_checks = require_registers(
         "r31": IA64_ISR_W | IA64_ISR_RS,
     }, entry=0x10)
 
+"""The RSE collection write is permitted by the PKR while ordinary reads are
+disabled.  Preserving the old prefix must therefore use the resolved store
+target privately; a guest-visible read would raise Key Permission."""
+test_rse_write_only_rnat_store_preserves_backed_prefix = require_registers(
+    "rse_write_only_rnat_store_preserves_backed_prefix", [
+        (0x10, *movl_mlx(3, 0x4081f8)),
+        (0x20, *movl_mlx(4, 1 << 2)),
+        (0x30, 0x00, st8(3, 4), nop_i(), nop_i()),
+        (0x40, *movl_mlx(18, 0x400000 | DTR_PTE_WB)),
+        (0x50, *movl_mlx(20, HIGH_TR_BASE)),
+        (0x60, *movl_mlx(21, (KEY_TEST_KEY << 8) | (16 << 2))),
+        (0x70, 0x00, mov_m_gr_cr(20, 20), adds(10, 5, 0), nop_i()),
+        (0x80, 0x00, mov_m_gr_cr(21, 21), nop_i(), nop_i()),
+        (0x90, 0x00, itr_d(10, 18), nop_i(), nop_i()),
+        (0xa0, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0xb0, *movl_mlx(4, IA64_PKR_VALID | IA64_PKR_RD |
+                         (KEY_TEST_KEY << 8))),
+        (0xc0, 0x00, adds(3, 0, 0), nop_i(), nop_i()),
+        (0xd0, 0x00, mov_pkr_indexed(3, 4, bit36=1), nop_i(), nop_i()),
+        (0xe0, *movl_mlx(3, HIGH_TR_BASE + 0x8030)),
+        (0xf0, 0x00, mov_ar(3, 18), nop_i(), nop_i()),
+        (0x100, 0x00, nop_m(), alloc(1, 60, 0, 0, 0), nop_i()),
+        (0x110, 0x18, nop_m(), nop_m(), cover_b()),
+        (0x120, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_RT | IA64_PSR_PK)),
+        (0x130, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x140, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x150, 0x00, flushrs_enc(), nop_i(), nop_i()),
+        (0x160, *movl_mlx(19, 0)),
+        (0x170, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x180, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x190, *movl_mlx(3, 0x4081f8)),
+        (0x1a0, 0x00, ld8(8, 3), nop_i(), nop_i()),
+        (0x1b0, 0x10, nop_m(), nop_i(), br_cond(0x1b0, 0x1b0)),
+    ], {
+        "ip": 0x1b0,
+        "exception": IA64_EXCP_NONE,
+        "r8": 1 << 2,
+    }, entry=0x10)
+
 test_rse_big_endian_backing_store = require_registers(
     "rse_big_endian_backing_store", [
         (0x10, *movl_mlx(3, IA64_RSC_BE)),
@@ -1524,6 +1734,35 @@ test_rse_big_endian_backing_store = require_registers(
         "ip": 0xb0,
         "exception": IA64_EXCP_NONE,
         "r8": 0x8877665544332211,
+    }, entry=0x10)
+
+test_rse_big_endian_partial_rnat_store_preserves_backed_prefix = \
+    require_registers(
+        "rse_big_endian_partial_rnat_store_preserves_backed_prefix", [
+        # Ordinary stores are little-endian here.  These bytes are the
+        # big-endian RSE representation of collection bit 2.
+        (0x10, *movl_mlx(3, 0x1001f8)),
+        (0x20, *movl_mlx(4, 0x0400000000000000)),
+        (0x30, 0x00, st8(3, 4), nop_i(), nop_i()),
+        (0x40, *movl_mlx(3, IA64_RSC_BE)),
+        (0x50, 0x00, mov_m_gr_ar(3, 16), nop_i(), nop_i()),
+        (0x60, *movl_mlx(3, 0x1001f0)),
+        (0x70, 0x00, mov_ar(3, 18), nop_i(), nop_i()),
+        (0x80, 0x00, nop_m(), alloc(1, 1, 0, 0, 0), nop_i()),
+        (0x90, 0x00, mov_m_imm_ar(36, 1), addl(6, 0x200, 0),
+         nop_i()),
+        (0xa0, 0x08, ld8_fill_postinc(32, 6, 0), nop_i(), nop_i()),
+        (0xb0, 0x18, nop_m(), nop_m(), cover_b()),
+        (0xc0, 0x00, flushrs_enc(), nop_i(), nop_i()),
+        (0xd0, *movl_mlx(3, 0x1001f8)),
+        (0xe0, 0x00, ld8(8, 3), nop_i(), nop_i()),
+        (0xf0, 0x10, nop_m(), nop_i(), br_cond(0xf0, 0xf0)),
+        (0x200, 0x00, 0, 0, 0),
+    ], {
+        "ip": 0xf0,
+        "exception": IA64_EXCP_NONE,
+        # LE observation of a BE collection containing bits 62 and 2.
+        "r8": 0x0400000000000040,
     }, entry=0x10)
 
 test_rse_big_endian_rnat_collection = require_registers(
@@ -3140,6 +3379,43 @@ test_rse_postinc_after_flushrs_preserves_register_value = require_registers(
         "cfm_sol": 5,
     }, entry=0x10)
 
+test_rse_firmware_unaligned_postinc_marks_stacked_base_dirty = \
+    require_registers(
+        "rse_firmware_unaligned_postinc_marks_stacked_base_dirty", [
+        (0x10, *movl_mlx(2, (1 << 13) | (1 << 3))),
+        (0x20, 0x10, mov_gr_psr_full(2), nop_i(),
+         br_cond(0x20, 0x40)),
+        (0x40, *movl_mlx(3, 0x100000)),
+        (0x50, 0x00, mov_ar(3, 18), nop_i(),
+         nop_i()),
+        (0x60, *movl_mlx(2, 0x8000)),
+        (0x70, *movl_mlx(4, 0x1122334455667788)),
+        (0x80, 0x0a, st8(2, 4), adds(2, 8, 2), nop_i()),
+        (0x90, *movl_mlx(4, 0x99aabbccddeeff00)),
+        (0xa0, 0x00, st8(2, 4), nop_i(),
+         nop_i()),
+        (0xb0, 0x00, addl(2, 0x10000, 0), nop_i(), nop_i()),
+        (0xc0, 0x00, mov_m_gr_cr(2, 2), nop_i(), nop_i()),
+        (0xd0, 0x00, nop_m(), alloc(36, 5, 5, 0, 0),
+         addl(33, 0x8004, 0)),
+        (0xe0, 0x13, nop_m(), nop_b(), clrrrb_b()),
+        (0xf0, 0x08, ld8_postinc(8, 33, 8), nop_i(),
+         nop_i()),
+        (0x100, 0x13, nop_m(), nop_b(), clrrrb_b()),
+        (0x110, 0x00, nop_m(), adds(9, 0, 33),
+         nop_i()),
+        (0x120, 0x10, nop_m(), nop_i(),
+         br_cond(0x120, 0x120)),
+    ], {
+        "ip": 0x120,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0xddeeff0011223344,
+        "r9": 0x800c,
+        "r33": 0x800c,
+        "cfm_sof": 5,
+        "cfm_sol": 5,
+    }, entry=0x10)
+
 test_rse_rfi_invalid_ifs_unchanged_stack_restores_call = require_registers(
     "rse_rfi_invalid_ifs_unchanged_stack_restores_call", [
         (0x10, *movl_mlx(2, 1 << 13)),
@@ -4449,6 +4725,7 @@ CASE_NAMES = (
     'rse_alloc_call_ret',
     'rse_alloc_preserves_ar_pfs',
     'rse_big_endian_backing_store',
+    'rse_big_endian_partial_rnat_store_preserves_backed_prefix',
     'rse_big_endian_rnat_collection',
     'rse_br_ret_fill_dtlb_miss_retries_atomically',
     'rse_br_ret_fill_ignores_rsc_mode',
@@ -4459,8 +4736,9 @@ CASE_NAMES = (
     'rse_bspstore_preserves_dirty_partition_across_rnat',
     'rse_bspstore_rebase_preserves_dirty_cover_prefix',
     'rse_bspstore_rebase_writes_no_memory',
+    'rse_bspstore_rnat_edit_protocol_overrides_memory_image',
     'rse_bspstore_rewrite_reloads_spilled_frame',
-    'rse_bspstore_undefined_rnat_drops_stale_lower_bits',
+    'rse_bspstore_partial_rnat_store_preserves_backed_prefix',
     'rse_bspstore_write_rebases_dirty_partition',
     'rse_call_invalidates_stacked_alat',
     'rse_seventy_output_handoff_preserves_kernel_locals',
@@ -4482,6 +4760,7 @@ CASE_NAMES = (
     'rse_exception_flushrs_preserves_high_local',
     'rse_exception_loadrs_preserves_interrupted_call',
     'rse_exception_restores_snapshot_arrays',
+    'rse_firmware_unaligned_postinc_marks_stacked_base_dirty',
     'rse_firmware_unmatched_return_restores_matching_frame',
     'rse_flushrs_clears_stale_rnat',
     'rse_flushrs_crosses_reverse_mapped_virtual_pages',
@@ -4490,13 +4769,16 @@ CASE_NAMES = (
     'rse_loadrs_clamps_stacked_grs',
     'rse_loadrs_cover_span_restores_embedded_frame',
     'rse_loadrs_cover_span_uses_preserved_sol',
+    'rse_loadrs_partial_rnat_store_preserves_backed_prefix',
     'rse_loadrs_preserves_clean_partial_rnat_collection',
     'rse_loadrs_reloads_same_collection_rnat',
     'rse_loadrs_sets_tear_point',
+    'rse_loadrs_writeback_preserves_defined_zero',
+    'rse_loadrs_writeback_yields_to_bspstore_edit',
     'rse_loadrs_zero_current_frame_invalidates_parents',
     'rse_loadrs_zero_sol_return_keeps_bsp_without_cover',
     'rse_merced_flushrs_invalidates_spilled_frame',
-    'rse_merced_partial_rnat_store_drops_undefined_prefix',
+    'rse_merced_partial_rnat_store_preserves_backed_prefix',
     'rse_merced_respill_preserves_filled_rnat_prefix',
     'rse_merced_return_publishes_filled_rnat_collection',
     'rse_manual_rfi_loadrs_restores_current_frame_base',
@@ -4504,6 +4786,7 @@ CASE_NAMES = (
     'rse_nested_alloc_call_preserves_output_arg',
     'rse_nested_return_restores_bspstore_base',
     'rse_partial_group_fill_ignores_unwritten_collection',
+    'rse_partial_rnat_store_merge_all_split_points',
     'rse_parent_spill_keeps_call_snapshot',
     'rse_postinc_after_flushrs_preserves_register_value',
     'rse_return_growth_keeps_dirty_bsp_distance',
@@ -4549,6 +4832,7 @@ CASE_NAMES = (
     'rse_untracked_return_resyncs_trimmed_rnat',
     'rse_untracked_return_uses_each_rnat_collection',
     'rse_uses_rsc_pl_for_access_rights',
+    'rse_write_only_rnat_store_preserves_backed_prefix',
     'rse_zero_sol_cover_return_restores_bsp_base',
     'stacked_gr_destination_out_of_frame',
 )

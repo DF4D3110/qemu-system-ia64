@@ -2468,7 +2468,6 @@ static CHAR16                 mTextChars[VGA_TEXT_ROWS][VGA_TEXT_COLUMNS];
 static UINT8                  mTextAttrs[VGA_TEXT_ROWS][VGA_TEXT_COLUMNS];
 static BOOLEAN                mTextWrapPending;
 static UINTN                  mMapKey = 1;
-static EFI_PHYSICAL_ADDRESS   mNextPageAddr = FW_AUTO_ALLOCATION_BASE;
 static BOOLEAN                mBootServicesExited;
 static BOOLEAN                mBeforeExitBootServicesSignaled;
 static BOOLEAN                mExitBootServicesEventsSignaled;
@@ -7778,33 +7777,6 @@ static BOOLEAN efi_forget_page_allocation(EFI_PHYSICAL_ADDRESS Base,
     return 1;
 }
 
-static BOOLEAN efi_find_free_pages_forward(UINT64 Start, UINT64 End,
-                                           UINT64 Size, UINT64 Alignment,
-                                           EFI_PHYSICAL_ADDRESS *Memory)
-{
-    UINT64 addr;
-
-    if (Size == 0 || End <= Start || End - Start < Size ||
-        !efi_align_up_u64(Start, Alignment, &addr)) {
-        return 0;
-    }
-
-    while (addr <= End - Size) {
-        UINT64 allocation_end;
-
-        if (!efi_find_allocation_overlap(addr, addr + Size,
-                                         &allocation_end, NULL)) {
-            *Memory = addr;
-            return 1;
-        }
-        if (allocation_end <= addr ||
-            !efi_align_up_u64(allocation_end, Alignment, &addr)) {
-            return 0;
-        }
-    }
-    return 0;
-}
-
 static BOOLEAN efi_find_free_pages_backward(UINT64 Start, UINT64 End,
                                             UINT64 Size, UINT64 Alignment,
                                             EFI_PHYSICAL_ADDRESS *Memory)
@@ -7844,30 +7816,6 @@ static BOOLEAN efi_find_free_pages_backward(UINT64 Start, UINT64 End,
  * EfiConventionalMemory, but do not let firmware-selected allocations
  * consume it.  AllocateAddress remains the explicit opt-in path.
  */
-static BOOLEAN efi_find_auto_pages_forward(UINT64 Start, UINT64 End,
-                                           UINT64 Size, UINT64 Alignment,
-                                           EFI_PHYSICAL_ADDRESS *Memory)
-{
-    UINT64 low_end = End < FW_EARLY_LOADER_WINDOW_BASE ?
-                     End : FW_EARLY_LOADER_WINDOW_BASE;
-    UINT64 high_start = Start > FW_EARLY_LOADER_WINDOW_END ?
-                        Start : FW_EARLY_LOADER_WINDOW_END;
-
-    if (!fw_compat_enabled(IA64_FW_COMPAT_EARLY_LOADER_MEMORY)) {
-        return efi_find_free_pages_forward(Start, End, Size, Alignment,
-                                           Memory);
-    }
-
-    if (Start < low_end &&
-        efi_find_free_pages_forward(Start, low_end, Size, Alignment,
-                                    Memory)) {
-        return 1;
-    }
-    return high_start < End &&
-           efi_find_free_pages_forward(high_start, End, Size, Alignment,
-                                       Memory);
-}
-
 static BOOLEAN efi_find_auto_pages_backward(UINT64 Start, UINT64 End,
                                             UINT64 Size, UINT64 Alignment,
                                             EFI_PHYSICAL_ADDRESS *Memory)
@@ -7890,61 +7838,6 @@ static BOOLEAN efi_find_auto_pages_backward(UINT64 Start, UINT64 End,
     return Start < low_end &&
            efi_find_free_pages_backward(Start, low_end, Size, Alignment,
                                         Memory);
-}
-
-static BOOLEAN efi_find_any_pages(UINT64 Size, UINT64 Alignment,
-                                  EFI_PHYSICAL_ADDRESS *Memory)
-{
-    UINT64 lower_bound;
-    unsigned pass;
-
-    if (!efi_align_up_u64(mNextPageAddr, Alignment, &lower_bound)) {
-        lower_bound = ~0ULL;
-    }
-
-    for (pass = 0; pass < 2; pass++) {
-        UINTN i;
-
-        for (i = 0; i < mMemoryMapEntries; i++) {
-            EFI_MEMORY_DESCRIPTOR *desc = &mMemoryMap[i];
-            UINT64 desc_start;
-            UINT64 desc_end;
-            UINT64 range_start;
-            UINT64 range_end;
-
-            if (desc->Type != EfiConventionalMemory) {
-                continue;
-            }
-
-            if (!efi_align_up_u64(desc->PhysicalStart, Alignment,
-                                  &desc_start)) {
-                continue;
-            }
-            desc_end = desc->PhysicalStart + (desc->NumberOfPages << 12);
-            if (desc_end <= desc->PhysicalStart) {
-                continue;
-            }
-
-            range_start = desc_start;
-            range_end = desc_end;
-            if (pass == 0) {
-                if (range_start < lower_bound) {
-                    range_start = lower_bound;
-                }
-            } else {
-                if (range_start >= lower_bound) {
-                    continue;
-                }
-            }
-
-            if (efi_find_auto_pages_forward(range_start, range_end, Size,
-                                            Alignment, Memory)) {
-                return 1;
-            }
-        }
-    }
-
-    return 0;
 }
 
 static BOOLEAN efi_find_max_pages(UINT64 MaxAddress, UINT64 Size,
@@ -7990,6 +7883,18 @@ static BOOLEAN efi_find_max_pages(UINT64 MaxAddress, UINT64 Size,
     }
 
     return 0;
+}
+
+/*
+ * Reference EFI memory managers satisfy AllocateAnyPages from the highest
+ * suitable conventional-memory range.  Using the same descending search for
+ * AllocateAnyPages and AllocateMaxAddress also keeps pool backing and loaded
+ * data away from the low-memory boot environment.
+ */
+static BOOLEAN efi_find_any_pages(UINT64 Size, UINT64 Alignment,
+                                  EFI_PHYSICAL_ADDRESS *Memory)
+{
+    return efi_find_max_pages(~0ULL, Size, Alignment, Memory);
 }
 
 EFI_STATUS bs_allocate_pages(EFI_ALLOCATE_TYPE Type, EFI_MEMORY_TYPE MemoryType,
@@ -8054,9 +7959,6 @@ EFI_STATUS bs_allocate_pages(EFI_ALLOCATE_TYPE Type, EFI_MEMORY_TYPE MemoryType,
     efi_coalesce_page_allocations();
     if (mMapKey == previous_map_key) {
         mMapKey++;
-    }
-    if (Type != AllocateAddress && addr + size > mNextPageAddr) {
-        mNextPageAddr = addr + size;
     }
     *Memory = addr;
     return EFI_SUCCESS;
@@ -12598,9 +12500,11 @@ static void efi_insert_memory_descriptor(UINTN Index,
 
 static BOOLEAN efi_preserve_memory_map_boundary(UINT64 Boundary)
 {
+    if (Boundary == FW_EARLY_LOADER_WINDOW_BASE) {
+        return 1;
+    }
     return fw_compat_enabled(IA64_FW_COMPAT_EARLY_LOADER_MEMORY) &&
-           (Boundary == FW_EARLY_LOADER_WINDOW_BASE ||
-            Boundary == FW_LOW_IMAGE_BASE ||
+           (Boundary == FW_LOW_IMAGE_BASE ||
             Boundary == FW_LOW_LEGACY_IMAGE_BASE ||
             Boundary == FW_EARLY_LOADER_WINDOW_END);
 }
@@ -12846,7 +12750,7 @@ static BOOLEAN efi_memory_map_has_range_or_empty(EFI_MEMORY_TYPE Type,
 static UINT64 efi_boot_stack_conventional_start(void)
 {
     return fw_compat_enabled(IA64_FW_COMPAT_EARLY_LOADER_MEMORY) ?
-        FW_EARLY_LOADER_WINDOW_END : ACPI_RECLAIM_END;
+        FW_EARLY_LOADER_WINDOW_END : FW_EARLY_LOADER_WINDOW_BASE;
 }
 
 static BOOLEAN efi_memory_map_has_boot_stack_layout(void)
@@ -12910,6 +12814,7 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
     UINTN firmware_end = ((UINTN)&_end + 0x1FFFU) & ~0x1FFFULL;
     UINTN runtime_code_start = (UINTN)&__runtime_code_start;
     UINTN runtime_data_start = (UINTN)&__runtime_data_start;
+    EFI_MEMORY_DESCRIPTOR low;
     EFI_MEMORY_DESCRIPTOR before;
     EFI_MEMORY_DESCRIPTOR preserved;
     EFI_MEMORY_DESCRIPTOR legacy;
@@ -12917,10 +12822,8 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
     EFI_MEMORY_DESCRIPTOR ordinary_next;
     UINTN saved_entries = mMemoryMapEntries;
     UINTN saved_key = mMapKey;
-    EFI_PHYSICAL_ADDRESS saved_next_page_addr = mNextPageAddr;
     EFI_PHYSICAL_ADDRESS expected_pool_address;
     EFI_PHYSICAL_ADDRESS failed_address;
-    EFI_PHYSICAL_ADDRESS failed_next_page_addr;
     EFI_PHYSICAL_ADDRESS automatic_any;
     EFI_PHYSICAL_ADDRESS automatic_max;
     EFI_PHYSICAL_ADDRESS conventional_any;
@@ -12929,7 +12832,6 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
     EFI_PHYSICAL_ADDRESS conventional_max_two;
     EFI_PHYSICAL_ADDRESS loader_address;
     EFI_PHYSICAL_ADDRESS runtime_address;
-    EFI_PHYSICAL_ADDRESS allocation_next_page_addr;
     EFI_POOL_ALLOCATION_RECORD *pool_rec;
     EFI_PHYSICAL_ADDRESS pool_backing_start;
     EFI_PHYSICAL_ADDRESS pool_backing_end;
@@ -13017,6 +12919,13 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
         goto out;
     }
 
+    low.Type = EfiConventionalMemory;
+    low.PhysicalStart = ACPI_RECLAIM_END;
+    low.VirtualStart = 0;
+    low.NumberOfPages =
+        (FW_EARLY_LOADER_WINDOW_BASE - ACPI_RECLAIM_END) >> 12;
+    low.Attribute = EFI_MEMORY_WB;
+
     before.Type = EfiConventionalMemory;
     before.PhysicalStart = FW_EARLY_LOADER_WINDOW_BASE;
     before.VirtualStart = 0;
@@ -13054,7 +12963,10 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
     ordinary_next.PhysicalStart =
         FW_EARLY_LOADER_WINDOW_END + 0x1000ULL;
 
-    if ((early_loader_memory &&
+    if (!efi_memory_map_has_descriptor(
+            EfiConventionalMemory, ACPI_RECLAIM_END,
+            FW_EARLY_LOADER_WINDOW_BASE, EFI_MEMORY_WB) ||
+        (early_loader_memory &&
          (!efi_memory_map_has_descriptor(
               EfiConventionalMemory, FW_EARLY_LOADER_WINDOW_BASE,
               FW_LOW_IMAGE_BASE, EFI_MEMORY_WB) ||
@@ -13117,6 +13029,7 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
           !efi_memory_map_has_descriptor(
               EfiRuntimeServicesData, runtime_data_start, firmware_end,
               EFI_MEMORY_WB | EFI_MEMORY_RUNTIME))) ||
+        efi_memory_descriptors_can_merge(&low, &before) ||
         efi_memory_descriptors_can_merge(&before, &preserved) ==
             early_loader_memory ||
         efi_memory_descriptors_can_merge(&preserved, &legacy) ==
@@ -13143,14 +13056,11 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
             EFI_PAGE_SIZE,
             efi_memory_type_allocation_granularity(EfiLoaderData),
             &automatic_any) ||
-        (early_loader_memory ?
-         (automatic_any < FW_AUTO_ALLOCATION_BASE ||
-          ranges_overlap(automatic_any, EFI_PAGE_SIZE,
-                         FW_EARLY_LOADER_WINDOW_BASE,
-                         FW_EARLY_LOADER_WINDOW_END -
-                             FW_EARLY_LOADER_WINDOW_BASE)) :
-         (automatic_any < ACPI_RECLAIM_END ||
-          automatic_any >= FW_EARLY_LOADER_WINDOW_END)) ||
+        automatic_any < FW_EARLY_LOADER_WINDOW_END ||
+        ranges_overlap(automatic_any, EFI_PAGE_SIZE,
+                       FW_EARLY_LOADER_WINDOW_BASE,
+                       FW_EARLY_LOADER_WINDOW_END -
+                           FW_EARLY_LOADER_WINDOW_BASE) ||
         !efi_find_max_pages(
             automatic_max, EFI_PAGE_SIZE,
             efi_memory_type_allocation_granularity(EfiLoaderData),
@@ -13175,14 +13085,11 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
                              efi_memory_type_allocation_granularity(
                                  EfiLoaderData),
                              &expected_pool_address) ||
-        (early_loader_memory ?
-         (expected_pool_address < FW_AUTO_ALLOCATION_BASE ||
-          ranges_overlap(expected_pool_address, EFI_POOL_CHUNK_SIZE,
-                         FW_EARLY_LOADER_WINDOW_BASE,
-                         FW_EARLY_LOADER_WINDOW_END -
-                             FW_EARLY_LOADER_WINDOW_BASE)) :
-         (expected_pool_address < ACPI_RECLAIM_END ||
-          expected_pool_address >= FW_EARLY_LOADER_WINDOW_END)) ||
+        expected_pool_address < FW_EARLY_LOADER_WINDOW_END ||
+        ranges_overlap(expected_pool_address, EFI_POOL_CHUNK_SIZE,
+                       FW_EARLY_LOADER_WINDOW_BASE,
+                       FW_EARLY_LOADER_WINDOW_END -
+                           FW_EARLY_LOADER_WINDOW_BASE) ||
         bs_allocate_pool(EfiLoaderData, 17, &pool) != EFI_SUCCESS ||
         pool == NULL) {
         ok = 0;
@@ -13191,7 +13098,6 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
     pool_start = (UINTN)pool & ~0xfffULL;
     if (pool_start != (UINTN)pool ||
         pool_start != expected_pool_address ||
-        mNextPageAddr != saved_next_page_addr ||
         bs_allocate_pages(AllocateAddress, EfiLoaderData, 1,
                           &loader_address) != EFI_SUCCESS ||
         !efi_memory_map_has_descriptor(EfiLoaderData, loader_address,
@@ -13340,7 +13246,6 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
      * it leaves the visible descriptor type unchanged.  Allocation records
      * must therefore keep page and pool requests from reusing the range.
      */
-    allocation_next_page_addr = mNextPageAddr;
     conventional_max_one = ~0ULL;
     allocation_key = mMapKey;
     if (bs_allocate_pages(AllocateMaxAddress, EfiConventionalMemory, 1,
@@ -13424,14 +13329,15 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
         goto out;
     }
 
-    /* Exercise forward search and wrap while high ranges block it. */
-    mNextPageAddr = conventional_max_two;
+    /* AllocateAnyPages continues downward past occupied high ranges. */
     conventional_any = 0xfeedfacefeedfaceULL;
     allocation_key = mMapKey;
     if (bs_allocate_pages(AllocateAnyPages, EfiConventionalMemory, 1,
                           &conventional_any) != EFI_SUCCESS ||
         conventional_any == conventional_max_one ||
         conventional_any == conventional_max_two ||
+        conventional_any + EFI_PAGE_SIZE >
+            (UINTN)conventional_pool_one ||
         ranges_overlap(conventional_any, EFI_PAGE_SIZE,
                        (UINTN)conventional_pool_one, EFI_PAGE_SIZE) ||
         ranges_overlap(conventional_any, EFI_PAGE_SIZE,
@@ -13489,8 +13395,6 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
         ok = 0;
         goto out;
     }
-    mNextPageAddr = allocation_next_page_addr;
-
     /* A range with an undescribed gap must fail without skipping the gap. */
     mMemoryMap[0].Type = EfiConventionalMemory;
     mMemoryMap[0].PhysicalStart = 0x1001000ULL;
@@ -13545,7 +13449,7 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
         goto out;
     }
 
-    /* AllocatePages failure must not advance its cursor or record a page. */
+    /* AllocatePages failure must not alter the map or record a page. */
     for (i = 0; i < MEMORY_MAP_MAX; i++) {
         mMemoryMap[i].Type = EfiReservedMemoryType;
         mMemoryMap[i].PhysicalStart = FW_AUTO_ALLOCATION_BASE +
@@ -13558,8 +13462,6 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
     mMemoryMap[0].NumberOfPages = 4;
     mMemoryMapEntries = MEMORY_MAP_MAX;
     mMapKey = saved_key;
-    mNextPageAddr = mMemoryMap[0].PhysicalStart + EFI_PAGE_SIZE;
-    failed_next_page_addr = mNextPageAddr;
     failed_address = 0xfeedfacefeedfaceULL;
     fw_set_mem(mPageAllocations, sizeof(mPageAllocations), 0);
     fw_copy_mem(failed_pages, mPageAllocations, sizeof(failed_pages));
@@ -13569,8 +13471,7 @@ static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
                            &failed_address);
     if (st != EFI_OUT_OF_RESOURCES ||
         failed_address != 0xfeedfacefeedfaceULL ||
-        mMemoryMapEntries != MEMORY_MAP_MAX || mMapKey != saved_key ||
-        mNextPageAddr != failed_next_page_addr) {
+        mMemoryMapEntries != MEMORY_MAP_MAX || mMapKey != saved_key) {
         ok = 0;
         goto out;
     }
@@ -13594,7 +13495,6 @@ out:
     fw_copy_mem(mPoolAllocations, saved_pool, sizeof(saved_pool));
     mMemoryMapEntries = saved_entries;
     mMapKey = saved_key;
-    mNextPageAddr = saved_next_page_addr;
     return ok;
 }
 
@@ -13657,10 +13557,6 @@ static void efi_init_memory_map(void)
     mSystemTablePointer =
         (EFI_SYSTEM_TABLE_POINTER *)(UINTN)mSystemTablePointerBase;
 
-    if (mNextPageAddr < firmware_end) {
-        mNextPageAddr = firmware_end;
-    }
-
     /* Legacy low memory, with the VGA aperture decoded as UC MMIO. */
     efi_add_memory_range(&index, EfiReservedMemoryType, 0x00000000,
                          VGA_LEGACY_FB_BASE, EFI_MEMORY_WB);
@@ -13722,15 +13618,21 @@ static void efi_init_memory_map(void)
     efi_add_memory_range(&index, EfiACPIReclaimMemory,
                          ACPI_RECLAIM_TABLE_BASE, ACPI_RECLAIM_END,
                          EFI_MEMORY_WB);
+    /*
+     * Keep 16 MiB as a stable platform memory-map boundary.  Both sides are
+     * conventional memory in the standards profile; the boundary describes
+     * the low-memory topology independently of optional compatibility
+     * windows.
+     */
+    efi_add_memory_range(
+        &index, EfiConventionalMemory, ACPI_RECLAIM_END,
+        FW_EARLY_LOADER_WINDOW_BASE, EFI_MEMORY_WB);
     if (fw_compat_enabled(IA64_FW_COMPAT_EARLY_LOADER_MEMORY)) {
         /*
          * Early loaders reserve fixed physical windows from 16 MiB through
          * 80 MiB.  Preserve their descriptor boundaries and keep automatic
          * firmware allocations out of those otherwise free pages.
          */
-        efi_add_memory_range(
-            &index, EfiConventionalMemory, ACPI_RECLAIM_END,
-            FW_EARLY_LOADER_WINDOW_BASE, EFI_MEMORY_WB);
         efi_add_memory_range(
             &index, EfiConventionalMemory,
             FW_EARLY_LOADER_WINDOW_BASE, FW_LOW_IMAGE_BASE,
@@ -16740,8 +16642,6 @@ static void efi_init_fpswa_loaded_image_proto(void)
 #define IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE FW_LOW_RUNTIME_IMAGE_BASE
 #define IA64_EFI_IMAGE_ALIGN                 0x00010000ULL
 
-static UINT64 mNextPeImageBase = IA64_EFI_IMAGE_FALLBACK_BASE;
-
 typedef struct {
     UINT16  e_magic;
     UINT16  e_cblp;
@@ -16932,6 +16832,58 @@ static BOOLEAN pe_image_base_in_use(UINT64 base, UINT64 size)
     return 0;
 }
 
+static BOOLEAN pe_find_loaded_image_overlap(UINT64 Start, UINT64 End,
+                                            UINT64 *FirstEnd,
+                                            UINT64 *LastStart)
+{
+    UINT64 first_end = ~0ULL;
+    UINT64 last_start = 0;
+    BOOLEAN found = 0;
+    UINTN i;
+
+    if (End <= Start) {
+        return 0;
+    }
+
+    for (i = 0; i < LOADED_IMAGE_MAX; i++) {
+        EFI_LOADED_IMAGE_RECORD *rec = &mLoadedImages[i];
+        UINT64 base;
+        UINT64 size;
+        UINT64 end;
+
+        if (!rec->in_use) {
+            continue;
+        }
+        base = (UINT64)(UINTN)rec->loaded_image.ImageBase;
+        size = pe_loaded_image_allocation_size(
+            rec->loaded_image.ImageSize, rec->loaded_image.ImageCodeType);
+        if (size == 0 || base > ~0ULL - size) {
+            continue;
+        }
+        end = base + size;
+        if (Start >= end || base >= End) {
+            continue;
+        }
+        if (!found || end < first_end) {
+            first_end = end;
+        }
+        if (!found || base > last_start) {
+            last_start = base;
+        }
+        found = 1;
+    }
+
+    if (found) {
+        if (FirstEnd != NULL) {
+            *FirstEnd = first_end;
+        }
+        if (LastStart != NULL) {
+            *LastStart = last_start;
+        }
+    }
+    return found;
+}
+
 static BOOLEAN pe_image_base_is_conventional(UINT64 base, UINT64 size)
 {
     UINTN i;
@@ -17011,6 +16963,110 @@ static BOOLEAN pe_image_base_available(UINT64 base, UINT64 size,
     return pe_image_base_usable(base, size, IA64_EFI_IMAGE_ALIGN);
 }
 
+static BOOLEAN pe_find_image_base_forward(UINT64 Start, UINT64 End,
+                                          UINT64 Size,
+                                          UINT64 SourceBase,
+                                          UINT64 SourceSize,
+                                          UINT64 *ImageBase)
+{
+    UINT64 base;
+    UINT64 source_end;
+
+    if (Size == 0 || End <= Start || End - Start < Size ||
+        !efi_align_up_u64(Start, IA64_EFI_IMAGE_ALIGN, &base)) {
+        return 0;
+    }
+    source_end = SourceSize > ~0ULL - SourceBase ?
+                 ~0ULL : SourceBase + SourceSize;
+
+    while (base <= End - Size) {
+        UINT64 blocker_end = 0;
+        UINT64 overlap_end;
+        BOOLEAN blocked = 0;
+
+        if (SourceSize != 0 && base < source_end &&
+            SourceBase < base + Size) {
+            blocker_end = source_end;
+            blocked = 1;
+        }
+        if (efi_find_allocation_overlap(base, base + Size, &overlap_end,
+                                        NULL) &&
+            (!blocked || overlap_end < blocker_end)) {
+            blocker_end = overlap_end;
+            blocked = 1;
+        }
+        if (pe_find_loaded_image_overlap(base, base + Size, &overlap_end,
+                                         NULL) &&
+            (!blocked || overlap_end < blocker_end)) {
+            blocker_end = overlap_end;
+            blocked = 1;
+        }
+        if (!blocked) {
+            *ImageBase = base;
+            return 1;
+        }
+        if (blocker_end <= base ||
+            !efi_align_up_u64(blocker_end, IA64_EFI_IMAGE_ALIGN, &base)) {
+            return 0;
+        }
+    }
+    return 0;
+}
+
+static BOOLEAN pe_find_image_base_backward(UINT64 Start, UINT64 End,
+                                           UINT64 Size,
+                                           UINT64 SourceBase,
+                                           UINT64 SourceSize,
+                                           UINT64 *ImageBase)
+{
+    UINT64 limit_end = End;
+    UINT64 source_end;
+
+    if (Size == 0 || End <= Start || End - Start < Size) {
+        return 0;
+    }
+    source_end = SourceSize > ~0ULL - SourceBase ?
+                 ~0ULL : SourceBase + SourceSize;
+
+    while (limit_end > Start && limit_end - Start >= Size) {
+        UINT64 base = (limit_end - Size) &
+                      ~(IA64_EFI_IMAGE_ALIGN - 1U);
+        UINT64 blocker_start = 0;
+        UINT64 overlap_start;
+        BOOLEAN blocked = 0;
+
+        if (base < Start) {
+            return 0;
+        }
+        if (SourceSize != 0 && base < source_end &&
+            SourceBase < base + Size) {
+            blocker_start = SourceBase;
+            blocked = 1;
+        }
+        if (efi_find_allocation_overlap(base, base + Size, NULL,
+                                        &overlap_start) &&
+            (!blocked || overlap_start > blocker_start)) {
+            blocker_start = overlap_start;
+            blocked = 1;
+        }
+        if (pe_find_loaded_image_overlap(base, base + Size, NULL,
+                                         &overlap_start) &&
+            (!blocked || overlap_start > blocker_start)) {
+            blocker_start = overlap_start;
+            blocked = 1;
+        }
+        if (!blocked) {
+            *ImageBase = base;
+            return 1;
+        }
+        if (blocker_start >= limit_end) {
+            return 0;
+        }
+        limit_end = blocker_start;
+    }
+    return 0;
+}
+
 /*
  * FixedBase marks an image whose relocations were stripped: it runs at its
  * linked base or not at all, so the staging floor - which is only placement
@@ -17023,14 +17079,11 @@ static UINT64 pe_choose_image_base(UINT64 preferred_base, UINT64 size,
                                    BOOLEAN RuntimeImage, BOOLEAN FixedBase,
                                    UINT64 SourceBase, UINT64 SourceSize)
 {
-    UINT64 base;
     UINT64 aligned_size;
     UINT64 fixed_size;
     UINT64 fixed_align = pe_image_base_alignment(RuntimeImage);
     UINT64 floor = pe_image_allocation_floor(RuntimeImage);
-    UINT64 cursor = 0;
-    BOOLEAN cursor_valid;
-    unsigned pass;
+    UINTN i;
 
     if (size == 0 ||
         !efi_align_up_u64(size, IA64_EFI_IMAGE_ALIGN, &aligned_size)) {
@@ -17056,64 +17109,71 @@ static UINT64 pe_choose_image_base(UINT64 preferred_base, UINT64 size,
         return preferred_base;
     }
 
-    cursor_valid = efi_align_up_u64(mNextPeImageBase,
-                                    IA64_EFI_IMAGE_ALIGN, &cursor);
-    for (pass = 0; pass < 2; pass++) {
-        UINTN i;
-
+    /*
+     * The early-loader profile models the loader-code arena used by
+     * first-generation platform firmware.  Keep its images growing upward
+     * from that arena while ordinary AllocateAnyPages and pool backing retain
+     * the reference allocator's descending search.  Later profiles use the
+     * descending image search as well.
+     */
+    if (fw_compat_enabled(IA64_FW_COMPAT_EARLY_LOADER_MEMORY)) {
         for (i = 0; i < mMemoryMapEntries; i++) {
             EFI_MEMORY_DESCRIPTOR *desc = &mMemoryMap[i];
             UINT64 desc_start;
             UINT64 desc_end;
+            UINT64 base;
 
-            if (desc->Type != EfiConventionalMemory ||
-                !efi_align_up_u64(desc->PhysicalStart,
-                                  IA64_EFI_IMAGE_ALIGN, &desc_start)) {
+            if (desc->Type != EfiConventionalMemory) {
                 continue;
             }
-
-            desc_end = desc->PhysicalStart +
-                       (desc->NumberOfPages << 12);
-            if (desc_end <= desc->PhysicalStart) {
+            desc_start = desc->PhysicalStart;
+            desc_end = desc_start + (desc->NumberOfPages << 12);
+            if (desc_end <= desc_start) {
                 continue;
             }
             if (desc_start < floor) {
-                if (!efi_align_up_u64(floor, IA64_EFI_IMAGE_ALIGN,
-                                      &desc_start)) {
-                    continue;
-                }
-            }
-            if (pass == 0) {
-                if (!cursor_valid) {
-                    continue;
-                }
-                if (desc_start < cursor) {
-                    desc_start = cursor;
-                }
-            } else if (cursor_valid && desc_start >= cursor) {
-                continue;
+                desc_start = floor;
             }
             if (desc_start >= desc_end ||
                 desc_end - desc_start < aligned_size) {
                 continue;
             }
-
-            for (base = desc_start; base <= desc_end - aligned_size;) {
-                if (pass != 0 && cursor_valid && base >= cursor) {
-                    break;
-                }
-                if (!ranges_overlap(base, aligned_size,
-                                    SourceBase, SourceSize) &&
-                    pe_image_base_available(base, aligned_size,
-                                            RuntimeImage)) {
-                    mNextPeImageBase = base + aligned_size;
-                    return base;
-                }
-                if (base > ~0ULL - IA64_EFI_IMAGE_ALIGN) {
-                    break;
-                }
-                base += IA64_EFI_IMAGE_ALIGN;
+            if (pe_find_image_base_forward(
+                    desc_start, desc_end, aligned_size,
+                    SourceBase, SourceSize, &base)) {
+                return base;
             }
+        }
+        return 0;
+    }
+
+    for (i = mMemoryMapEntries; i > 0; i--) {
+        EFI_MEMORY_DESCRIPTOR *desc = &mMemoryMap[i - 1U];
+        UINT64 desc_start;
+        UINT64 desc_end;
+        UINT64 base;
+
+        if (desc->Type != EfiConventionalMemory) {
+            continue;
+        }
+        desc_start = desc->PhysicalStart;
+        desc_end = desc_start + (desc->NumberOfPages << 12);
+        if (desc_end <= desc_start) {
+            continue;
+        }
+        if (desc_start < floor) {
+            desc_start = floor;
+        }
+        if (!efi_align_up_u64(desc_start, IA64_EFI_IMAGE_ALIGN,
+                              &desc_start) ||
+            desc_start >= desc_end ||
+            desc_end - desc_start < aligned_size) {
+            continue;
+        }
+        if (pe_find_image_base_backward(
+                desc_start, desc_end, aligned_size,
+                SourceBase, SourceSize, &base)) {
+            return base;
         }
     }
 
@@ -22171,6 +22231,10 @@ typedef struct FW_FAT_VOLUME {
     UINT32  total_sectors;
     UINT32  cluster_count;
     UINT32  lba_offset;
+    BOOLEAN fat_cache_valid;
+    UINT32  fat_cache_media_id;
+    UINT32  fat_cache_lba;
+    UINT8   fat_cache[512];
     EFI_HANDLE handle;
     EFI_BLOCK_IO_PROTOCOL *block_io;
     EFI_SIMPLE_FILE_SYSTEM_PROTOCOL simple_fs;
@@ -22238,6 +22302,9 @@ typedef struct {
     FW_FS_KIND fs_kind;
     FW_FAT_VOLUME *fat_volume;
     UINT32  first_cluster;
+    BOOLEAN fat_cursor_valid;
+    UINT32  fat_cursor_cluster;
+    UINT32  fat_cursor_index;
     UINT32  extent;
     UINT16  partition_reference;
     UINT64  size;
@@ -24785,11 +24852,19 @@ static BOOLEAN __attribute__((noinline)) pe_image_base_allocation_selftest(void)
     static EFI_POOL_ALLOCATION_RECORD saved_pool[POOL_ALLOCATION_MAX];
     UINTN saved_entries = mMemoryMapEntries;
     UINTN saved_key = mMapKey;
-    UINT64 saved_next_pe_image_base = mNextPeImageBase;
-    UINT64 image_floor = pe_image_allocation_floor(0);
-    UINT64 runtime_floor = pe_image_allocation_floor(1);
+    UINT64 range_end =
+        IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE + 0x40000ULL;
+    UINT64 top_one = range_end - IA64_EFI_IMAGE_ALIGN;
+    UINT64 top_two = top_one - IA64_EFI_IMAGE_ALIGN;
+    UINT64 top_three = top_two - IA64_EFI_IMAGE_ALIGN;
+    UINT64 low_one = IA64_EFI_IMAGE_FALLBACK_BASE;
+    UINT64 low_two = low_one + IA64_EFI_IMAGE_ALIGN;
+    UINT64 low_three = low_two + IA64_EFI_IMAGE_ALIGN;
     BOOLEAN early_loader_memory =
         fw_compat_enabled(IA64_FW_COMPAT_EARLY_LOADER_MEMORY);
+    UINT64 placement_one = early_loader_memory ? low_one : top_one;
+    UINT64 placement_two = early_loader_memory ? low_two : top_two;
+    UINT64 placement_three = early_loader_memory ? low_three : top_three;
     UINT64 base;
     BOOLEAN ok = 1;
 
@@ -24804,63 +24879,62 @@ static BOOLEAN __attribute__((noinline)) pe_image_base_allocation_selftest(void)
     mMemoryMapEntries = 0;
     mMapKey = 0;
     efi_add_memory_range(&mMemoryMapEntries, EfiConventionalMemory,
-                         ACPI_RECLAIM_END,
-                         IA64_EFI_RUNTIME_IMAGE_FALLBACK_BASE + 0x40000ULL,
+                         ACPI_RECLAIM_END, range_end,
                          EFI_MEMORY_WB);
 
-    mNextPeImageBase = image_floor;
     base = pe_choose_image_base(FW_LOW_IMAGE_BASE, 0x10000, 0, 0, 0, 0);
     if (base != (early_loader_memory ?
-                 IA64_EFI_IMAGE_FALLBACK_BASE : FW_LOW_IMAGE_BASE) ||
-        mNextPeImageBase != (early_loader_memory ?
-            IA64_EFI_IMAGE_FALLBACK_BASE + IA64_EFI_IMAGE_ALIGN :
-            image_floor)) {
+                 low_one : FW_LOW_IMAGE_BASE)) {
         ok = 0;
         goto out;
     }
 
     /* Conventional page and pool records remain invisible in the map. */
     mPageAllocations[0].in_use = 1;
-    mPageAllocations[0].base = image_floor;
+    mPageAllocations[0].base = placement_one;
     mPageAllocations[0].pages = IA64_EFI_IMAGE_ALIGN >> 12;
     mPageAllocations[0].type = EfiConventionalMemory;
     mPoolAllocations[0].in_use = 1;
-    mPoolAllocations[0].base = image_floor + IA64_EFI_IMAGE_ALIGN;
+    mPoolAllocations[0].base = placement_two;
     mPoolAllocations[0].size = IA64_EFI_IMAGE_ALIGN;
     mPoolAllocations[0].backing_base = mPoolAllocations[0].base;
     mPoolAllocations[0].backing_pages = IA64_EFI_IMAGE_ALIGN >> 12;
     mPoolAllocations[0].type = EfiConventionalMemory;
-    mNextPeImageBase = image_floor;
     base = pe_choose_image_base(0, 0x10000, 0, 0, 0, 0);
-    if (base != image_floor + 2U * IA64_EFI_IMAGE_ALIGN ||
-        mNextPeImageBase != image_floor + 3U * IA64_EFI_IMAGE_ALIGN) {
+    if (base != placement_three) {
         ok = 0;
         goto out;
     }
     fw_set_mem(mPageAllocations, sizeof(mPageAllocations), 0);
     fw_set_mem(mPoolAllocations, sizeof(mPoolAllocations), 0);
 
-    mNextPeImageBase = runtime_floor;
     base = pe_choose_image_base(0, 0x10000, 1, 0, 0, 0);
-    if (base != runtime_floor ||
-        mNextPeImageBase != runtime_floor + 0x10000ULL) {
+    if (base != placement_one) {
         ok = 0;
         goto out;
     }
 
     mLoadedImages[0].in_use = 1;
     mLoadedImages[0].loaded_image.ImageBase =
-        (VOID *)(UINTN)(runtime_floor + 0x10000ULL);
+        (VOID *)(UINTN)placement_one;
     mLoadedImages[0].loaded_image.ImageSize = 0x10000;
-    base = pe_choose_image_base(runtime_floor + 0x10000ULL,
+    mLoadedImages[0].loaded_image.ImageCodeType = EfiRuntimeServicesCode;
+    base = pe_choose_image_base(placement_one,
                                 0x10000, 1, 0, 0, 0);
-    if (base != runtime_floor + 0x20000ULL ||
-        mNextPeImageBase != runtime_floor + 0x30000ULL) {
+    if (base != placement_two) {
         ok = 0;
         goto out;
     }
 
+    /* The source buffer is also a placement blocker without an allocation. */
     fw_set_mem(mLoadedImages, sizeof(mLoadedImages), 0);
+    base = pe_choose_image_base(0, 0x10000, 1, 0,
+                                placement_one, IA64_EFI_IMAGE_ALIGN);
+    if (base != placement_two) {
+        ok = 0;
+        goto out;
+    }
+
     fw_set_mem(mMemoryMap, sizeof(mMemoryMap), 0);
     mMemoryMapEntries = 0;
     efi_add_memory_range(&mMemoryMapEntries, EfiConventionalMemory,
@@ -24870,24 +24944,21 @@ static BOOLEAN __attribute__((noinline)) pe_image_base_allocation_selftest(void)
                          IA64_EFI_IMAGE_FALLBACK_BASE,
                          IA64_EFI_IMAGE_FALLBACK_BASE + 0x100000ULL,
                          EFI_MEMORY_WB);
-    mNextPeImageBase = image_floor;
 
     /*
      * Images without relocations must load where they were linked even below
      * the staging floor; 0x1040000 is a common IA-64 default link address.
      */
     base = pe_choose_image_base(0x1040000ULL, 0x34000, 0, 1, 0, 0);
-    if (base != 0x1040000ULL ||
-        mNextPeImageBase != image_floor) {
+    if (base != 0x1040000ULL) {
         ok = 0;
         goto out;
     }
 
-    /* Only the compatibility profile imposes the historical staging floor. */
+    /* The compatibility profile falls back to its loader-code arena. */
     base = pe_choose_image_base(0x1040000ULL, 0x34000, 0, 0, 0, 0);
-    if ((early_loader_memory &&
-         base < IA64_EFI_IMAGE_FALLBACK_BASE) ||
-        (!early_loader_memory && base != 0x1040000ULL)) {
+    if (base != (early_loader_memory ?
+                 IA64_EFI_IMAGE_FALLBACK_BASE : 0x1040000ULL)) {
         ok = 0;
         goto out;
     }
@@ -24910,9 +24981,7 @@ static BOOLEAN __attribute__((noinline)) pe_image_base_allocation_selftest(void)
     fw_set_mem(mLoadedImages, sizeof(mLoadedImages), 0);
 
     mMemoryMapEntries = 0;
-    mNextPeImageBase = image_floor;
-    if (pe_choose_image_base(0, 0x10000, 0, 0, 0, 0) != 0 ||
-        mNextPeImageBase != image_floor) {
+    if (pe_choose_image_base(0, 0x10000, 0, 0, 0, 0) != 0) {
         ok = 0;
     }
 
@@ -24923,7 +24992,6 @@ out:
     fw_copy_mem(mPoolAllocations, saved_pool, sizeof(saved_pool));
     mMemoryMapEntries = saved_entries;
     mMapKey = saved_key;
-    mNextPeImageBase = saved_next_pe_image_base;
     return ok;
 }
 
@@ -24939,7 +25007,6 @@ static BOOLEAN __attribute__((noinline)) load_image_options_selftest(void)
     EFI_HANDLE image;
     UINTN saved_entries = mMemoryMapEntries;
     UINTN saved_key = mMapKey;
-    EFI_PHYSICAL_ADDRESS saved_next_page_addr = mNextPageAddr;
     UINTN i;
     BOOLEAN ok;
 
@@ -25015,7 +25082,6 @@ static BOOLEAN __attribute__((noinline)) load_image_options_selftest(void)
     fw_copy_mem(mPoolAllocations, saved_pool, sizeof(saved_pool));
     mMemoryMapEntries = saved_entries;
     mMapKey = saved_key;
-    mNextPageAddr = saved_next_page_addr;
     return ok;
 }
 
@@ -25390,6 +25456,32 @@ static BOOLEAN fw_fat_read_512s(FW_FAT_VOLUME *Volume, UINT8 *buf,
                buf) == EFI_SUCCESS;
 }
 
+static const UINT8 *fw_fat_read_table_sector(FW_FAT_VOLUME *Volume,
+                                             UINT32 lba)
+{
+    UINT32 media_id;
+
+    if (Volume == NULL || !Volume->valid || Volume->block_io == NULL ||
+        Volume->block_io->Media == NULL) {
+        return NULL;
+    }
+    media_id = Volume->block_io->Media->MediaId;
+    if (Volume->fat_cache_valid &&
+        Volume->fat_cache_media_id == media_id &&
+        Volume->fat_cache_lba == lba) {
+        return Volume->fat_cache;
+    }
+
+    Volume->fat_cache_valid = 0;
+    if (!fw_fat_read_512(Volume, Volume->fat_cache, lba)) {
+        return NULL;
+    }
+    Volume->fat_cache_media_id = media_id;
+    Volume->fat_cache_lba = lba;
+    Volume->fat_cache_valid = 1;
+    return Volume->fat_cache;
+}
+
 static BOOLEAN fw_fat_is_data_cluster(FW_FAT_VOLUME *Volume, UINT32 cluster)
 {
     return Volume != NULL && cluster >= 2U &&
@@ -25399,7 +25491,7 @@ static BOOLEAN fw_fat_is_data_cluster(FW_FAT_VOLUME *Volume, UINT32 cluster)
 
 static UINT32 fw_fat_next_cluster(FW_FAT_VOLUME *Volume, UINT32 cluster)
 {
-    UINT8 sec[512];
+    const UINT8 *sec;
     UINT32 offset;
     UINT32 lba;
     UINT32 pos;
@@ -25415,12 +25507,14 @@ static UINT32 fw_fat_next_cluster(FW_FAT_VOLUME *Volume, UINT32 cluster)
         offset = cluster + (cluster >> 1);
         lba = Volume->reserved_secs + (offset / 512U);
         pos = offset & 511U;
-        if (!fw_fat_read_512(Volume, sec, lba)) {
+        sec = fw_fat_read_table_sector(Volume, lba);
+        if (sec == NULL) {
             return 0xffffffffU;
         }
         b0 = sec[pos];
         if (pos == 511U) {
-            if (!fw_fat_read_512(Volume, sec, lba + 1U)) {
+            sec = fw_fat_read_table_sector(Volume, lba + 1U);
+            if (sec == NULL) {
                 return 0xffffffffU;
             }
             b1 = sec[0];
@@ -25433,7 +25527,8 @@ static UINT32 fw_fat_next_cluster(FW_FAT_VOLUME *Volume, UINT32 cluster)
 
     offset = cluster * (Volume->fat_type == 16U ? 2U : 4U);
     lba = Volume->reserved_secs + offset / 512U;
-    if (!fw_fat_read_512(Volume, sec, lba)) {
+    sec = fw_fat_read_table_sector(Volume, lba);
+    if (sec == NULL) {
         return 0xffffffffU;
     }
     if (Volume->fat_type == 16U) {
@@ -27277,6 +27372,134 @@ static EFI_STATUS fat_file_open(EFI_FILE_PROTOCOL *This,
     return EFI_SUCCESS;
 }
 
+static UINT32 fat_file_cluster_at(FW_FILE *File, UINT32 Position,
+                                  UINT32 *ClusterPosition,
+                                  UINT32 *ClusterIndex)
+{
+    FW_FAT_VOLUME *volume = File != NULL ? File->fat_volume : NULL;
+    UINT32 target_index;
+    UINT32 current_index;
+    UINT32 cluster;
+
+    if (volume == NULL || !volume->valid || volume->cluster_size == 0) {
+        return 0xffffffffU;
+    }
+
+    target_index = Position / volume->cluster_size;
+    if (File->fat_cursor_valid &&
+        File->fat_cursor_index <= target_index &&
+        fw_fat_is_data_cluster(volume, File->fat_cursor_cluster)) {
+        cluster = File->fat_cursor_cluster;
+        current_index = File->fat_cursor_index;
+    } else {
+        cluster = File->first_cluster;
+        current_index = 0;
+    }
+
+    while (current_index < target_index &&
+           fw_fat_is_data_cluster(volume, cluster)) {
+        cluster = fw_fat_next_cluster(volume, cluster);
+        current_index++;
+    }
+    if (!fw_fat_is_data_cluster(volume, cluster)) {
+        return 0xffffffffU;
+    }
+
+    File->fat_cursor_valid = 1;
+    File->fat_cursor_cluster = cluster;
+    File->fat_cursor_index = current_index;
+    if (ClusterPosition != NULL) {
+        *ClusterPosition = Position % volume->cluster_size;
+    }
+    if (ClusterIndex != NULL) {
+        *ClusterIndex = current_index;
+    }
+    return cluster;
+}
+
+typedef struct {
+    EFI_BLOCK_IO_PROTOCOL protocol;
+    EFI_BLOCK_IO_MEDIA media;
+    UINT8 fat_sector[512];
+    UINT32 read_count;
+} FW_FAT_CACHE_TEST;
+
+static EFI_STATUS fat_cache_test_read(EFI_BLOCK_IO_PROTOCOL *This,
+                                      UINT32 MediaId, UINT64 Lba,
+                                      UINTN BufferSize, VOID *Buffer)
+{
+    FW_FAT_CACHE_TEST *test = (FW_FAT_CACHE_TEST *)This;
+
+    if (MediaId != test->media.MediaId) {
+        return EFI_MEDIA_CHANGED;
+    }
+    if (Lba != 1U || BufferSize != sizeof(test->fat_sector) ||
+        Buffer == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+    fw_copy_mem(Buffer, test->fat_sector, sizeof(test->fat_sector));
+    test->read_count++;
+    return EFI_SUCCESS;
+}
+
+static BOOLEAN fat_cursor_cache_selftest(VOID)
+{
+    FW_FAT_CACHE_TEST test;
+    FW_FAT_VOLUME volume;
+    FW_FILE file;
+    UINT32 cluster_position;
+    UINT32 cluster_index;
+
+    fw_set_mem(&test, sizeof(test), 0);
+    fw_set_mem(&volume, sizeof(volume), 0);
+    fw_set_mem(&file, sizeof(file), 0);
+
+    test.media.MediaId = 7U;
+    test.media.MediaPresent = 1;
+    test.media.BlockSize = 512U;
+    test.media.LastBlock = 31U;
+    test.protocol.Media = &test.media;
+    test.protocol.ReadBlocks = fat_cache_test_read;
+    test.fat_sector[4] = 3U;  /* cluster 2 -> 3 */
+    test.fat_sector[6] = 4U;  /* cluster 3 -> 4 */
+    test.fat_sector[8] = 5U;  /* cluster 4 -> 5 */
+    test.fat_sector[10] = 0xf8U; /* cluster 5 -> end of chain */
+    test.fat_sector[11] = 0xffU;
+
+    volume.valid = 1;
+    volume.fat_type = 16U;
+    volume.sec_per_cluster = 1U;
+    volume.reserved_secs = 1U;
+    volume.eoc_cluster = 0xfff8U;
+    volume.cluster_size = 512U;
+    volume.total_sectors = 32U;
+    volume.cluster_count = 16U;
+    volume.block_io = &test.protocol;
+
+    file.fs_kind = FW_FS_FAT;
+    file.fat_volume = &volume;
+    file.first_cluster = 2U;
+
+    if (fat_file_cluster_at(&file, 2U * 512U, &cluster_position,
+                            &cluster_index) != 4U ||
+        cluster_position != 0U || cluster_index != 2U ||
+        test.read_count != 1U ||
+        fat_file_cluster_at(&file, 3U * 512U, &cluster_position,
+                            &cluster_index) != 5U ||
+        cluster_index != 3U || test.read_count != 1U ||
+        fat_file_cluster_at(&file, 512U, &cluster_position,
+                            &cluster_index) != 3U ||
+        cluster_index != 1U || test.read_count != 1U) {
+        return 0;
+    }
+
+    test.fat_sector[6] = 6U;  /* changed medium: cluster 3 -> 6 */
+    test.media.MediaId++;
+    return fat_file_cluster_at(&file, 2U * 512U, &cluster_position,
+                               &cluster_index) == 6U &&
+           cluster_index == 2U && test.read_count == 2U;
+}
+
 static EFI_STATUS iso_file_open(EFI_FILE_PROTOCOL *This,
                                 EFI_FILE_HANDLE *NewHandle,
                                 CHAR16 *FileName, UINT64 OpenMode,
@@ -27455,19 +27678,14 @@ static BOOLEAN fat_dir_read_raw_at(FW_FILE *file, UINT32 pos,
         }
         lba = volume->root_dir_start + (pos >> 9);
     } else {
-        UINT32 cluster = file->is_root ? volume->root_cluster :
-                         file->first_cluster;
-        UINT32 skip = pos / volume->cluster_size;
+        UINT32 cluster;
         UINT32 cluster_pos;
 
-        while (skip-- > 0 && fw_fat_is_data_cluster(volume, cluster)) {
-            cluster = fw_fat_next_cluster(volume, cluster);
-        }
+        cluster = fat_file_cluster_at(file, pos, &cluster_pos, NULL);
         if (!fw_fat_is_data_cluster(volume, cluster)) {
             return 0;
         }
 
-        cluster_pos = pos % volume->cluster_size;
         lba = volume->data_start +
               (cluster - 2U) * volume->sec_per_cluster +
               (cluster_pos >> 9);
@@ -27554,6 +27772,7 @@ static EFI_STATUS fat_file_read(EFI_FILE_PROTOCOL *This, UINTN *BufferSize,
     UINT32 done = 0;
     UINT32 pos;
     UINT32 cluster;
+    UINT32 cluster_index;
 
     if (BufferSize == NULL || file == NULL || volume == NULL ||
         !volume->valid ||
@@ -27573,13 +27792,8 @@ static EFI_STATUS fat_file_read(EFI_FILE_PROTOCOL *This, UINTN *BufferSize,
         want = file->size - file->position;
     }
 
-    pos = (UINT32)file->position;
-    cluster = file->first_cluster;
-    while (pos >= volume->cluster_size &&
-           fw_fat_is_data_cluster(volume, cluster)) {
-        pos -= volume->cluster_size;
-        cluster = fw_fat_next_cluster(volume, cluster);
-    }
+    cluster = fat_file_cluster_at(file, (UINT32)file->position,
+                                  &pos, &cluster_index);
 
     while (done < want && fw_fat_is_data_cluster(volume, cluster)) {
         UINT32 cluster_off = pos;
@@ -27626,6 +27840,12 @@ static EFI_STATUS fat_file_read(EFI_FILE_PROTOCOL *This, UINTN *BufferSize,
         pos = 0;
         if (done < want) {
             cluster = fw_fat_next_cluster(volume, cluster);
+            cluster_index++;
+            if (fw_fat_is_data_cluster(volume, cluster)) {
+                file->fat_cursor_valid = 1;
+                file->fat_cursor_cluster = cluster;
+                file->fat_cursor_index = cluster_index;
+            }
         }
     }
 
@@ -34682,10 +34902,6 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
     mBootStackTop = stack_top;
     mBootStackBase = stack_top - FW_BOOT_STACK_SIZE;
     fw_init_compatibility_profile();
-    mNextPageAddr =
-        fw_compat_enabled(IA64_FW_COMPAT_EARLY_LOADER_MEMORY) ?
-        FW_AUTO_ALLOCATION_BASE : ACPI_RECLAIM_END;
-    mNextPeImageBase = mNextPageAddr;
     mProcessorCount = fw_handoff_processor_count();
     fw_handoff_processor_topology(mProcessorCount);
     mResetFloatingPointDisableBits =
@@ -35196,6 +35412,10 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
     uart_puts("File Protocol:        ");
     uart_puts(file_protocol_contract_selftest() ?
               "read-only positioning and information verified\r\n" :
+              "verification failed\r\n");
+    uart_puts("FAT File Reads:       ");
+    uart_puts(fat_cursor_cache_selftest() ?
+              "cursor and table cache verified\r\n" :
               "verification failed\r\n");
     uart_puts("Unicode Collation:    ");
     uart_puts(unicode_collation_selftest() ?

@@ -124,8 +124,7 @@ typedef struct IA64RSEState {
      * AR.RNAT holds the spill-side value and rse_rnat_defined identifies
      * exactly which of its low 63 bits have a defined source.  Keep a mask
      * rather than a contiguous range: incomplete-frame movement can make
-     * stores non-contiguous.  Undefined bits are materialized as zero; they
-     * are never recovered from an old backing-store collection.
+     * stores non-contiguous.
      *
      * RSE.BspLoad can walk a different collection from AR.BSPSTORE.  Its
      * value and defined mask therefore live in a separate fill-side latch.
@@ -136,6 +135,13 @@ typedef struct IA64RSEState {
      * registers.  UINT64_MAX rse_rnat_addr denotes an entirely undefined
      * spill-side RNAT after mov-to-BSPSTORE, loadrs, or an RNAT collection
      * spill.
+     *
+     * loadrs makes AR.RNAT architecturally undefined, but that permission
+     * to hide its value does not permit a later partial collection store to
+     * corrupt registers already coherent below BSPSTORE (SDM Vol.2 6.10).
+     * rse_writeback_rnat retains the explicitly known part of the physical
+     * RNAT solely for that later store.  It is intentionally a separate type
+     * and is never consulted by the architectural RNAT or fill paths.
      */
     uint64_t rse_rnat_addr;
     uint64_t rse_rnat_defined;
@@ -143,6 +149,7 @@ typedef struct IA64RSEState {
     uint64_t rse_load_rnat_addr;
     uint64_t rse_load_rnat_defined;
     bool rse_load_rnat_valid;
+    IA64RnatWritebackImage rse_writeback_rnat;
     IA64RnatShadowEntry rse_rnat_shadow[IA64_RSE_RNAT_SHADOW_COUNT];
     uint8_t rse_rnat_shadow_count;
 } IA64RSEState;

@@ -45,6 +45,19 @@ static const VMStateDescription vmstate_ia64_rnat_shadow_entry = {
     }
 };
 
+static const VMStateDescription vmstate_ia64_rnat_writeback_image = {
+    .name = "ia64-rnat-writeback-image",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT64(value, IA64RnatWritebackImage),
+        VMSTATE_UINT64(addr, IA64RnatWritebackImage),
+        VMSTATE_UINT64(defined, IA64RnatWritebackImage),
+        VMSTATE_BOOL(valid, IA64RnatWritebackImage),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription vmstate_ia64_alat_entry = {
     .name = "ia64-alat-entry",
     .version_id = 1,
@@ -162,6 +175,20 @@ static int ia64_cpu_pre_save(void *opaque)
     return 0;
 }
 
+static bool
+ia64_rnat_writeback_image_invalid(const IA64RnatWritebackImage *image)
+{
+    if (!image->valid) {
+        return image->value != 0 || image->addr != 0 ||
+               image->defined != 0;
+    }
+
+    return image->defined == 0 ||
+           ((image->value | image->defined) & ~INT64_MAX) != 0 ||
+           (image->value & ~image->defined) != 0 ||
+           (image->addr & 0x1ff) != 0x1f8;
+}
+
 static int ia64_cpu_post_load(void *opaque, int version_id)
 {
     IA64CPU *cpu = opaque;
@@ -169,13 +196,24 @@ static int ia64_cpu_post_load(void *opaque, int version_id)
     uint32_t active_alat = 0;
     unsigned int i;
 
+    if (version_id < 2) {
+        memset(&env->rse.rse_writeback_rnat, 0,
+               sizeof(env->rse.rse_writeback_rnat));
+        memset(&cpu->firmware_debug.rse.writeback_rnat, 0,
+               sizeof(cpu->firmware_debug.rse.writeback_rnat));
+    }
+
     if (env->mmu.tlb_data_count > IA64_TLB_MAX ||
         env->mmu.tlb_inst_count > IA64_TLB_MAX ||
         env->mmu.tlb_data_l1_count > IA64_DTLB1_MAX ||
         env->rse.rse_bol >= IA64_STACKED_GR_COUNT ||
         env->rse.rse_rnat_shadow_count > IA64_RSE_RNAT_SHADOW_COUNT ||
         cpu->firmware_debug.rse.rnat_shadow_count >
-            IA64_RSE_RNAT_SHADOW_COUNT) {
+            IA64_RSE_RNAT_SHADOW_COUNT ||
+        ia64_rnat_writeback_image_invalid(
+            &env->rse.rse_writeback_rnat) ||
+        ia64_rnat_writeback_image_invalid(
+            &cpu->firmware_debug.rse.writeback_rnat)) {
         return -EINVAL;
     }
 
@@ -214,7 +252,7 @@ static int ia64_cpu_post_load(void *opaque, int version_id)
 
 const VMStateDescription vmstate_ia64_cpu = {
     .name = "cpu",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .pre_save = ia64_cpu_pre_save,
     .post_load = ia64_cpu_post_load,
@@ -323,6 +361,9 @@ const VMStateDescription vmstate_ia64_cpu = {
         VMSTATE_UINT64(env.rse.rse_load_rnat_addr, IA64CPU),
         VMSTATE_UINT64(env.rse.rse_load_rnat_defined, IA64CPU),
         VMSTATE_BOOL(env.rse.rse_load_rnat_valid, IA64CPU),
+        VMSTATE_STRUCT(env.rse.rse_writeback_rnat, IA64CPU, 2,
+                       vmstate_ia64_rnat_writeback_image,
+                       IA64RnatWritebackImage),
         VMSTATE_STRUCT_ARRAY(env.rse.rse_rnat_shadow, IA64CPU,
                              IA64_RSE_RNAT_SHADOW_COUNT, 1,
                              vmstate_ia64_rnat_shadow_entry,
@@ -413,6 +454,9 @@ const VMStateDescription vmstate_ia64_cpu = {
         VMSTATE_STRUCT(firmware_debug.rse, IA64CPU, 1,
                        vmstate_ia64_firmware_debug_rse,
                        IA64FirmwareDebugRseState),
+        VMSTATE_STRUCT(firmware_debug.rse.writeback_rnat, IA64CPU, 2,
+                       vmstate_ia64_rnat_writeback_image,
+                       IA64RnatWritebackImage),
         VMSTATE_UINT16(firmware_debug.vector, IA64CPU),
         VMSTATE_BOOL(firmware_debug.context_valid, IA64CPU),
         VMSTATE_BOOL(firmware_debug.handler_active, IA64CPU),

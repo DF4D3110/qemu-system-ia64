@@ -281,7 +281,7 @@ void ia64_system_write_ar(CPUIA64State *env, uint32_t ar_num, uint64_t value)
          */
         int32_t dirty = MAX(env->rse.rse_dirty, 0);
 
-        ia64_rse_rnat_undefined(env);
+        ia64_rse_rnat_undefined(env, "mov-bspstore");
         env->rse.rse_dirty_nat = ia64_rse_nat_words_grow(value, dirty);
         env->ar_bsp = value +
             (uint64_t)(env->rse.rse_dirty + env->rse.rse_dirty_nat) * 8;

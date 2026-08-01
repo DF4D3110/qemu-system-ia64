@@ -334,6 +334,7 @@ static void ia64_fw_debug_save_rse(CPUIA64State *env)
     state->load_rnat_addr = env->rse.rse_load_rnat_addr;
     state->load_rnat_defined = env->rse.rse_load_rnat_defined;
     state->load_rnat_valid = env->rse.rse_load_rnat_valid;
+    state->writeback_rnat = env->rse.rse_writeback_rnat;
     memcpy(state->rnat_shadow, env->rse.rse_rnat_shadow,
            sizeof(state->rnat_shadow));
     state->rnat_shadow_count = env->rse.rse_rnat_shadow_count;
@@ -370,6 +371,7 @@ static void ia64_fw_debug_restore_rse(CPUIA64State *env)
     env->rse.rse_load_rnat_addr = state->load_rnat_addr;
     env->rse.rse_load_rnat_defined = state->load_rnat_defined;
     env->rse.rse_load_rnat_valid = state->load_rnat_valid;
+    env->rse.rse_writeback_rnat = state->writeback_rnat;
     memcpy(env->rse.rse_rnat_shadow, state->rnat_shadow,
            sizeof(env->rse.rse_rnat_shadow));
     env->rse.rse_rnat_shadow_count = state->rnat_shadow_count;
@@ -744,6 +746,7 @@ static void ia64_unaligned_base_update(CPUIA64State *env,
     } else if (insn->imm_base_update) {
         env->gr[insn->operands.common.source2] =
             addr + insn->operands.common.immediate;
+        ia64_rse_mark_gr_dirty(env, insn->operands.common.source2);
     }
 }
 

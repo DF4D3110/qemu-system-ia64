@@ -676,6 +676,18 @@ typedef struct IA64RnatShadowEntry {
 } IA64RnatShadowEntry;
 
 /*
+ * Non-architectural image used only when a completed RNAT collection is
+ * written back.  In particular, this is not a source for mov-from-RNAT or
+ * mandatory fills.
+ */
+typedef struct IA64RnatWritebackImage {
+    uint64_t value;
+    uint64_t addr;
+    uint64_t defined;
+    bool valid;
+} IA64RnatWritebackImage;
+
+/*
  * The EFI 1.10 native debug-support ABI uses a fixed 1192-byte IA-64
  * context record.  Firmware places one record per vCPU immediately after
  * the architected IVT.  The emulator retains only the RSE bookkeeping that
@@ -708,6 +720,7 @@ typedef struct IA64FirmwareDebugRseState {
     uint64_t load_rnat_addr;
     uint64_t load_rnat_defined;
     bool load_rnat_valid;
+    IA64RnatWritebackImage writeback_rnat;
     IA64RnatShadowEntry rnat_shadow[IA64_RSE_RNAT_SHADOW_COUNT];
     uint8_t rnat_shadow_count;
     uint8_t cfm_sof;

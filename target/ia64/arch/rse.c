@@ -60,6 +60,17 @@ static void ia64_rse_write_u64(CPUIA64State *env, uint64_t addr,
                            (env->ar_rsc & IA64_RSC_BE) != 0, mmu_idx, ra);
 }
 
+static uint64_t ia64_rse_write_collection(CPUIA64State *env, uint64_t addr,
+                                          uint64_t value, uint64_t defined,
+                                          uint64_t *previous, uintptr_t ra)
+{
+    int mmu_idx = ia64_rse_mmu_index(env);
+
+    return ia64_exec_rse_store_collection(
+        env, addr, value, defined, (env->ar_rsc & IA64_RSC_BE) != 0,
+        mmu_idx, previous, ra);
+}
+
 static uint64_t ia64_rse_read_u64(CPUIA64State *env, uint64_t addr,
                                   uintptr_t ra)
 {
@@ -190,6 +201,19 @@ static void ia64_rse_invalidate_load_rnat(CPUIA64State *env)
     env->rse.rse_load_rnat_addr = 0;
     env->rse.rse_load_rnat_defined = 0;
     env->rse.rse_load_rnat_valid = false;
+}
+
+static void ia64_rse_rnat_writeback_clear(CPUIA64State *env,
+                                          const char *operation)
+{
+    IA64RnatWritebackImage *image = &env->rse.rse_writeback_rnat;
+
+    if (image->valid) {
+        trace_ia64_rse_rnat_writeback(env_cpu(env)->cpu_index, operation,
+                                      env->ip, image->addr, image->value,
+                                      image->defined);
+    }
+    memset(image, 0, sizeof(*image));
 }
 
 static int ia64_rse_rnat_shadow_find(const CPUIA64State *env, uint64_t addr)
@@ -343,6 +367,56 @@ static void ia64_rse_rnat_shadow_clip(CPUIA64State *env, uint64_t addr,
     }
 }
 
+/*
+ * loadrs makes AR.RNAT undefined, but bits below its tear point can still
+ * describe registers whose backing-store words remain valid.  Real hardware
+ * can retain those physical RNAT bits without exposing them architecturally.
+ * Save only explicitly known spill/shadow bits for that one partial
+ * collection.  Do not seed this image from rse_load_rnat: a fill latch is
+ * already derived from memory and the eventual store-side RMW can consult
+ * the then-current memory image directly.
+ */
+static void ia64_rse_rnat_writeback_capture_loadrs(CPUIA64State *env)
+{
+    IA64RnatWritebackImage *image = &env->rse.rse_writeback_rnat;
+    uint64_t collection_addr = ia64_rse_collect_word(env->ar_bspstore);
+    uint64_t keep =
+        ia64_rse_rnat_low_mask(ia64_rse_collect_bit(env->ar_bspstore));
+    uint64_t value = 0;
+    uint64_t defined = 0;
+
+    if (image->valid && image->addr == collection_addr) {
+        defined = image->defined & INT64_MAX;
+        value = image->value & defined;
+    } else if (image->valid) {
+        ia64_rse_rnat_writeback_clear(env, "loadrs-replace");
+    }
+
+    ia64_rse_rnat_shadow_overlay(env, collection_addr, &value, &defined);
+    if (env->rse.rse_rnat_addr == collection_addr) {
+        uint64_t spill_defined = env->rse.rse_rnat_defined & INT64_MAX;
+
+        value = (value & ~spill_defined) |
+                (env->ar_rnat & spill_defined);
+        defined |= spill_defined;
+    }
+
+    defined &= keep & INT64_MAX;
+    value &= defined;
+    if (defined == 0) {
+        ia64_rse_rnat_writeback_clear(env, "loadrs-empty");
+        return;
+    }
+
+    image->value = value;
+    image->addr = collection_addr;
+    image->defined = defined;
+    image->valid = true;
+    trace_ia64_rse_rnat_writeback(env_cpu(env)->cpu_index, "loadrs-capture",
+                                  env->ip, image->addr, image->value,
+                                  image->defined);
+}
+
 static void ia64_rse_rnat_bind(CPUIA64State *env, uint64_t collection_addr)
 {
     uint64_t value = 0;
@@ -395,6 +469,13 @@ void ia64_rse_rnat_reloaded(CPUIA64State *env)
     uint64_t collection_addr = ia64_rse_collect_word(env->ar_bspstore);
 
     /*
+     * An explicit RNAT write is the software authority for this context,
+     * including the SDM 6.10 backing-store edit sequence.  A physical image
+     * retained across an earlier loadrs must not override it later.
+     */
+    ia64_rse_rnat_writeback_clear(env, "rnat-reload");
+
+    /*
      * A fill-side value for this collection predates the architected write.
      * Do not let it reappear if internal pointer movement later exposes a
      * bit above the write-time RNATBitIndex.
@@ -414,19 +495,36 @@ void ia64_rse_rnat_reloaded(CPUIA64State *env)
 
 /*
  * mov-to-BSPSTORE and loadrs make AR.RNAT undefined (SDM Vol.2 6.5.2).
- * The architecture does not prescribe an old-value or backing-memory merge.
- * Materialize every undefined bit as zero, detach the spill latch, and
- * invalidate the fill latch derived from the previous backing-store
- * context.  Zero is an implementation policy for undefined state, chosen
- * because it cannot manufacture a deferred-exception token.
+ * Detach the architected spill latch and invalidate the fill latch derived
+ * from the previous backing-store context.  Undefined bits remain invisible
+ * to mov-from-RNAT and mandatory fills.
+ *
+ * Both cached views of backing-store memory go with it.  SDM Vol.2 6.10
+ * documents mov-to-BSPSTORE as a step of the sequence software uses to edit
+ * the backing store below BSPSTORE ("read the RNAT application register,
+ * update the backing store location in memory, rewrite BSPSTORE with the
+ * original value, and then rewrite RNAT").  Rewriting BSPSTORE with a value it
+ * already holds is only meaningful as an instruction to drop cached knowledge
+ * of that memory, so mov-to-BSPSTORE also discards the writeback-only image.
+ * loadrs instead captures that image before detaching: it is physical state,
+ * not a source visible through either architectural path.
  */
-void ia64_rse_rnat_undefined(CPUIA64State *env)
+static void ia64_rse_rnat_detach(CPUIA64State *env, const char *site,
+                                 bool discard_writeback)
 {
     env->ar_rnat = 0;
     env->rse.rse_rnat_addr = UINT64_MAX;
     env->rse.rse_rnat_defined = 0;
     ia64_rse_invalidate_load_rnat(env);
     ia64_rse_rnat_shadow_clear_all(env);
+    if (discard_writeback) {
+        ia64_rse_rnat_writeback_clear(env, site);
+    }
+}
+
+void ia64_rse_rnat_undefined(CPUIA64State *env, const char *site)
+{
+    ia64_rse_rnat_detach(env, site, true);
 }
 
 static void ia64_rse_rnat_move_bspstore(CPUIA64State *env, uint64_t bspstore)
@@ -752,19 +850,53 @@ static int ia64_rse_store_one(CPUIA64State *env, uintptr_t ra)
     ia64_rse_rnat_bind(env, collection_addr);
 
     if (ncb == 63) {
-        uint64_t defined = env->rse.rse_rnat_defined & INT64_MAX;
-        uint64_t collection = env->ar_rnat & defined;
-        trace_ia64_rse_rnat_store(env_cpu(env)->cpu_index, env->ip,
-                                  bspstore, defined, 0, collection);
+        IA64RnatWritebackImage *image =
+            &env->rse.rse_writeback_rnat;
+        uint64_t spill_defined =
+            env->rse.rse_rnat_defined & INT64_MAX;
+        uint64_t defined = spill_defined;
+        uint64_t value = env->ar_rnat & spill_defined;
+        uint64_t previous;
+        uint64_t collection;
 
         /*
-         * SDM Vol.2 6.5.2 requires a complete RNAT store and then leaves
-         * AR.RNAT undefined.  It does not specify merging undefined bits
-         * with the previous contents of the backing-store word.  Write the
-         * explicitly accumulated bits and materialize every other bit as
-         * zero; bit 63 is consequently always zero.
+         * Writeback precedence is deliberate:
+         *
+         *   current spill bits > loadrs physical image > backing memory.
+         *
+         * Keeping the loadrs image out of ia64_rse_rnat_bind and
+         * ia64_rse_fill_collection makes it mechanically impossible for an
+         * architecturally undefined bit to become a fill source.
          */
-        ia64_rse_write_u64(env, bspstore, collection, ra);
+        if (image->valid && image->addr == collection_addr) {
+            uint64_t saved_defined = image->defined & INT64_MAX;
+
+            value = (image->value & saved_defined & ~spill_defined) |
+                    value;
+            defined |= saved_defined;
+            trace_ia64_rse_rnat_writeback(
+                env_cpu(env)->cpu_index, "store-merge", env->ip,
+                image->addr, image->value, image->defined);
+        }
+        collection = ia64_rse_write_collection(
+            env, bspstore, value, defined, &previous, ra);
+
+        trace_ia64_rse_rnat_store(env_cpu(env)->cpu_index, env->ip,
+                                  bspstore, defined, previous, collection);
+
+        /*
+         * SDM Vol.2 6.5.2 makes some AR.RNAT bits undefined after loadrs or
+         * mov-to-BSPSTORE, while 6.10 requires the backing store below
+         * BSPSTORE to remain coherent.  The store-side helper resolves both:
+         * current spill bits win, loadrs-retained physical bits fill their
+         * holes, all remaining positions retain the actual backing-memory
+         * image, and bit 63 is always zero.  None of the retained positions
+         * becomes an architectural RNAT or fill source before this complete
+         * collection store succeeds.
+         */
+        if (image->valid && image->addr == collection_addr) {
+            ia64_rse_rnat_writeback_clear(env, "store-retire");
+        }
         ia64_rse_rnat_shadow_remove(env, collection_addr,
                                     "store-discard");
         env->rse.rse_load_rnat = collection;
@@ -1199,6 +1331,8 @@ void ia64_rse_delivery_check(CPUIA64State *env, int excp)
 void ia64_rse_check(CPUIA64State *env, const char *site)
 {
 #ifdef CONFIG_DEBUG_TCG
+    const IA64RnatWritebackImage *writeback =
+        &env->rse.rse_writeback_rnat;
     static unsigned reported;
     unsigned shadow_count = env->rse.rse_rnat_shadow_count;
     unsigned i;
@@ -1238,6 +1372,15 @@ void ia64_rse_check(CPUIA64State *env, const char *site)
         bad |= env->rse.rse_load_rnat != 0 ||
                env->rse.rse_load_rnat_addr != 0 ||
                env->rse.rse_load_rnat_defined != 0;
+    }
+    bad |= (writeback->value | writeback->defined) & ~INT64_MAX;
+    bad |= writeback->value & ~writeback->defined;
+    if (writeback->valid) {
+        bad |= writeback->defined == 0;
+        bad |= ia64_rse_collect_word(writeback->addr) != writeback->addr;
+    } else {
+        bad |= writeback->value != 0 || writeback->addr != 0 ||
+               writeback->defined != 0;
     }
     bad |= shadow_count > IA64_RSE_RNAT_SHADOW_COUNT;
     for (i = 0; i < IA64_RSE_RNAT_SHADOW_COUNT; i++) {
@@ -1291,6 +1434,8 @@ void ia64_rse_check(CPUIA64State *env, const char *site)
                       "@%016" PRIx64 "/%016" PRIx64
                       " load-rnat=%016" PRIx64 "@%016" PRIx64
                       "/%016" PRIx64 "/%u"
+                      " writeback=%016" PRIx64 "@%016" PRIx64
+                      "/%016" PRIx64 "/%u"
                       " shadow=%u cfle=%d\n",
                       site, env->exception_state.exception, env->ip,
                       env->cfm_sof, env->cfm_sol,
@@ -1304,7 +1449,9 @@ void ia64_rse_check(CPUIA64State *env, const char *site)
                       env->rse.rse_load_rnat,
                       env->rse.rse_load_rnat_addr,
                       env->rse.rse_load_rnat_defined,
-                      env->rse.rse_load_rnat_valid, shadow_count,
+                      env->rse.rse_load_rnat_valid,
+                      writeback->value, writeback->addr,
+                      writeback->defined, writeback->valid, shadow_count,
                       env->rse.rse_cfle);
     }
 #else
@@ -1776,8 +1923,13 @@ void ia64_rse_load(CPUIA64State *env, uint64_t fault_ip, uint64_t raw,
         env->rse.rse_invalid = IA64_STACKED_GR_COUNT -
                            (env->cfm_sof + env->rse.rse_dirty);
     }
-    /* SDM Vol.2 6.5.4 leaves AR.RNAT undefined. */
-    ia64_rse_rnat_undefined(env);
+    /*
+     * SDM Vol.2 6.5.4 leaves AR.RNAT undefined.  Retain its known physical
+     * prefix solely so a later collection write cannot violate the backing
+     * store coherence guarantee in 6.10.
+     */
+    ia64_rse_rnat_writeback_capture_loadrs(env);
+    ia64_rse_rnat_detach(env, "loadrs", false);
     ia64_rse_check(env, "loadrs");
     IA64_TRACE_RSE_STATE(env, "loadrs");
 }

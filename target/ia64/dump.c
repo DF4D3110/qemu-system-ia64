@@ -200,6 +200,13 @@ void ia64_cpu_dump_state(CPUState *cs, FILE *f, int flags)
                  cpu->env.rse.rse_load_rnat_addr,
                  cpu->env.rse.rse_load_rnat_defined,
                  cpu->env.rse.rse_load_rnat_valid);
+    qemu_fprintf(f, "RSE-WRITEBACK: RNAT=0x%016" PRIx64
+                 " ADDR=0x%016" PRIx64 " DEFINED=0x%016" PRIx64
+                 " VALID=%u\n",
+                 cpu->env.rse.rse_writeback_rnat.value,
+                 cpu->env.rse.rse_writeback_rnat.addr,
+                 cpu->env.rse.rse_writeback_rnat.defined,
+                 cpu->env.rse.rse_writeback_rnat.valid);
     for (i = 0; i < cpu->env.rse.rse_rnat_shadow_count; i++) {
         const IA64RnatShadowEntry *entry =
             &cpu->env.rse.rse_rnat_shadow[i];
@@ -227,10 +234,16 @@ void ia64_cpu_dump_state(CPUState *cs, FILE *f, int flags)
                      " ADDR=0x%016" PRIx64
                      " DEFINED=0x%016" PRIx64
                      " LOAD=0x%016" PRIx64 "@0x%016" PRIx64
+                     "/0x%016" PRIx64 "/%u"
+                     " WRITEBACK=0x%016" PRIx64 "@0x%016" PRIx64
                      "/0x%016" PRIx64 "/%u SHADOW=%u\n",
                      rse->rnat, rse->rnat_addr, rse->rnat_defined,
                      rse->load_rnat, rse->load_rnat_addr,
                      rse->load_rnat_defined, rse->load_rnat_valid,
+                     rse->writeback_rnat.value,
+                     rse->writeback_rnat.addr,
+                     rse->writeback_rnat.defined,
+                     rse->writeback_rnat.valid,
                      rse->rnat_shadow_count);
         for (i = 0; i < rse->rnat_shadow_count; i++) {
             const IA64RnatShadowEntry *entry = &rse->rnat_shadow[i];
