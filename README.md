@@ -8,6 +8,7 @@ Experimental QEMU full-system emulation target for IA-64/Itanium guests.
 ## Contents
 
 - [Quick start](#quick-start)
+- [Windows x86_64 build](#windows-x86_64-build)
 - [Emulated platform](#emulated-platform)
 - [Machine profiles](#machine-profiles)
 - [CPU models](#cpu-models)
@@ -42,6 +43,154 @@ ninja -C build qemu-system-ia64 roms/ia64-firmware/ia64-firmware.bin
   -drive file=/path/to/guest-media.iso,media=cdrom,format=raw,readonly=on \
   -display gtk
 ```
+
+## Windows x86_64 build
+
+The following procedure cross-compiles the IA-64 emulator for 64-bit Windows
+on Debian or Ubuntu, including under WSL. Run every command from the root of
+this source tree unless the command explicitly changes directory.
+
+> [!WARNING]
+> The Windows build has received less testing than the Linux build and may
+> contain Windows-specific bugs.
+
+### Install host tools
+
+On Debian or Ubuntu:
+
+```sh
+sudo apt-get update
+sudo apt-get install --no-install-recommends \
+  build-essential \
+  bison \
+  ca-certificates \
+  curl \
+  flex \
+  g++-mingw-w64-x86-64 \
+  gcc-mingw-w64-x86-64 \
+  git \
+  meson \
+  ninja-build \
+  pkg-config \
+  python3 \
+  python3-venv \
+  zstd
+```
+
+The build below includes the EFI firmware and therefore requires the IA-64
+toolchain described in [Prerequisite](#prerequisite).
+
+### Fetch the pinned Windows dependencies
+
+The helper downloads the pinned MSYS2 MinGW64 dependencies, verifies their
+SHA-256 checksums, and prints the extracted sysroot path:
+
+```sh
+WIN_SYSROOT="$(./scripts/fetch-win64-deps.sh)"
+```
+
+### Configure and build
+
+```sh
+HOST_PKG_CONFIG="$(command -v pkg-config)"
+mkdir -p build-win64
+
+(
+  cd build-win64
+  PKG_CONFIG="$HOST_PKG_CONFIG" \
+  PKG_CONFIG_LIBDIR="$WIN_SYSROOT/mingw64/lib/pkgconfig" \
+  PKG_CONFIG_SYSROOT_DIR="$WIN_SYSROOT" \
+  ../configure \
+    --cross-prefix=x86_64-w64-mingw32- \
+    --host-cc=gcc \
+    --python=/usr/bin/python3 \
+    --target-list=ia64-softmmu \
+    --without-default-features \
+    --enable-system \
+    --enable-tcg \
+    --enable-pixman \
+    --enable-fdt=internal \
+    --enable-sdl \
+    --enable-slirp \
+    --enable-vnc \
+    --disable-docs \
+    --disable-werror
+)
+
+ninja -C build-win64 -j"$(nproc)" \
+  qemu-system-ia64.exe \
+  qemu-system-ia64w.exe \
+  roms/ia64-firmware/ia64-firmware.bin
+```
+
+### Create a relocatable Windows directory
+
+The executables dynamically link to the pinned MinGW libraries. Copy the
+runtime DLLs and IA-64 data files beside the executables before moving them to
+Windows:
+
+```sh
+WIN_SYSROOT="$(./scripts/fetch-win64-deps.sh)"
+rm -rf build-win64-dist
+WIN_DIST="$PWD/build-win64-dist"
+WINPTHREAD_DLL="$(
+  x86_64-w64-mingw32-gcc -print-file-name=libwinpthread-1.dll
+)"
+
+mkdir -p "$WIN_DIST/share/keymaps" "$WIN_DIST/licenses"
+
+install -m 0755 \
+  build-win64/qemu-system-ia64.exe \
+  build-win64/qemu-system-ia64w.exe \
+  "$WIN_DIST/"
+
+for dll in \
+  SDL2.dll \
+  libglib-2.0-0.dll \
+  libiconv-2.dll \
+  libintl-8.dll \
+  libpcre2-8-0.dll \
+  libpixman-1-0.dll \
+  libslirp-0.dll \
+  zlib1.dll; do
+  install -m 0755 "$WIN_SYSROOT/mingw64/bin/$dll" "$WIN_DIST/$dll"
+done
+install -m 0755 "$WINPTHREAD_DLL" "$WIN_DIST/libwinpthread-1.dll"
+
+install -m 0644 \
+  build-win64/roms/ia64-firmware/ia64-firmware.bin \
+  "$WIN_DIST/share/ia64-firmware.bin"
+install -m 0644 \
+  pc-bios/efi-e1000.rom \
+  pc-bios/vgabios-ati.bin \
+  pc-bios/vgabios-stdvga.bin \
+  "$WIN_DIST/share/"
+install -m 0644 pc-bios/keymaps/* "$WIN_DIST/share/keymaps/"
+
+install -m 0644 COPYING COPYING.LIB LICENSE README.md "$WIN_DIST/"
+cp -R "$WIN_SYSROOT/mingw64/share/licenses/." "$WIN_DIST/licenses/"
+
+x86_64-w64-mingw32-strip \
+  "$WIN_DIST/qemu-system-ia64.exe" \
+  "$WIN_DIST/qemu-system-ia64w.exe"
+```
+
+### Run on Windows
+
+Copy or extract `build-win64-dist` on Windows. Open Command Prompt in that
+directory, then run:
+
+```bat
+qemu-system-ia64.exe ^
+  -machine ia64-vpc ^
+  -bios share\ia64-firmware.bin ^
+  -drive file="C:\path\to\guest-media.iso",media=cdrom,format=raw,readonly=on ^
+  -display sdl ^
+  -nic user,model=e1000
+```
+
+Use `qemu-system-ia64w.exe` for the same SDL interface without a separate
+console window.
 
 ## Emulated platform
 
