@@ -91,26 +91,27 @@ static bool ia64_translation_insert_fields_valid(CPUIA64State *env,
 }
 
 static bool ia64_tlb_entry_overlaps(const IA64TlbEntry *entry,
-                                    uint64_t start, uint64_t end,
+                                    uint64_t start, uint64_t ps,
                                     uint32_t rid)
 {
-    uint64_t entry_start, entry_end;
+    uint64_t mask;
 
-    if (!entry->valid || entry->rid != rid || entry->ps == 0) {
+    if (entry->rid != rid || !entry->valid || entry->ps == 0) {
         return false;
     }
 
-    entry_start = entry->va & entry->page_mask;
-    entry_end = entry_start + entry->ps - 1;
-    if (entry_end < entry_start || entry_end > IA64_REGION7_PHYS_MASK) {
-        entry_end = IA64_REGION7_PHYS_MASK;
-    }
-
-    return start <= entry_end && entry_start <= end;
+    /*
+     * Both ranges are power-of-two sized and naturally aligned.  They
+     * overlap exactly when their bases agree after masking by the larger
+     * page size.  Reuse the entry's precomputed mask in the common case.
+     */
+    mask = entry->ps >= ps ? entry->page_mask : ia64_va_vpn_mask(ps);
+    return ((entry->va ^ start) & mask) == 0;
 }
 
 static void ia64_qemu_tlb_flush_entry(CPUIA64State *env,
-                                      const IA64TlbEntry *entry)
+                                      const IA64TlbEntry *entry,
+                                      bool is_data)
 {
     uint64_t base;
     uint8_t region;
@@ -127,9 +128,21 @@ static void ia64_qemu_tlb_flush_entry(CPUIA64State *env,
 
         uint64_t va = ((uint64_t)region << IA64_REGION_SHIFT) | base;
 
-        tlb_flush_range_by_mmuidx(env_cpu(env), va, entry->ps,
-                                  MMU_IDX_TRANSLATED_MASK,
-                                  TARGET_LONG_BITS);
+        if (is_data) {
+            /*
+             * IA-64 has separate data and instruction translation caches.
+             * Clearing QEMU's unified softmmu entry is still required, but
+             * an architecturally data-only change cannot stale a translated
+             * code block or its jump-cache hint.
+             */
+            tlb_flush_range_by_mmuidx_no_jmp_cache(
+                env_cpu(env), va, entry->ps, MMU_IDX_TRANSLATED_MASK,
+                TARGET_LONG_BITS);
+        } else {
+            tlb_flush_range_by_mmuidx(env_cpu(env), va, entry->ps,
+                                      MMU_IDX_TRANSLATED_MASK,
+                                      TARGET_LONG_BITS);
+        }
     }
 }
 
@@ -306,7 +319,7 @@ static void ia64_merced_dtlb1_invalidate_slot(CPUIA64State *env,
     if (!entry->valid) {
         return;
     }
-    ia64_qemu_tlb_flush_entry(env, entry);
+    ia64_qemu_tlb_flush_entry(env, entry, true);
     entry->valid = 0;
     env->mmu.tlb_data_l1_age[slot] = 0;
     g_assert(env->mmu.tlb_data_l1_count > 0);
@@ -329,21 +342,42 @@ static void ia64_merced_dtlb1_invalidate_copy(CPUIA64State *env,
     }
 }
 
+static void ia64_merced_dtlb1_remember(CPUIA64State *env, uint64_t va,
+                                       uint32_t rid, uint8_t slot)
+{
+    uint64_t page = ia64_merced_dtlb1_lookup_page(va);
+    IA64DTlb1Lookup *lookup = &env->mmu.tlb_data_l1_lookup[
+        ia64_merced_dtlb1_lookup_index(page, rid)];
+
+    *lookup = (IA64DTlb1Lookup) {
+        .page = page,
+        .rid = rid,
+        .slot = slot,
+        .valid = true,
+    };
+}
+
 static void ia64_merced_dtlb1_touch_one(CPUIA64State *env, uint64_t va)
 {
     const IA64TlbEntry *source = NULL;
     int empty = -1;
+    int cached;
     uint64_t oldest_age = UINT64_MAX;
     uint8_t oldest = 0;
     uint32_t rid = ia64_region_rid(env, va);
     uint16_t i;
 
-    if (!ia64_merced_dtlb1_enabled(env) ||
-        env->mmu.tlb_data_l1_count == 0) {
+    cached = ia64_merced_dtlb1_lookup(env, va, rid);
+    if (cached >= 0) {
+        ia64_merced_dtlb1_stamp(env, cached);
+        return;
+    }
+    if (env->mmu.tlb_data_l1_count == 0) {
         goto find_dtlb2;
     }
     for (i = 0; i < IA64_DTLB1_MAX; i++) {
         if (ia64_tlb_match(&env->mmu.tlb_data_l1[i], va, rid)) {
+            ia64_merced_dtlb1_remember(env, va, rid, i);
             ia64_merced_dtlb1_stamp(env, i);
             return;
         }
@@ -357,7 +391,7 @@ find_dtlb2:
             break;
         }
     }
-    if (!source || !ia64_merced_dtlb1_enabled(env)) {
+    if (!source) {
         return;
     }
 
@@ -367,6 +401,7 @@ find_dtlb2:
         if (ia64_tlb_match(entry, va, rid)) {
             if (ia64_tlb_entries_equivalent(entry, source)) {
                 *entry = *source;
+                ia64_merced_dtlb1_remember(env, va, rid, i);
                 ia64_merced_dtlb1_stamp(env, i);
                 return;
             }
@@ -388,6 +423,7 @@ find_dtlb2:
     }
     env->mmu.tlb_data_l1[empty] = *source;
     env->mmu.tlb_data_l1_count++;
+    ia64_merced_dtlb1_remember(env, va, rid, empty);
     ia64_merced_dtlb1_stamp(env, empty);
 }
 
@@ -413,21 +449,17 @@ static bool ia64_merced_dtlb1_purge_range(CPUIA64State *env, uint64_t va,
                                           bool tc_only)
 {
     uint64_t start = ia64_va_page_base(va, ps);
-    uint64_t end = start + ps - 1;
     bool purged = false;
     uint16_t i;
 
     if (!ia64_merced_dtlb1_enabled(env)) {
         return false;
     }
-    if (end < start || end > IA64_REGION7_PHYS_MASK) {
-        end = IA64_REGION7_PHYS_MASK;
-    }
     for (i = 0; i < IA64_DTLB1_MAX; i++) {
         IA64TlbEntry *entry = &env->mmu.tlb_data_l1[i];
 
         if ((!tc_only || !entry->is_tr) &&
-            ia64_tlb_entry_overlaps(entry, start, end, rid)) {
+            ia64_tlb_entry_overlaps(entry, start, ps, rid)) {
             ia64_merced_dtlb1_invalidate_slot(env, i);
             purged = true;
         }
@@ -440,7 +472,7 @@ static void ia64_qemu_tlb_flush_replaced_entry(CPUIA64State *env,
                                                 bool is_data)
 {
     if (!is_data) {
-        ia64_qemu_tlb_flush_entry(env, entry);
+        ia64_qemu_tlb_flush_entry(env, entry, false);
         return;
     }
     if (entry->pending_purge) {
@@ -448,7 +480,25 @@ static void ia64_qemu_tlb_flush_replaced_entry(CPUIA64State *env,
     } else if (ia64_merced_dtlb1_contains(env, entry)) {
         return;
     }
-    ia64_qemu_tlb_flush_entry(env, entry);
+    ia64_qemu_tlb_flush_entry(env, entry, true);
+}
+
+static int ia64_tlb_circular_tc_victim(const IA64TlbEntry *tlb,
+                                       uint16_t capacity,
+                                       uint16_t next_replace)
+{
+    uint16_t i = next_replace;
+    uint16_t n;
+
+    for (n = 0; n < capacity; n++) {
+        if (tlb[i].valid && !tlb[i].is_tr) {
+            return i;
+        }
+        if (++i == capacity) {
+            i = 0;
+        }
+    }
+    return -1;
 }
 
 static bool ia64_purge_tc_entries(CPUIA64State *env, IA64TlbEntry *tlb,
@@ -458,22 +508,15 @@ static bool ia64_purge_tc_entries(CPUIA64State *env, IA64TlbEntry *tlb,
                                   uint16_t *next_replace, int *insert_slot)
 {
     int empty = -1;
-    int victim = -1;
     uint64_t start = ia64_va_page_base(va, ps);
-    uint64_t end = start + ps - 1;
-    uint16_t victim_distance = capacity;
     uint16_t i;
     bool purged = false;
 
     if (insert_slot) {
         *insert_slot = -1;
     }
-    if (end < start || end > IA64_REGION7_PHYS_MASK) {
-        end = IA64_REGION7_PHYS_MASK;
-    }
     if (is_data) {
-        purged |= ia64_merced_dtlb1_purge_range(env, start, end - start + 1,
-                                                rid, true);
+        purged |= ia64_merced_dtlb1_purge_range(env, start, ps, rid, true);
     }
     for (i = 0; i < *count; i++) {
         if (!tlb[i].valid) {
@@ -482,25 +525,18 @@ static bool ia64_purge_tc_entries(CPUIA64State *env, IA64TlbEntry *tlb,
             }
             continue;
         }
-        if (tlb[i].is_tr) {
+        if (tlb[i].rid != rid || tlb[i].is_tr) {
             continue;
         }
-        if (ia64_tlb_entry_overlaps(&tlb[i], start, end, rid)) {
-            ia64_qemu_tlb_flush_entry(env, &tlb[i]);
+        if (ia64_tlb_entry_overlaps(&tlb[i], start, ps, rid)) {
+            ia64_qemu_tlb_flush_entry(env, &tlb[i], is_data);
             ia64_discard_pending_purge(&tlb[i], pending_count);
             tlb[i].valid = 0;
+            ia64_tlb_bump_slot_generation(env, !is_data, i);
             if (insert_slot && empty < 0) {
                 empty = i;
             }
             purged = true;
-        } else if (insert_slot) {
-            uint16_t distance = i >= *next_replace ?
-                i - *next_replace : capacity + i - *next_replace;
-
-            if (distance < victim_distance) {
-                victim = i;
-                victim_distance = distance;
-            }
         }
     }
 
@@ -512,14 +548,13 @@ static bool ia64_purge_tc_entries(CPUIA64State *env, IA64TlbEntry *tlb,
         if (empty < 0 && *count < capacity) {
             empty = *count;
         }
-        *insert_slot = empty >= 0 ? empty : victim;
+        *insert_slot = empty >= 0 ? empty :
+            ia64_tlb_circular_tc_victim(tlb, capacity, *next_replace);
         if (*insert_slot >= 0) {
-            *next_replace = (*insert_slot + 1) % capacity;
-        }
-    }
+            uint16_t next = *insert_slot + 1;
 
-    if (purged) {
-        ia64_tlb_bump_generation(env, !is_data);
+            *next_replace = next == capacity ? 0 : next;
+        }
     }
 
     return purged;
@@ -532,16 +567,12 @@ static bool ia64_mark_pending_purge_entries(IA64TlbEntry *tlb, uint16_t count,
                                             char kind)
 {
     uint64_t start = ia64_va_page_base(va, ps);
-    uint64_t end = start + ps - 1;
     uint16_t i;
     bool marked = false;
 
-    if (end < start || end > IA64_REGION7_PHYS_MASK) {
-        end = IA64_REGION7_PHYS_MASK;
-    }
     for (i = 0; i < count; i++) {
         if ((!tc_only || !tlb[i].is_tr) &&
-            ia64_tlb_entry_overlaps(&tlb[i], start, end, rid)) {
+            ia64_tlb_entry_overlaps(&tlb[i], start, ps, rid)) {
             qemu_log_mask(CPU_LOG_MMU,
                           "ia64 pending purge.%c slot=%u %s"
                           " va=0x%016" PRIx64 " rid=0x%06" PRIx32
@@ -640,22 +671,19 @@ static bool ia64_complete_pending_purges(CPUIA64State *env,
                 ia64_merced_dtlb1_invalidate_copy(env, &tlb[i]);
             }
             if (targeted) {
-                ia64_qemu_tlb_flush_entry(env, &tlb[i]);
+                ia64_qemu_tlb_flush_entry(env, &tlb[i], !is_ifetch);
             }
             tlb[i].pending_purge = 0;
             g_assert(*pending_count > 0);
             (*pending_count)--;
             tlb[i].valid = 0;
+            ia64_tlb_bump_slot_generation(env, is_ifetch, i);
             purged = true;
         }
     }
 
     while (*count > 0 && !tlb[*count - 1].valid) {
         (*count)--;
-    }
-
-    if (purged) {
-        ia64_tlb_bump_generation(env, is_ifetch);
     }
 
     return purged;
@@ -711,8 +739,7 @@ static int ia64_tlb_select_tc_slot(IA64TlbEntry *tlb, uint16_t capacity,
                                    uint32_t rid)
 {
     int empty = -1;
-    int victim = -1;
-    uint16_t victim_distance = capacity;
+    int victim;
     uint16_t i;
 
     /*
@@ -735,15 +762,6 @@ static int ia64_tlb_select_tc_slot(IA64TlbEntry *tlb, uint16_t capacity,
         if (tlb[i].va == va && tlb[i].rid == rid) {
             return i;
         }
-        {
-            uint16_t distance = i >= *next_replace ?
-                i - *next_replace : capacity + i - *next_replace;
-
-            if (distance < victim_distance) {
-                victim = i;
-                victim_distance = distance;
-            }
-        }
     }
 
     if (empty >= 0) {
@@ -751,6 +769,7 @@ static int ia64_tlb_select_tc_slot(IA64TlbEntry *tlb, uint16_t capacity,
         return empty;
     }
 
+    victim = ia64_tlb_circular_tc_victim(tlb, capacity, *next_replace);
     if (victim >= 0) {
         /* Keep replacement moving forward over non-TR entries. */
         *next_replace = (victim + 1) % capacity;
@@ -760,12 +779,15 @@ static int ia64_tlb_select_tc_slot(IA64TlbEntry *tlb, uint16_t capacity,
     return -1;
 }
 
-static bool ia64_cache_replaced_tr(IA64TlbEntry *tlb, uint16_t *cnt,
+static bool ia64_cache_replaced_tr(CPUIA64State *env, IA64TlbEntry *tlb,
+                                   uint16_t *cnt,
                                    uint16_t capacity,
                                    uint16_t *next_replace,
                                    uint16_t *pending_count,
-                                   const IA64TlbEntry *old_tr)
+                                   const IA64TlbEntry *old_tr,
+                                   bool is_ifetch)
 {
+    uint32_t micro_generation;
     int slot;
 
     if (!old_tr->valid || !old_tr->is_tr) {
@@ -793,9 +815,12 @@ static bool ia64_cache_replaced_tr(IA64TlbEntry *tlb, uint16_t *cnt,
                   " ps=0x%016" PRIx64 "\n",
                   slot, old_tr->va, old_tr->rid, old_tr->pa, old_tr->ps);
     ia64_discard_pending_purge(&tlb[slot], pending_count);
+    micro_generation = tlb[slot].micro_generation;
     tlb[slot] = *old_tr;
+    tlb[slot].micro_generation = micro_generation;
     tlb[slot].is_tr = 0;
     tlb[slot].slot = slot;
+    ia64_tlb_bump_slot_generation(env, is_ifetch, slot);
     if (slot >= *cnt) {
         *cnt = slot + 1;
     }
@@ -873,10 +898,11 @@ void ia64_mmu_itr_insert(CPUIA64State *env, uint64_t pte, uint64_t slot_reg,
     ia64_purge_tc_entries(env, tlb, capacity, cnt, pending_count, va, ps, rid,
                           is_data, NULL, NULL);
     if (old_tr.valid && !old_tr.is_tr) {
-        ia64_qemu_tlb_flush_entry(env, &old_tr);
+        ia64_qemu_tlb_flush_entry(env, &old_tr, is_data);
     }
     cached_old_tr = ia64_cache_replaced_tr(
-        tlb, cnt, capacity, next_replace, pending_count, &old_tr);
+        env, tlb, cnt, capacity, next_replace, pending_count, &old_tr,
+        !is_data);
     if (is_data) {
         ia64_merced_dtlb1_invalidate_copy(env, &old_tr);
     }
@@ -901,7 +927,7 @@ void ia64_mmu_itr_insert(CPUIA64State *env, uint64_t pte, uint64_t slot_reg,
     if (slot >= *cnt) {
         *cnt = slot + 1;
     }
-    ia64_tlb_bump_generation(env, !is_data);
+    ia64_tlb_bump_slot_generation(env, !is_data, slot);
     ia64_assert_pending_purge_counts(env);
     qemu_log_mask(CPU_LOG_MMU,
                   "ia64 itr.%c slot=%u va=0x%016" PRIx64
@@ -2198,7 +2224,7 @@ ia64_vhpt_install_tc(CPUIA64State *env, uint64_t va, uint32_t rid,
     if (slot >= *cnt) {
         *cnt = slot + 1;
     }
-    ia64_tlb_bump_generation(env, is_ifetch);
+    ia64_tlb_bump_slot_generation(env, is_ifetch, slot);
     ia64_assert_pending_purge_counts(env);
     qemu_log_mask(CPU_LOG_MMU,
                   "ia64 vhpt install tc.%c slot=%d va=0x%016" PRIx64
@@ -2213,7 +2239,7 @@ ia64_vhpt_install_tc(CPUIA64State *env, uint64_t va, uint32_t rid,
      * for a different RID than a cached same-VA host entry, so discard the
      * host translation range covered by the installed TC.
     */
-    ia64_qemu_tlb_flush_entry(env, &tlb[slot]);
+    ia64_qemu_tlb_flush_entry(env, &tlb[slot], !is_ifetch);
     return &tlb[slot];
 }
 
@@ -2531,7 +2557,7 @@ void ia64_mmu_itc_insert(CPUIA64State *env, uint64_t pte, uint32_t is_data,
     if (slot >= *cnt) {
         *cnt = slot + 1;
     }
-    ia64_tlb_bump_generation(env, !is_data);
+    ia64_tlb_bump_slot_generation(env, !is_data, slot);
     ia64_assert_pending_purge_counts(env);
     qemu_log_mask(CPU_LOG_MMU,
                   "ia64 itc.%c %s slot=%u va=0x%016" PRIx64
@@ -2545,7 +2571,7 @@ void ia64_mmu_itc_insert(CPUIA64State *env, uint64_t pte, uint32_t is_data,
      * emulator-provided firmware/SAL identity mappings can exist in the
      * QEMU TLB without a corresponding modeled TC entry.
      */
-    ia64_qemu_tlb_flush_entry(env, &tlb[slot]);
+    ia64_qemu_tlb_flush_entry(env, &tlb[slot], is_data);
 }
 
 bool ia64_mmu_insert_firmware_tc(CPUIA64State *env, uint64_t va,

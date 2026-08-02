@@ -202,7 +202,7 @@ The default machine is `ia64-vpc`. It models an Itanium 2 based virtual PC inten
 | --- | --- | --- |
 | Machine | `ia64-vpc` | Backward-compatible alias of `itanium2-vpc`; `itanium-vpc` is available for first-generation compatibility |
 | CPU | `montecito` | `merced` and `madison` are also available |
-| vCPUs | 1 | Configurable from 1 to 4; MTTCG is supported with `-accel tcg,thread=multi` |
+| vCPUs | 1 | Configurable from 1 to 4; use `-accel tcg,thread=single` for one vCPU and `thread=multi` for two to four vCPUs |
 | RAM | 2 GiB | Override with the standard QEMU `-m` option |
 | Firmware | Project-owned IA-64 EFI firmware | Built from source under `roms/ia64-firmware/` |
 | Graphics | ATI-compatible PCI graphics | Standard VGA is available with `-vga std` |
@@ -303,9 +303,14 @@ Run representative guest workloads with the instrumented binary. The training se
 Consume the generated profiles:
 
 ```sh
-meson configure -Db_pgo=use
+./pyvenv/bin/meson configure -Db_pgo=use -Dwerror=false
 ninja qemu-system-ia64 roms/ia64-firmware/ia64-firmware.bin
 ```
+
+The use stage can legitimately report missing profiles for auxiliary targets that
+were not part of the training workload. Disabling warnings as errors allows those
+targets to use their normal optimization while trained QEMU code consumes its
+profiles.
 
 Profiles are tied to the exact build tree, compiler, and source revision. Do not copy stale profile data between builds.
 
@@ -329,6 +334,11 @@ The following example uses four vCPUs, MTTCG, 8 GiB of RAM, persistent NVRAM, an
   -m 8G \
   -display gtk
 ```
+
+For a one-vCPU guest, select `-accel tcg,thread=single`. MTTCG cannot
+parallelize guest execution with only one vCPU and adds synchronization
+overhead. Use `-accel tcg,thread=multi` with two to four vCPUs so that guest
+CPUs can execute in parallel.
 
 When `i8042=off` is used, the machine automatically attaches a USB keyboard and absolute USB tablet; `-usb` is not required.
 

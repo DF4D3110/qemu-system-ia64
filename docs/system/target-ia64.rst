@@ -15,7 +15,8 @@ The existing ``ia64-vpc`` name is an alias for this profile.
 The selected machine controls the firmware ABI only: either profile accepts any supported CPU model through ``-cpu``.
 
 Both profiles default to 2 GiB of RAM and otherwise provide the same virtual hardware: an ATI-compatible PCI display, an e1000 network adapter, LSI53C895A SCSI storage, ICH9 AHCI, OHCI/UHCI USB, and PS/2 input.
-One to four CPUs are supported, and MTTCG can be selected with ``-accel tcg,thread=multi``.
+One to four CPUs are supported.
+Use ``-accel tcg,thread=single`` for one CPU and select MTTCG with ``-accel tcg,thread=multi`` for two to four CPUs.
 The machines also provide local SAPIC and I/O SAPIC interrupt controllers, ACPI tables, RTC, watchdog, NVRAM, serial I/O, and the firmware debug port.
 
 The primary CPU generation names are ``merced``, ``madison``, and ``montecito``.

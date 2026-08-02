@@ -169,9 +169,10 @@
 static void ia64_ia32_gen_dtlb1_touch(TCGv_i64 addr, TCGArg mmu_idx,
                                       MemOp memop)
 {
-    gen_helper_merced_dtlb1_touch(
-        tcg_env, addr, tcg_constant_i32(1 << (memop & MO_SIZE)),
-        tcg_constant_i32(mmu_idx != MMU_PHYS_IDX));
+    if (mmu_idx != MMU_PHYS_IDX) {
+        gen_helper_merced_dtlb1_touch(
+            tcg_env, addr, tcg_constant_i32(1 << (memop & MO_SIZE)));
+    }
 }
 
 static void ia64_ia32_gen_qemu_ld_i32(TCGv_i32 value, TCGv_i64 addr,

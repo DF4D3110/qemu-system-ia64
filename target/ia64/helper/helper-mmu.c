@@ -12,10 +12,33 @@ void helper_tlb_serialize(CPUIA64State *env, uint32_t include_data,
     ia64_tlb_serialize(env, include_data, include_inst);
 }
 
-void helper_merced_dtlb1_touch(CPUIA64State *env, uint64_t va, uint32_t size,
-                               uint32_t translated)
+void helper_merced_dtlb1_touch(CPUIA64State *env, uint64_t va, uint32_t size)
 {
-    ia64_mmu_data_access(env, va, size, translated);
+    uint64_t end = va + size - 1U;
+
+    /*
+     * Translated memory helpers normally revisit the same minimum page many
+     * times before replacement.  Complete that direct-hit case here so the
+     * generated helper call does not enter the general MMU access path.
+     * Cross-page accesses and the theoretical LRU clock wrap retain the full
+     * path, which touches both endpoints and rebases all ages respectively.
+     */
+    if (ia64_env_cpu_class(env)->model == IA64_CPU_MODEL_MERCED &&
+        size != 0 && end >= va &&
+        ia64_merced_dtlb1_lookup_page(end) ==
+            ia64_merced_dtlb1_lookup_page(va) &&
+        env->mmu.tlb_data_l1_clock != UINT64_MAX) {
+        uint32_t rid = ia64_region_rid(env, va);
+        int cached = ia64_merced_dtlb1_lookup(env, va, rid);
+
+        if (cached >= 0) {
+            env->mmu.tlb_data_l1_age[cached] =
+                ++env->mmu.tlb_data_l1_clock;
+            return;
+        }
+    }
+
+    ia64_mmu_data_access(env, va, size, true);
 }
 
 void helper_fc(CPUIA64State *env, uint64_t addr)

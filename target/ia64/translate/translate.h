@@ -65,6 +65,7 @@ typedef struct IA64TranslationRegisterState {
     uint64_t pr_known_one;
     uint64_t rse_dirty_known[2];
     uint8_t cpl;
+    uint8_t cfm_sof_checked;
     bool cfm_sof_valid;
     bool cpl_known;
     bool current_qp_known;

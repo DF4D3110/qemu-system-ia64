@@ -44,11 +44,11 @@ static bool ia64_current_insn_cannot_execute(
 static void ia64_gen_merced_dtlb1_touch(DisasContext *ctx, TCGv_i64 addr,
                                         int mmu_idx, MemOp memop)
 {
-    if (ia64_env_cpu_class(ctx->env)->model == IA64_CPU_MODEL_MERCED) {
+    if (mmu_idx != MMU_PHYS_IDX &&
+        ia64_env_cpu_class(ctx->env)->model == IA64_CPU_MODEL_MERCED) {
         gen_helper_merced_dtlb1_touch(
             tcg_env, addr,
-            tcg_constant_i32(ia64_memop_size(memop)),
-            tcg_constant_i32(mmu_idx != MMU_PHYS_IDX));
+            tcg_constant_i32(ia64_memop_size(memop)));
     }
 }
 
@@ -183,6 +183,7 @@ static void ia64_update_cached_register_state(
     }
     if (ia64_insn_may_modify_cfm_sof(insn)) {
         ctx->reg.cfm_sof_valid = false;
+        ctx->reg.cfm_sof_checked = 0;
     }
 
     /*
@@ -191,8 +192,10 @@ static void ia64_update_cached_register_state(
      * check.
      */
     if (insn->opcode == IA64_OP_ALLOC) {
-        ctx->reg.cfm_sof =
-            tcg_constant_i32(insn->operands.common.immediate & 0x7f);
+        uint8_t new_sof = insn->operands.common.immediate & 0x7f;
+
+        ctx->reg.cfm_sof = tcg_constant_i32(new_sof);
+        ctx->reg.cfm_sof_checked = new_sof;
         ctx->reg.cfm_sof_valid = true;
     }
 }
@@ -2334,6 +2337,7 @@ void ia64_prepare_self_counted_loop(
     ctx->memory.nat_known_set[0] = 0;
     ctx->memory.nat_known_set[1] = 0;
     ctx->reg.cfm_sof_valid = false;
+    ctx->reg.cfm_sof_checked = 0;
     ctx->reg.cpl_known = false;
     ctx->reg.pr_known_zero = 0;
     ctx->reg.pr_known_one = 1;
@@ -2755,9 +2759,20 @@ static void ia64_gen_check_gr_in_frame(const Ia64Instruction *insn,
     }
 
     if (reg >= IA64_STACKED_GR_BASE) {
-        TCGLabel *valid = gen_new_label();
+        uint8_t required_sof = reg - IA64_STACKED_GR_BASE + 1;
+        TCGLabel *valid;
         TCGv_i32 cfm_sof;
 
+        /*
+         * A successful dominating check proves every lower stacked register
+         * is also in frame until an instruction changes CFM.SOF.  Avoid
+         * regenerating an exception path and branch for that already-proven
+         * range.
+         */
+        if (required_sof <= ctx->reg.cfm_sof_checked) {
+            return;
+        }
+        valid = gen_new_label();
         if (ctx->reg.cfm_sof_valid) {
             cfm_sof = ctx->reg.cfm_sof;
         } else {
@@ -2779,6 +2794,9 @@ static void ia64_gen_check_gr_in_frame(const Ia64Instruction *insn,
         ia64_gen_raise_exception(IA64_EXCP_ILLEGAL, insn->address,
                                   insn->raw, insn->slot);
         gen_set_label(valid);
+        if (ia64_current_insn_definitely_executes(ctx, insn)) {
+            ctx->reg.cfm_sof_checked = required_sof;
+        }
     }
 }
 
@@ -3578,6 +3596,7 @@ static void ia64_tr_init_disas_context(DisasContextBase *db, CPUState *cs)
     ctx->memory.nat_known_set[0] = 0;
     ctx->memory.nat_known_set[1] = 0;
     ctx->reg.cfm_sof_valid = false;
+    ctx->reg.cfm_sof_checked = 0;
     ctx->reg.pr_known_zero = 0;
     ctx->reg.pr_known_one = 1;
     ctx->reg.rse_dirty_known[0] = 0;

@@ -51,6 +51,12 @@ typedef struct IA64MMUState {
      */
     IA64TlbEntry tlb_data_l1[IA64_DTLB1_MAX];
     uint64_t tlb_data_l1_age[IA64_DTLB1_MAX];
+    /*
+     * Derived direct lookup for the modeled DTLB1.  Entries are always
+     * validated against tlb_data_l1, so purge and replacement need no
+     * architected bookkeeping here.
+     */
+    IA64DTlb1Lookup tlb_data_l1_lookup[IA64_DTLB1_LOOKUP_SIZE];
     uint64_t tlb_data_l1_clock;
     uint16_t tlb_data_count;
     uint16_t tlb_inst_count;
@@ -61,8 +67,7 @@ typedef struct IA64MMUState {
     uint32_t tlb_inst_generation;
     IA64MicroTlbEntry tlb_data_micro[IA64_MICRO_TLB_SIZE];
     IA64MicroTlbEntry tlb_inst_micro[IA64_MICRO_TLB_SIZE];
-    uint8_t tlb_data_micro_next;
-    uint8_t tlb_inst_micro_next;
+    IA64CodeTlbEdCache code_tlb_ed;
 
     /* Transient bookkeeping for architected purge operations. */
     uint16_t pending_purge_data_count;
