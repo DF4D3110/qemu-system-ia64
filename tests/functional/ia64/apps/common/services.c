@@ -1740,7 +1740,9 @@ static BOOLEAN test_gop_protocol(EFI_SYSTEM_TABLE *SystemTable)
         return 0;
     }
     ok = info != NULL && info_size >= sizeof(*info) &&
-         info->HorizontalResolution != 0 && info->VerticalResolution != 0;
+         info->HorizontalResolution == 640U &&
+         info->VerticalResolution == 480U &&
+         info->PixelsPerScanLine == 640U;
     if (info != NULL) {
         (void)SystemTable->BootServices->FreePool(info);
     }

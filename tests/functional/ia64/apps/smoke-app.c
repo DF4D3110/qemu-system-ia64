@@ -38,6 +38,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
     };
     EFI_LOADED_IMAGE_PROTOCOL *loaded = NULL;
     VOID *device_path = NULL;
+    UINTN columns = 0;
+    UINTN rows = 0;
     EFI_STATUS status;
 
     ia64_test_pass(&context, "entry");
@@ -74,8 +76,13 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
 
     ia64_test_check(&context, "console-output",
                     SystemTable != NULL && SystemTable->ConOut != NULL &&
-                        SystemTable->ConOut->OutputString != NULL,
-                    EFI_DEVICE_ERROR, "missing-conout");
+                        SystemTable->ConOut->OutputString != NULL &&
+                        SystemTable->ConOut->QueryMode != NULL &&
+                        SystemTable->ConOut->QueryMode(
+                            SystemTable->ConOut, 0, &columns, &rows) ==
+                            EFI_SUCCESS &&
+                        columns == 80 && rows == 25,
+                    EFI_DEVICE_ERROR, "conout-geometry");
     ia64_test_done(&context);
     return context.Failed == 0 ? EFI_SUCCESS : EFI_DEVICE_ERROR;
 }

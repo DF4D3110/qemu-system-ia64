@@ -122,9 +122,7 @@
 #define ACPI_FADT_FLAG_RESET_REG_SUP (1U << 10)
 #define ACPI_FADT_FLAG_SW_CPU_SLP    (1U << 13)
 #define VGA_MODE_TEXT_WIDTH  640U
-#define VGA_MODE_TEXT_HEIGHT 400U
-#define VGA_MODE_640_WIDTH   640U
-#define VGA_MODE_640_HEIGHT  480U
+#define VGA_MODE_TEXT_HEIGHT 480U
 #define VGA_MODE_800_WIDTH   800U
 #define VGA_MODE_800_HEIGHT  600U
 #define VGA_MODE_1024_WIDTH  1024U
@@ -272,11 +270,9 @@
 #define VGA_TEXT_ROWS                 25U
 #define VGA_TEXT_CELL_WIDTH           8U
 #define VGA_TEXT_CELL_HEIGHT          16U
-#define VGA_TEXT_GLYPH_WIDTH          5U
-#define VGA_TEXT_GLYPH_HEIGHT         7U
-#define VGA_TEXT_GLYPH_X              1U
-#define VGA_TEXT_GLYPH_Y              1U
-#define VGA_TEXT_GLYPH_SCALE_Y        2U
+
+/* Canonical QEMU VGA font, compiled from ui/vgafont.c. */
+extern const uint8_t vgafont16[256U * VGA_TEXT_CELL_HEIGHT];
 
 /* --- EFI/UEFI type definitions -------------------------------------------- */
 
@@ -2456,7 +2452,7 @@ static EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL mConInExProto;
 static SIMPLE_TEXT_OUTPUT_MODE      mConOutMode;
 static EFI_GRAPHICS_OUTPUT_PROTOCOL mGopProto;
 static EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE mGopMode;
-static EFI_GRAPHICS_OUTPUT_MODE_INFORMATION mGopModeInfo[5];
+static EFI_GRAPHICS_OUTPUT_MODE_INFORMATION mGopModeInfo[4];
 static EFI_UGA_DRAW_PROTOCOL mUgaDrawProto;
 
 static UINT32 mGraphicsWidth;
@@ -5074,11 +5070,6 @@ static void uart_put_hex64(UINT64 value)
 
 /* --- VGA text console helpers -------------------------------------------- */
 
-#define GLYPH7(a, b, c, d, e, f, g) \
-    ((UINT64)(a) | ((UINT64)(b) << 5) | ((UINT64)(c) << 10) | \
-     ((UINT64)(d) << 15) | ((UINT64)(e) << 20) | \
-     ((UINT64)(f) << 25) | ((UINT64)(g) << 30))
-
 static UINT8 text_unicode_to_cp437(CHAR16 Ch)
 {
     static const CHAR16 cp437_unicode[256] = {
@@ -5160,175 +5151,6 @@ static UINT8 text_unicode_to_cp437(CHAR16 Ch)
     return (UINT8)'?';
 }
 
-static UINT64 text_glyph5x7(CHAR16 Ch)
-{
-    switch (Ch) {
-    case ' ': return GLYPH7(0, 0, 0, 0, 0, 0, 0);
-    case '!': return GLYPH7(4, 4, 4, 4, 4, 0, 4);
-    case '"': return GLYPH7(10, 10, 10, 0, 0, 0, 0);
-    case '#': return GLYPH7(10, 31, 10, 10, 31, 10, 0);
-    case '$': return GLYPH7(4, 15, 20, 14, 5, 30, 4);
-    case '%': return GLYPH7(24, 25, 2, 4, 8, 19, 3);
-    case '&': return GLYPH7(12, 18, 20, 8, 21, 18, 13);
-    case '\'': return GLYPH7(4, 4, 8, 0, 0, 0, 0);
-    case '(': return GLYPH7(2, 4, 8, 8, 8, 4, 2);
-    case ')': return GLYPH7(8, 4, 2, 2, 2, 4, 8);
-    case '*': return GLYPH7(0, 10, 4, 31, 4, 10, 0);
-    case '+': return GLYPH7(0, 4, 4, 31, 4, 4, 0);
-    case ',': return GLYPH7(0, 0, 0, 0, 4, 4, 8);
-    case '-': return GLYPH7(0, 0, 0, 31, 0, 0, 0);
-    case '.': return GLYPH7(0, 0, 0, 0, 0, 12, 12);
-    case '/': return GLYPH7(1, 2, 4, 8, 16, 0, 0);
-    case '0': return GLYPH7(14, 17, 19, 21, 25, 17, 14);
-    case '1': return GLYPH7(4, 12, 4, 4, 4, 4, 14);
-    case '2': return GLYPH7(14, 17, 1, 2, 4, 8, 31);
-    case '3': return GLYPH7(30, 1, 1, 14, 1, 1, 30);
-    case '4': return GLYPH7(2, 6, 10, 18, 31, 2, 2);
-    case '5': return GLYPH7(31, 16, 30, 1, 1, 17, 14);
-    case '6': return GLYPH7(6, 8, 16, 30, 17, 17, 14);
-    case '7': return GLYPH7(31, 1, 2, 4, 8, 8, 8);
-    case '8': return GLYPH7(14, 17, 17, 14, 17, 17, 14);
-    case '9': return GLYPH7(14, 17, 17, 15, 1, 2, 12);
-    case ':': return GLYPH7(0, 12, 12, 0, 12, 12, 0);
-    case ';': return GLYPH7(0, 12, 12, 0, 4, 4, 8);
-    case '<': return GLYPH7(2, 4, 8, 16, 8, 4, 2);
-    case '=': return GLYPH7(0, 0, 31, 0, 31, 0, 0);
-    case '>': return GLYPH7(8, 4, 2, 1, 2, 4, 8);
-    case '?': return GLYPH7(14, 17, 1, 2, 4, 0, 4);
-    case '@': return GLYPH7(14, 17, 1, 13, 21, 21, 14);
-    case 'A': return GLYPH7(14, 17, 17, 31, 17, 17, 17);
-    case 'B': return GLYPH7(30, 17, 17, 30, 17, 17, 30);
-    case 'C': return GLYPH7(14, 17, 16, 16, 16, 17, 14);
-    case 'D': return GLYPH7(30, 17, 17, 17, 17, 17, 30);
-    case 'E': return GLYPH7(31, 16, 16, 30, 16, 16, 31);
-    case 'F': return GLYPH7(31, 16, 16, 30, 16, 16, 16);
-    case 'G': return GLYPH7(14, 17, 16, 23, 17, 17, 15);
-    case 'H': return GLYPH7(17, 17, 17, 31, 17, 17, 17);
-    case 'I': return GLYPH7(14, 4, 4, 4, 4, 4, 14);
-    case 'J': return GLYPH7(1, 1, 1, 1, 17, 17, 14);
-    case 'K': return GLYPH7(17, 18, 20, 24, 20, 18, 17);
-    case 'L': return GLYPH7(16, 16, 16, 16, 16, 16, 31);
-    case 'M': return GLYPH7(17, 27, 21, 21, 17, 17, 17);
-    case 'N': return GLYPH7(17, 25, 21, 19, 17, 17, 17);
-    case 'O': return GLYPH7(14, 17, 17, 17, 17, 17, 14);
-    case 'P': return GLYPH7(30, 17, 17, 30, 16, 16, 16);
-    case 'Q': return GLYPH7(14, 17, 17, 17, 21, 18, 13);
-    case 'R': return GLYPH7(30, 17, 17, 30, 20, 18, 17);
-    case 'S': return GLYPH7(15, 16, 16, 14, 1, 1, 30);
-    case 'T': return GLYPH7(31, 4, 4, 4, 4, 4, 4);
-    case 'U': return GLYPH7(17, 17, 17, 17, 17, 17, 14);
-    case 'V': return GLYPH7(17, 17, 17, 17, 17, 10, 4);
-    case 'W': return GLYPH7(17, 17, 17, 21, 21, 21, 10);
-    case 'X': return GLYPH7(17, 17, 10, 4, 10, 17, 17);
-    case 'Y': return GLYPH7(17, 17, 10, 4, 4, 4, 4);
-    case 'Z': return GLYPH7(31, 1, 2, 4, 8, 16, 31);
-    case '[': return GLYPH7(14, 8, 8, 8, 8, 8, 14);
-    case '\\': return GLYPH7(16, 8, 4, 2, 1, 0, 0);
-    case ']': return GLYPH7(14, 2, 2, 2, 2, 2, 14);
-    case '^': return GLYPH7(4, 10, 17, 0, 0, 0, 0);
-    case '_': return GLYPH7(0, 0, 0, 0, 0, 0, 31);
-    case '`': return GLYPH7(8, 4, 2, 0, 0, 0, 0);
-    case 'a': return GLYPH7(0, 0, 14, 1, 15, 17, 15);
-    case 'b': return GLYPH7(16, 16, 22, 25, 17, 17, 30);
-    case 'c': return GLYPH7(0, 0, 14, 16, 16, 17, 14);
-    case 'd': return GLYPH7(1, 1, 13, 19, 17, 17, 15);
-    case 'e': return GLYPH7(0, 0, 14, 17, 31, 16, 14);
-    case 'f': return GLYPH7(6, 8, 8, 28, 8, 8, 8);
-    case 'g': return GLYPH7(0, 0, 15, 17, 15, 1, 14);
-    case 'h': return GLYPH7(16, 16, 22, 25, 17, 17, 17);
-    case 'i': return GLYPH7(4, 0, 12, 4, 4, 4, 14);
-    case 'j': return GLYPH7(2, 0, 6, 2, 2, 18, 12);
-    case 'k': return GLYPH7(16, 16, 18, 20, 24, 20, 18);
-    case 'l': return GLYPH7(12, 4, 4, 4, 4, 4, 14);
-    case 'm': return GLYPH7(0, 0, 26, 21, 21, 17, 17);
-    case 'n': return GLYPH7(0, 0, 22, 25, 17, 17, 17);
-    case 'o': return GLYPH7(0, 0, 14, 17, 17, 17, 14);
-    case 'p': return GLYPH7(0, 0, 30, 17, 30, 16, 16);
-    case 'q': return GLYPH7(0, 0, 13, 19, 15, 1, 1);
-    case 'r': return GLYPH7(0, 0, 22, 25, 16, 16, 16);
-    case 's': return GLYPH7(0, 0, 15, 16, 14, 1, 30);
-    case 't': return GLYPH7(8, 8, 28, 8, 8, 9, 6);
-    case 'u': return GLYPH7(0, 0, 17, 17, 17, 19, 13);
-    case 'v': return GLYPH7(0, 0, 17, 17, 17, 10, 4);
-    case 'w': return GLYPH7(0, 0, 17, 17, 21, 21, 10);
-    case 'x': return GLYPH7(0, 0, 17, 10, 4, 10, 17);
-    case 'y': return GLYPH7(0, 0, 17, 17, 15, 1, 14);
-    case 'z': return GLYPH7(0, 0, 31, 2, 4, 8, 31);
-    case '{': return GLYPH7(2, 4, 4, 8, 4, 4, 2);
-    case '|': return GLYPH7(4, 4, 4, 0, 4, 4, 4);
-    case '}': return GLYPH7(8, 4, 4, 2, 4, 4, 8);
-    case '~': return GLYPH7(0, 0, 8, 21, 2, 0, 0);
-    case 0x2500:
-    case 0xc4: return GLYPH7(0, 0, 0, 31, 0, 0, 0);
-    case 0x2502:
-    case 0xb3: return GLYPH7(4, 4, 4, 4, 4, 4, 4);
-    case 0x250c:
-    case 0xda: return GLYPH7(0, 0, 0, 7, 4, 4, 4);
-    case 0x2510:
-    case 0xbf: return GLYPH7(0, 0, 0, 28, 4, 4, 4);
-    case 0x2514:
-    case 0xc0: return GLYPH7(4, 4, 4, 7, 0, 0, 0);
-    case 0x2518:
-    case 0xd9: return GLYPH7(4, 4, 4, 28, 0, 0, 0);
-    case 0x251c:
-    case 0xc3: return GLYPH7(4, 4, 4, 28, 4, 4, 4);
-    case 0x2524:
-    case 0xb4: return GLYPH7(4, 4, 4, 7, 4, 4, 4);
-    case 0x252c:
-    case 0xc2: return GLYPH7(0, 0, 0, 31, 4, 4, 4);
-    case 0x2534:
-    case 0xc1: return GLYPH7(4, 4, 4, 31, 0, 0, 0);
-    case 0x253c:
-    case 0xc5: return GLYPH7(4, 4, 4, 31, 4, 4, 4);
-    case 0x2550: return GLYPH7(0, 0, 31, 0, 31, 0, 0);
-    case 0x2551: return GLYPH7(10, 10, 10, 10, 10, 10, 10);
-    case 0x2552:
-    case 0x2553:
-    case 0x2554: return GLYPH7(0, 0, 0, 7, 4, 4, 4);
-    case 0x2555:
-    case 0x2556:
-    case 0x2557: return GLYPH7(0, 0, 0, 28, 4, 4, 4);
-    case 0x2558:
-    case 0x2559:
-    case 0x255a: return GLYPH7(4, 4, 4, 7, 0, 0, 0);
-    case 0x255b:
-    case 0x255c:
-    case 0x255d: return GLYPH7(4, 4, 4, 28, 0, 0, 0);
-    case 0x255e:
-    case 0x255f:
-    case 0x2560: return GLYPH7(4, 4, 4, 28, 4, 4, 4);
-    case 0x2561:
-    case 0x2562:
-    case 0x2563: return GLYPH7(4, 4, 4, 7, 4, 4, 4);
-    case 0x2564:
-    case 0x2565:
-    case 0x2566: return GLYPH7(0, 0, 0, 31, 4, 4, 4);
-    case 0x2567:
-    case 0x2568:
-    case 0x2569: return GLYPH7(4, 4, 4, 31, 0, 0, 0);
-    case 0x256a:
-    case 0x256b:
-    case 0x256c: return GLYPH7(4, 4, 4, 31, 4, 4, 4);
-    case 0x2588: return GLYPH7(31, 31, 31, 31, 31, 31, 31);
-    case 0x2591: return GLYPH7(10, 0, 21, 0, 10, 0, 21);
-    case 0x25b2: return GLYPH7(4, 14, 31, 31, 0, 0, 0);
-    case 0x25ba: return GLYPH7(16, 24, 28, 30, 28, 24, 16);
-    case 0x25bc: return GLYPH7(0, 0, 0, 31, 31, 14, 4);
-    case 0x25c4: return GLYPH7(1, 3, 7, 15, 7, 3, 1);
-    case 0x2191: return GLYPH7(4, 14, 21, 4, 4, 4, 4);
-    case 0x2193: return GLYPH7(4, 4, 4, 4, 21, 14, 4);
-    default:
-        if (Ch >= 0xb3U && Ch <= 0xdaU) {
-            return GLYPH7(31, 17, 17, 17, 17, 17, 31);
-        }
-        if ((Ch >= 0xb0U && Ch <= 0xb2U) ||
-            (Ch >= 0xdbU && Ch <= 0xdfU)) {
-            return GLYPH7(31, 31, 31, 31, 31, 31, 31);
-        }
-        return GLYPH7(14, 17, 1, 2, 4, 0, 4);
-    }
-}
-
 static UINT32 text_efi_color(UINTN Color)
 {
     static const UINT32 colors[16] = {
@@ -5355,62 +5177,132 @@ static UINT32 text_read_pixel(UINTN X, UINTN Y)
     return *p;
 }
 
-static UINT64 text_cell_pixel_pair(UINT8 Bits, UINTN Pair, UINT32 Fg,
-                                   UINT32 Bg)
+/*
+ * SimpleTextOut exposes a conventional 80x25 grid, while GOP mode 0 is
+ * square-pixel 640x480.  Scale the logical 640x400 text plane over the
+ * complete GOP surface so row 24 is the physical bottom row.
+ */
+static void text_graphics_cell_bounds(UINTN Column, UINTN Row,
+                                      UINTN *X0, UINTN *Y0,
+                                      UINTN *X1, UINTN *Y1)
+{
+    *X0 = Column * mGraphicsWidth / VGA_TEXT_COLUMNS;
+    *X1 = (Column + 1U) * mGraphicsWidth / VGA_TEXT_COLUMNS;
+    *Y0 = Row * mGraphicsHeight / VGA_TEXT_ROWS;
+    *Y1 = (Row + 1U) * mGraphicsHeight / VGA_TEXT_ROWS;
+}
+
+static UINT64 text_cell_pixel_pair(UINT8 Bits, UINTN Pair,
+                                   UINT32 Fg, UINT32 Bg)
 {
     UINTN x = Pair * 2U;
-    UINT32 left = Bg;
-    UINT32 right = Bg;
+    UINT32 left = (Bits & (0x80U >> x)) != 0 ? Fg : Bg;
+    UINT32 right = (Bits & (0x80U >> (x + 1U))) != 0 ? Fg : Bg;
 
-    if (x >= VGA_TEXT_GLYPH_X &&
-        x < VGA_TEXT_GLYPH_X + VGA_TEXT_GLYPH_WIDTH &&
-        (Bits & (1U << (VGA_TEXT_GLYPH_WIDTH - 1U -
-                        (x - VGA_TEXT_GLYPH_X))))) {
-        left = Fg;
-    }
-    x++;
-    if (x >= VGA_TEXT_GLYPH_X &&
-        x < VGA_TEXT_GLYPH_X + VGA_TEXT_GLYPH_WIDTH &&
-        (Bits & (1U << (VGA_TEXT_GLYPH_WIDTH - 1U -
-                        (x - VGA_TEXT_GLYPH_X))))) {
-        right = Fg;
-    }
     return text_pixel_pair(left, right);
 }
 
-static void text_draw_graphics_cell(UINTN X0, UINTN Y0, UINT64 Glyph,
+static void text_draw_graphics_cell(UINTN Column, UINTN Row,
+                                    const UINT8 *Glyph,
                                     UINT32 Fg, UINT32 Bg)
 {
-    UINT64 bg_pair = text_pixel_pair(Bg, Bg);
+    UINTN x0;
+    UINTN x1;
+    UINTN y0;
+    UINTN y1;
+    UINTN cell_width;
+    UINTN cell_height;
+    UINTN glyph_y = 0;
+    UINTN y_error = 0;
     UINTN y;
 
-    for (y = 0; y < VGA_TEXT_CELL_HEIGHT; y++) {
+    text_graphics_cell_bounds(Column, Row, &x0, &y0, &x1, &y1);
+    if (x0 >= x1 || y0 >= y1) {
+        return;
+    }
+    cell_width = x1 - x0;
+    cell_height = y1 - y0;
+
+    if (cell_width == VGA_TEXT_CELL_WIDTH &&
+        (x0 & 1U) == 0) {
+        UINT64 bg_pair = text_pixel_pair(Bg, Bg);
+
+        for (y = y0; y < y1; y++) {
+            volatile UINT64 *dst =
+                (volatile UINT64 *)(UINTN)(VGA_FB_BASE +
+                                           y * mGraphicsStride +
+                                           x0 * sizeof(UINT32));
+            UINT8 bits = Glyph[glyph_y];
+
+            if (bits == 0) {
+                dst[0] = bg_pair;
+                dst[1] = bg_pair;
+                dst[2] = bg_pair;
+                dst[3] = bg_pair;
+            } else {
+                dst[0] = text_cell_pixel_pair(bits, 0, Fg, Bg);
+                dst[1] = text_cell_pixel_pair(bits, 1, Fg, Bg);
+                dst[2] = text_cell_pixel_pair(bits, 2, Fg, Bg);
+                dst[3] = text_cell_pixel_pair(bits, 3, Fg, Bg);
+            }
+            y_error += VGA_TEXT_CELL_HEIGHT;
+            if (y_error >= cell_height) {
+                y_error -= cell_height;
+                glyph_y++;
+            }
+        }
+        return;
+    }
+
+    for (y = y0; y < y1; y++) {
+        volatile UINT32 *dst =
+            (volatile UINT32 *)(UINTN)(VGA_FB_BASE +
+                                       y * mGraphicsStride +
+                                       x0 * sizeof(UINT32));
+        UINT8 bits = Glyph[glyph_y];
+        UINTN glyph_x = 0;
+        UINTN x_error = 0;
+        UINTN x;
+
+        for (x = x0; x < x1; x++) {
+            *dst++ = (bits & (0x80U >> glyph_x)) != 0 ? Fg : Bg;
+            x_error += VGA_TEXT_CELL_WIDTH;
+            while (x_error >= cell_width) {
+                x_error -= cell_width;
+                glyph_x++;
+            }
+        }
+        y_error += VGA_TEXT_CELL_HEIGHT;
+        while (y_error >= cell_height) {
+            y_error -= cell_height;
+            glyph_y++;
+        }
+    }
+}
+
+static void text_fill_graphics_screen(UINT32 Color)
+{
+    UINT64 pair = text_pixel_pair(Color, Color);
+    UINTN y;
+
+    for (y = 0; y < mGraphicsHeight; y++) {
         volatile UINT64 *dst =
             (volatile UINT64 *)(UINTN)(VGA_FB_BASE +
-                                       (Y0 + y) * mGraphicsStride +
-                                       X0 * sizeof(UINT32));
-        UINT8 bits = 0;
+                                       y * mGraphicsStride);
+        UINTN x = 0;
 
-        if (y >= VGA_TEXT_GLYPH_Y &&
-            y < VGA_TEXT_GLYPH_Y +
-                VGA_TEXT_GLYPH_HEIGHT * VGA_TEXT_GLYPH_SCALE_Y) {
-            UINTN glyph_row = (y - VGA_TEXT_GLYPH_Y) /
-                              VGA_TEXT_GLYPH_SCALE_Y;
-
-            bits = (UINT8)((Glyph >> (glyph_row * VGA_TEXT_GLYPH_WIDTH)) &
-                           0x1fU);
+        for (; x + 7U < mGraphicsWidth; x += 8U) {
+            dst[0] = pair;
+            dst[1] = pair;
+            dst[2] = pair;
+            dst[3] = pair;
+            dst += 4;
         }
-
-        if (bits == 0) {
-            dst[0] = bg_pair;
-            dst[1] = bg_pair;
-            dst[2] = bg_pair;
-            dst[3] = bg_pair;
-        } else {
-            dst[0] = text_cell_pixel_pair(bits, 0, Fg, Bg);
-            dst[1] = text_cell_pixel_pair(bits, 1, Fg, Bg);
-            dst[2] = text_cell_pixel_pair(bits, 2, Fg, Bg);
-            dst[3] = text_cell_pixel_pair(bits, 3, Fg, Bg);
+        for (; x + 1U < mGraphicsWidth; x += 2U) {
+            *dst++ = pair;
+        }
+        if ((mGraphicsWidth & 1U) != 0) {
+            *(volatile UINT32 *)dst = Color;
         }
     }
 }
@@ -5435,13 +5327,12 @@ static void text_clear_legacy_cells(void)
 
 static void text_draw_cell(UINTN Column, UINTN Row)
 {
-    UINTN x0 = Column * VGA_TEXT_CELL_WIDTH;
-    UINTN y0 = Row * VGA_TEXT_CELL_HEIGHT;
     UINT8 attr = mTextAttrs[Row][Column];
     UINT32 fg = text_efi_color(attr & 0x0fU);
     UINT32 bg = text_efi_color((attr >> 4) & 0x07U);
     UINT8 ch = text_unicode_to_cp437(mTextChars[Row][Column]);
-    UINT64 glyph = text_glyph5x7((CHAR16)ch);
+    const UINT8 *glyph =
+        &vgafont16[(UINTN)ch * VGA_TEXT_CELL_HEIGHT];
 
     text_write_legacy_cell(Column, Row, ch);
 
@@ -5449,7 +5340,7 @@ static void text_draw_cell(UINTN Column, UINTN Row)
         return;
     }
 
-    text_draw_graphics_cell(x0, y0, glyph, fg, bg);
+    text_draw_graphics_cell(Column, Row, glyph, fg, bg);
 }
 
 static void text_redraw_screen(void)
@@ -5464,23 +5355,24 @@ static void text_redraw_screen(void)
     }
 }
 
-static void text_clear_row(UINTN Row)
-{
-    UINTN col;
-
-    for (col = 0; col < VGA_TEXT_COLUMNS; col++) {
-        mTextChars[Row][col] = ' ';
-        mTextAttrs[Row][col] = (UINT8)(mConOutMode.Attribute & 0x7f);
-        text_draw_cell(col, Row);
-    }
-}
-
 static void text_clear_screen(void)
 {
+    volatile UINT16 *legacy =
+        (volatile UINT16 *)(UINTN)VGA_TEXT_FB_BASE;
+    UINT8 attr = (UINT8)(mConOutMode.Attribute & 0x7f);
+    UINT16 blank = ((UINT16)attr << 8) | (UINT16)' ';
     UINTN row;
+    UINTN col;
 
     for (row = 0; row < VGA_TEXT_ROWS; row++) {
-        text_clear_row(row);
+        for (col = 0; col < VGA_TEXT_COLUMNS; col++) {
+            mTextChars[row][col] = ' ';
+            mTextAttrs[row][col] = attr;
+            legacy[row * VGA_TEXT_COLUMNS + col] = blank;
+        }
+    }
+    if (mGraphicsActive) {
+        text_fill_graphics_screen(text_efi_color((attr >> 4) & 0x07U));
     }
     mConOutMode.CursorColumn = 0;
     mConOutMode.CursorRow = 0;
@@ -5718,32 +5610,38 @@ EFI_STATUS efi_conout_enable_cursor(VOID *This, BOOLEAN Enable)
 static BOOLEAN text_graphics_a_cell_selftest(UINTN Column, UINTN Row)
 {
     static const UINT8 expected_rows[VGA_TEXT_CELL_HEIGHT] = {
-        0x00U,
-        0x1cU, 0x1cU,
-        0x22U, 0x22U,
-        0x22U, 0x22U,
-        0x3eU, 0x3eU,
-        0x22U, 0x22U,
-        0x22U, 0x22U,
-        0x22U, 0x22U,
-        0x00U,
+        0x00U, 0x00U, 0x10U, 0x38U,
+        0x6cU, 0xc6U, 0xc6U, 0xfeU,
+        0xc6U, 0xc6U, 0xc6U, 0xc6U,
+        0x00U, 0x00U, 0x00U, 0x00U,
     };
     UINT32 fg = 0x00ffff55U;
     UINT32 bg = 0x000000aaU;
-    UINTN x0 = Column * VGA_TEXT_CELL_WIDTH;
-    UINTN y0 = Row * VGA_TEXT_CELL_HEIGHT;
+    UINTN x0;
+    UINTN x1;
+    UINTN y0;
+    UINTN y1;
     UINTN x;
     UINTN y;
 
     if (!mGraphicsActive) {
         return 1;
     }
-    for (y = 0; y < VGA_TEXT_CELL_HEIGHT; y++) {
-        for (x = 0; x < VGA_TEXT_CELL_WIDTH; x++) {
-            UINT32 expected =
-                (expected_rows[y] & (1U << x)) ? fg : bg;
+    text_graphics_cell_bounds(Column, Row, &x0, &y0, &x1, &y1);
+    if (x0 >= x1 || y0 >= y1) {
+        return 0;
+    }
+    for (y = y0; y < y1; y++) {
+        UINTN glyph_y =
+            (y - y0) * VGA_TEXT_CELL_HEIGHT / (y1 - y0);
 
-            if (text_read_pixel(x0 + x, y0 + y) != expected) {
+        for (x = x0; x < x1; x++) {
+            UINTN glyph_x =
+                (x - x0) * VGA_TEXT_CELL_WIDTH / (x1 - x0);
+            UINT32 expected =
+                (expected_rows[glyph_y] & (0x80U >> glyph_x)) ? fg : bg;
+
+            if (text_read_pixel(x, y) != expected) {
                 return 0;
             }
         }
@@ -5783,6 +5681,20 @@ static BOOLEAN __attribute__((noinline)) uefi_conout_selftest(void)
         rows != VGA_TEXT_ROWS) {
         ok = 0;
     }
+    if (mGraphicsActive) {
+        UINTN x0;
+        UINTN x1;
+        UINTN y0;
+        UINTN y1;
+
+        text_graphics_cell_bounds(VGA_TEXT_COLUMNS - 1U,
+                                  VGA_TEXT_ROWS - 1U,
+                                  &x0, &y0, &x1, &y1);
+        if (x0 >= x1 || y0 >= y1 ||
+            x1 != mGraphicsWidth || y1 != mGraphicsHeight) {
+            ok = 0;
+        }
+    }
     st = efi_conout_query_mode(&mConOutProto, 0, NULL, &rows);
     if (st != EFI_INVALID_PARAMETER) {
         ok = 0;
@@ -5807,9 +5719,12 @@ static BOOLEAN __attribute__((noinline)) uefi_conout_selftest(void)
     if (st != EFI_WARN_UNKNOWN_GLYPH) {
         ok = 0;
     }
-    if (text_glyph5x7('a') == text_glyph5x7('A') ||
-        text_glyph5x7('g') == text_glyph5x7('G') ||
-        text_glyph5x7('z') == text_glyph5x7('Z')) {
+    if (vgafont16['a' * VGA_TEXT_CELL_HEIGHT + 5U] ==
+            vgafont16['A' * VGA_TEXT_CELL_HEIGHT + 5U] ||
+        vgafont16['g' * VGA_TEXT_CELL_HEIGHT + 5U] ==
+            vgafont16['G' * VGA_TEXT_CELL_HEIGHT + 5U] ||
+        vgafont16['z' * VGA_TEXT_CELL_HEIGHT + 5U] ==
+            vgafont16['Z' * VGA_TEXT_CELL_HEIGHT + 5U]) {
         ok = 0;
     }
     saved_chars[0] = mTextChars[0][0];
@@ -8658,20 +8573,12 @@ static void graphics_load_text_font(void)
     vga_indexed_write(VGA_GFX_I, VGA_GFX_D, 0x08, 0xff);
 
     for (ch = 0; ch < 256U; ch++) {
-        UINT64 glyph = text_glyph5x7((CHAR16)ch);
         UINTN row;
 
         for (row = 0; row < 32U; row++) {
-            UINT8 bits = 0;
+            UINT8 bits = row < VGA_TEXT_CELL_HEIGHT ?
+                vgafont16[ch * VGA_TEXT_CELL_HEIGHT + row] : 0;
 
-            if (row >= 1U && row < 15U) {
-                UINTN glyph_row = (row - 1U) / 2U;
-                UINT8 glyph_bits =
-                    (UINT8)((glyph >> (glyph_row * VGA_TEXT_GLYPH_WIDTH)) &
-                            0x1fU);
-
-                bits = (UINT8)(glyph_bits << VGA_TEXT_GLYPH_X);
-            }
             font[ch * 32U + row] = bits;
         }
     }
@@ -8679,7 +8586,7 @@ static void graphics_load_text_font(void)
 
 static void graphics_program_text_mode(void)
 {
-    /* SR01 bit 0 keeps 80-column text at 640 pixels instead of 720. */
+    /* 640x400, 80x25 text with native 8x16 glyphs. */
     static const UINT8 seq[] = { 0x03, 0x01, 0x03, 0x00, 0x02 };
     static const UINT8 crtc[] = {
         0x5f, 0x4f, 0x50, 0x82, 0x55, 0x81, 0xbf, 0x1f,
@@ -9205,8 +9112,8 @@ static BOOLEAN __attribute__((noinline)) graphics_gop_set_mode_selftest(void)
     st = gop_query_mode(&mGopProto, 1, &info_size, &mode_info);
     if (st != EFI_SUCCESS || info_size != sizeof(*mode_info) ||
         mode_info == NULL ||
-        mode_info->HorizontalResolution != VGA_MODE_640_WIDTH ||
-        mode_info->VerticalResolution != VGA_MODE_640_HEIGHT ||
+        mode_info->HorizontalResolution != VGA_MODE_800_WIDTH ||
+        mode_info->VerticalResolution != VGA_MODE_800_HEIGHT ||
         !graphics_mode_has_bgrx_layout(mode_info)) {
         ok = 0;
     }
@@ -9215,7 +9122,7 @@ static BOOLEAN __attribute__((noinline)) graphics_gop_set_mode_selftest(void)
         mode_info = NULL;
     }
 
-    st = gop_query_mode(&mGopProto, 3, &info_size, &mode_info);
+    st = gop_query_mode(&mGopProto, 2, &info_size, &mode_info);
     if (st != EFI_SUCCESS || info_size != sizeof(*mode_info) ||
         mode_info == NULL ||
         mode_info->HorizontalResolution != VGA_MODE_1024_WIDTH ||
@@ -9232,10 +9139,10 @@ static BOOLEAN __attribute__((noinline)) graphics_gop_set_mode_selftest(void)
         ok = 0;
     }
 
-    st = gop_set_mode(&mGopProto, 3);
+    st = gop_set_mode(&mGopProto, 2);
     expected_size = (UINTN)VGA_MODE_1024_WIDTH *
                     (UINTN)VGA_MODE_1024_HEIGHT * 4U;
-    if (st != EFI_SUCCESS || mGopMode.Mode != 3 ||
+    if (st != EFI_SUCCESS || mGopMode.Mode != 2 ||
         mGraphicsWidth != VGA_MODE_1024_WIDTH ||
         mGraphicsHeight != VGA_MODE_1024_HEIGHT ||
         mGopMode.FrameBufferSize != expected_size ||
@@ -9335,7 +9242,7 @@ static BOOLEAN __attribute__((noinline)) graphics_gop_set_mode_selftest(void)
         ok = 0;
     }
 
-    st = gop_set_mode(&mGopProto, 3);
+    st = gop_set_mode(&mGopProto, 2);
     if (st != EFI_SUCCESS || !graphics_visible_framebuffer_is_black()) {
         ok = 0;
     }
@@ -9361,7 +9268,7 @@ static BOOLEAN __attribute__((noinline)) graphics_gop_set_mode_selftest(void)
                       VGA_BPP, 60);
     expected_size = (UINTN)VGA_MODE_1280_WIDTH *
                     (UINTN)VGA_MODE_1280_HEIGHT * 4U;
-    if (st != EFI_SUCCESS || mGopMode.Mode != 4 ||
+    if (st != EFI_SUCCESS || mGopMode.Mode != 3 ||
         mGopMode.FrameBufferSize != expected_size ||
         !graphics_visible_framebuffer_is_black()) {
         ok = 0;
@@ -16514,24 +16421,19 @@ static void efi_init_graphics(void)
     mGopModeInfo[0].PixelsPerScanLine = VGA_MODE_TEXT_WIDTH;
 
     mGopModeInfo[1] = mGopModeInfo[0];
-    mGopModeInfo[1].HorizontalResolution = VGA_MODE_640_WIDTH;
-    mGopModeInfo[1].VerticalResolution = VGA_MODE_640_HEIGHT;
-    mGopModeInfo[1].PixelsPerScanLine = VGA_MODE_640_WIDTH;
+    mGopModeInfo[1].HorizontalResolution = VGA_MODE_800_WIDTH;
+    mGopModeInfo[1].VerticalResolution = VGA_MODE_800_HEIGHT;
+    mGopModeInfo[1].PixelsPerScanLine = VGA_MODE_800_WIDTH;
 
     mGopModeInfo[2] = mGopModeInfo[0];
-    mGopModeInfo[2].HorizontalResolution = VGA_MODE_800_WIDTH;
-    mGopModeInfo[2].VerticalResolution = VGA_MODE_800_HEIGHT;
-    mGopModeInfo[2].PixelsPerScanLine = VGA_MODE_800_WIDTH;
+    mGopModeInfo[2].HorizontalResolution = VGA_MODE_1024_WIDTH;
+    mGopModeInfo[2].VerticalResolution = VGA_MODE_1024_HEIGHT;
+    mGopModeInfo[2].PixelsPerScanLine = VGA_MODE_1024_WIDTH;
 
     mGopModeInfo[3] = mGopModeInfo[0];
-    mGopModeInfo[3].HorizontalResolution = VGA_MODE_1024_WIDTH;
-    mGopModeInfo[3].VerticalResolution = VGA_MODE_1024_HEIGHT;
-    mGopModeInfo[3].PixelsPerScanLine = VGA_MODE_1024_WIDTH;
-
-    mGopModeInfo[4] = mGopModeInfo[0];
-    mGopModeInfo[4].HorizontalResolution = VGA_MODE_1280_WIDTH;
-    mGopModeInfo[4].VerticalResolution = VGA_MODE_1280_HEIGHT;
-    mGopModeInfo[4].PixelsPerScanLine = VGA_MODE_1280_WIDTH;
+    mGopModeInfo[3].HorizontalResolution = VGA_MODE_1280_WIDTH;
+    mGopModeInfo[3].VerticalResolution = VGA_MODE_1280_HEIGHT;
+    mGopModeInfo[3].PixelsPerScanLine = VGA_MODE_1280_WIDTH;
 
     mGopMode.MaxMode = FW_ARRAY_SIZE(mGopModeInfo);
     mGopMode.Mode = 0;
@@ -35359,7 +35261,7 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
               "exception and periodic callbacks verified\r\n" :
               "verification failed\r\n");
     uart_puts("Graphics Output:      GOP/UGA VGA BGRx "
-              "640x400x32, 640x480x32, 800x600x32, 1024x768x32, "
+              "640x480x32, 800x600x32, 1024x768x32, "
               "1280x1024x32 @ 0xc4000000\r\n");
     uart_puts("UGA I/O Protocol:     ");
     uart_puts(fw_uga_io_selftest() ?

@@ -220,7 +220,8 @@ struct _EFI_SIMPLE_TEXT_OUT_PROTOCOL {
     EFI_STATUS (*Reset)(EFI_SIMPLE_TEXT_OUT_PROTOCOL *, BOOLEAN);
     EFI_STATUS (*OutputString)(EFI_SIMPLE_TEXT_OUT_PROTOCOL *, CHAR16 *);
     VOID *TestString;
-    VOID *QueryMode;
+    EFI_STATUS (*QueryMode)(EFI_SIMPLE_TEXT_OUT_PROTOCOL *, UINTN,
+                            UINTN *, UINTN *);
     VOID *SetMode;
     VOID *SetAttribute;
     VOID *ClearScreen;

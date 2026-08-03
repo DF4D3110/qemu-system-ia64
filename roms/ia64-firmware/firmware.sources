@@ -1,4 +1,5 @@
 entry.S
+../../ui/vgafont.c
 firmware.c
 decompress.c
 debug_protocols.c

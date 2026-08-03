@@ -23,6 +23,8 @@ LD="${LD:-ia64-linux-gnu-ld}"
 OBJCOPY="${OBJCOPY:-ia64-linux-gnu-objcopy}"
 SIZE="${SIZE:-ia64-linux-gnu-size}"
 LIBGCC="$("$CC" -print-libgcc-file-name)"
+# ui/vgafont.h uses the compiler-provided freestanding <stdint.h>.
+CC_INCLUDE_DIR="$("$CC" -print-file-name=include)"
 
 set --
 LINKER_SCRIPT=
@@ -50,6 +52,7 @@ while IFS= read -r source || [ -n "$source" ]; do
             "$CC" -O2 -fno-builtin -ffreestanding -nostdinc -nostdlib \
                 -G 0 -mno-sdata -fno-stack-protector -fno-common \
                 -fno-optimize-sibling-calls -fno-pic \
+                -isystem "$CC_INCLUDE_DIR" \
                 -I"$INCLUDE_DIR" \
                 -Wall -Wextra -Wno-unused-parameter \
                 -MMD -MP -MF "$object_depfile" -MT "$OUT_BIN" \
