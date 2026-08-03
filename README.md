@@ -10,6 +10,7 @@ Experimental QEMU full-system emulation target for IA-64/Itanium guests.
 - [Quick start](#quick-start)
 - [Windows x86_64 build](#windows-x86_64-build)
 - [Emulated platform](#emulated-platform)
+- [Windows XPDM display driver](#windows-xpdm-display-driver)
 - [Machine profiles](#machine-profiles)
 - [CPU models](#cpu-models)
 - [Build configurations](#build-configurations)
@@ -215,6 +216,13 @@ The default machine is `ia64-vpc`. It models an Itanium 2 based virtual PC inten
 - EFI boot and runtime services, an interactive pre-boot shell, PE/COFF and EBC image loading, decompression, filesystems, graphics, storage, USB/input, and debug-support protocols
 - Local SAPIC, I/O SAPIC, ACPI platform tables, RTC, watchdog, persistent NVRAM, and serial/debug ports
 - A PCI root bus with LSI53C895A SCSI boot storage, ICH9 AHCI, e1000 Ethernet, OHCI/UHCI USB, and optional CMD646 IDE/ATAPI
+
+## Windows XPDM display driver
+
+An IA-64 XPDM driver for the emulated ATI VGA device is available for Windows
+XP through Windows Server 2008 R2 in the
+[qemu-system-ia64-ati-xpdm](https://github.com/syunnPC/qemu-system-ia64-ati-xpdm)
+repository.
 
 ## Machine profiles
 
