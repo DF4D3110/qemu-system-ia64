@@ -99,7 +99,7 @@ test_ia64_timeouts = {
   'services': 90,
   'tables': 90,
   'smp': 120,
-  'smp_merced': 120,
+  'smp_merced': 900,
   'storage': 300,
   'input': 120,
 }

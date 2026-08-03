@@ -2276,24 +2276,46 @@ static BOOLEAN test_acpi_fadt_links_gas(const TEST_TABLE_CONTEXT *Context)
            (flags & (1U << 13)) != 0 && (flags & (1U << 4)) == 0;
 }
 
+static void test_acpi_cpu_names(UINTN Index, UINT8 Processor[4],
+                                UINT8 Enabled[4])
+{
+    if (Index < 10U) {
+        Processor[0] = 'C';
+        Processor[1] = 'P';
+        Processor[2] = 'U';
+        Processor[3] = (UINT8)('0' + Index);
+        Enabled[0] = 'C';
+        Enabled[1] = (UINT8)('0' + Index);
+        Enabled[2] = 'E';
+        Enabled[3] = 'N';
+        return;
+    }
+    Processor[0] = 'C';
+    Processor[1] = 'P';
+    Processor[2] = (UINT8)('0' + Index / 10U);
+    Processor[3] = (UINT8)('0' + Index % 10U);
+    Enabled[0] = 'E';
+    Enabled[1] = (UINT8)('0' + Index / 100U);
+    Enabled[2] = (UINT8)('0' + (Index / 10U) % 10U);
+    Enabled[3] = (UINT8)('0' + Index % 10U);
+}
+
 static BOOLEAN test_acpi_topology(const TEST_TABLE_CONTEXT *Context)
 {
-    static const UINT8 processor_enabled_names[4][4] = {
-        { 'C', '0', 'E', 'N' },
-        { 'C', '1', 'E', 'N' },
-        { 'C', '2', 'E', 'N' },
-        { 'C', '3', 'E', 'N' },
-    };
     const UINT8 *madt;
     const UINT8 *srat;
     const UINT8 *ssdt;
     const UINT8 *slit;
+    UINT8 processor_name[4];
+    UINT8 enabled_name[4];
     UINTN madt_length;
     UINTN srat_length;
     UINTN ssdt_length;
     UINTN offset;
-    UINT32 madt_processors = 0;
-    UINT32 srat_processors = 0;
+    UINT64 madt_present = 0;
+    UINT64 madt_enabled = 0;
+    UINT64 srat_present = 0;
+    UINT64 srat_enabled = 0;
     BOOLEAN iosapic = 0;
     BOOLEAN low_memory = 0;
 
@@ -2305,10 +2327,14 @@ static BOOLEAN test_acpi_topology(const TEST_TABLE_CONTEXT *Context)
     if (ssdt_length < sizeof(TEST_SDT_HEADER)) {
         return 0;
     }
-    for (offset = 0; offset < 4U; offset++) {
-        if (!aml_named_byte(ssdt + sizeof(TEST_SDT_HEADER),
+    for (offset = 0; offset < 64U; offset++) {
+        test_acpi_cpu_names(offset, processor_name, enabled_name);
+        if (find_bytes(ssdt + sizeof(TEST_SDT_HEADER),
+                       ssdt_length - sizeof(TEST_SDT_HEADER),
+                       processor_name, sizeof(processor_name), 0) == NULL ||
+            !aml_named_byte(ssdt + sizeof(TEST_SDT_HEADER),
                             ssdt_length - sizeof(TEST_SDT_HEADER),
-                            processor_enabled_names[offset], 0x0fU)) {
+                            enabled_name, offset < 4U ? 0x0fU : 0)) {
             return 0;
         }
     }
@@ -2323,22 +2349,28 @@ static BOOLEAN test_acpi_topology(const TEST_TABLE_CONTEXT *Context)
         if (length < 2U || length > madt_length - offset) {
             return 0;
         }
-        if (madt[offset] == 7U && length >= 12U &&
-            (get_u32(madt + offset + 8U) & 1U) != 0) {
+        if (madt[offset] == 7U && length >= 12U) {
             UINTN id = madt[offset + 3U];
+            UINT32 flags = get_u32(madt + offset + 8U);
 
-            if (id >= 4U || madt[offset + 2U] != id ||
-                madt[offset + 4U] != 0) {
+            if (id >= 64U || madt[offset + 2U] != id ||
+                madt[offset + 4U] != 0 ||
+                (flags & 1U) != (id < 4U ? 1U : 0) ||
+                (madt_present & (1ULL << id)) != 0) {
                 return 0;
             }
-            madt_processors |= 1U << id;
+            madt_present |= 1ULL << id;
+            if ((flags & 1U) != 0) {
+                madt_enabled |= 1ULL << id;
+            }
         } else if (madt[offset] == 6U && length >= 16U) {
             iosapic = get_u32(madt + offset + 4U) == 0 &&
                 get_u64(madt + offset + 8U) == 0x80110000U;
         }
         offset += length;
     }
-    if (offset != madt_length || madt_processors != 0x0fU || !iosapic) {
+    if (offset != madt_length || madt_present != ~(UINT64)0 ||
+        madt_enabled != 0x0fU || !iosapic) {
         return 0;
     }
 
@@ -2363,20 +2395,25 @@ static BOOLEAN test_acpi_topology(const TEST_TABLE_CONTEXT *Context)
             if (base == 0 && size != 0 && (flags & 1U) != 0) {
                 low_memory = 1;
             }
-        } else if (srat[offset] == 0U && length >= 16U &&
-                   (get_u32(srat + offset + 4U) & 1U) != 0) {
+        } else if (srat[offset] == 0U && length >= 16U) {
             UINTN id = srat[offset + 3U];
+            UINT32 flags = get_u32(srat + offset + 4U);
 
-            if (id >= 4U || srat[offset + 8U] != 0) {
+            if (id >= 64U || srat[offset + 8U] != 0 ||
+                (flags & 1U) != (id < 4U ? 1U : 0) ||
+                (srat_present & (1ULL << id)) != 0) {
                 return 0;
             }
-            srat_processors |= 1U << id;
+            srat_present |= 1ULL << id;
+            if ((flags & 1U) != 0) {
+                srat_enabled |= 1ULL << id;
+            }
         }
         offset += length;
     }
     slit = (const UINT8 *)Context->Slit;
     return offset == srat_length && low_memory &&
-           srat_processors == 0x0fU &&
+           srat_present == ~(UINT64)0 && srat_enabled == 0x0fU &&
            get_u64(slit + 36U) == 1U && slit[44U] == 10U;
 }
 

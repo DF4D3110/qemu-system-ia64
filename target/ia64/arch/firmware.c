@@ -259,7 +259,7 @@ static unsigned ia64_fw_debug_cpu_index(CPUIA64State *env)
     CPUState *cs = env_cpu(env);
     unsigned index = cs->cpu_index < 0 ? 0 : cs->cpu_index;
 
-    return MIN(index, IA64_FW_DEBUG_MAX_CPUS - 1);
+    return MIN(index, IA64_VPC_MAX_CPUS - 1);
 }
 
 static hwaddr ia64_fw_debug_context_pa(CPUIA64State *env)

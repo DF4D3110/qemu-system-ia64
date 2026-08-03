@@ -24,7 +24,7 @@ class Ia64FirmwareTest(QemuSystemTest):
 
     def launch_ia64(self, *, name: str = "default", media: Path | None = None,
                     optical: bool = False, machine_options: str = "",
-                    memory: str = "512M", smp: int = 1,
+                    memory: str = "512M", smp: int | str = 1,
                     extra_args: tuple[str, ...] = (),
                     drive_args: tuple[str, ...] | None = None):
         vm = self.get_vm(name=name)

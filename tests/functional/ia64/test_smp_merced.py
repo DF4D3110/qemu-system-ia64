@@ -18,18 +18,37 @@ SMP_MERCED_CASES = {
 
 
 class Ia64SmpMerced(Ia64FirmwareTest):
-    def test_merced_ap_rendezvous(self):
-        disk = Path(self.scratch_file("smp-merced.img"))
-        nvram = self.make_nvram("smp-merced.nvram")
+    def run_merced_ap_rendezvous(self, name: str, smp: int | str,
+                                 memory: str = "512M"):
+        disk = Path(self.scratch_file(f"smp-merced-{name}.img"))
+        nvram = self.make_nvram(f"smp-merced-{name}.nvram")
         make_fat_disk(disk, app_path("smp-merced"))
         vm = self.launch_ia64(
-            media=disk, smp=4, memory="512M",
+            name=name, media=disk, smp=smp, memory=memory,
             machine_options=f"firmware-console=serial,nvram={nvram}",
             extra_args=("-cpu", "merced",
                         "-accel", "tcg,thread=multi"))
         result = self.wait_ia64_suite(
-            vm, "smp-merced", SMP_MERCED_CASES, timeout=60.0)
+            vm, "smp-merced", SMP_MERCED_CASES, timeout=180.0)
         self.assertSetEqual(set(result.cases), SMP_MERCED_CASES)
+
+    def test_64_socket_rendezvous(self):
+        self.run_merced_ap_rendezvous("64s", 64, memory="128M")
+
+    def test_4_socket_rendezvous(self):
+        self.run_merced_ap_rendezvous("4s", 4)
+
+    def test_8_socket_2_core_rendezvous(self):
+        self.run_merced_ap_rendezvous(
+            "8s2c", "16,sockets=8,cores=2,threads=1")
+
+    def test_1_socket_8_core_rendezvous(self):
+        self.run_merced_ap_rendezvous(
+            "1s8c", "8,sockets=1,cores=8,threads=1")
+
+    def test_4_socket_8_core_rendezvous(self):
+        self.run_merced_ap_rendezvous(
+            "4s8c", "32,sockets=4,cores=8,threads=1")
 
 
 if __name__ == "__main__":

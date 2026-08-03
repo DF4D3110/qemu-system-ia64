@@ -34,6 +34,52 @@
 #define IA64_FW_CONSOLE_VGA           1ULL
 #define IA64_FW_DEBUG_PORT_PRESENT    1ULL
 
+#define IA64_VPC_MAX_CPUS             64U
+
+/*
+ * CPU-private physical memory used before and after ExitBootServices().
+ *
+ * The minimum machine has 128 MiB of low RAM.  Keep the upper 16 MiB of that
+ * minimum configuration reserved so every supported CPU has independent SAL,
+ * debug, initial RSE, and bootstrap memory-stack storage.  The ordinary EFI
+ * stack pool remains relative to the installed low-RAM end; at the minimum
+ * RAM size it overlaps only the fixed bootstrap-stack subrange below.
+ */
+#define IA64_FW_CPU_ASSIST_BASE        0x0000000007000000ULL
+#define IA64_FW_CPU_ASSIST_END         0x0000000008000000ULL
+
+#define IA64_FW_SAL_RUNTIME_BASE       0x0000000007000000ULL
+#define IA64_FW_SAL_RUNTIME_SLOT_SIZE  0x0000000000008000ULL
+#define IA64_FW_SAL_RUNTIME_END \
+    (IA64_FW_SAL_RUNTIME_BASE + \
+     IA64_VPC_MAX_CPUS * IA64_FW_SAL_RUNTIME_SLOT_SIZE)
+
+#define IA64_FW_DEBUG_CONTEXT_BASE     0x0000000007200000ULL
+#define IA64_FW_DEBUG_CONTEXT_STRIDE   0x0000000000000800ULL
+#define IA64_FW_DEBUG_CONTEXT_SIZE     1192U
+#define IA64_FW_DEBUG_CONTEXT_END \
+    (IA64_FW_DEBUG_CONTEXT_BASE + \
+     IA64_VPC_MAX_CPUS * IA64_FW_DEBUG_CONTEXT_STRIDE)
+
+#define IA64_FW_DEBUG_STACK_BASE       0x0000000007300000ULL
+#define IA64_FW_DEBUG_STACK_SIZE       0x0000000000008000ULL
+#define IA64_FW_DEBUG_STACK_END \
+    (IA64_FW_DEBUG_STACK_BASE + \
+     IA64_VPC_MAX_CPUS * IA64_FW_DEBUG_STACK_SIZE)
+
+#define IA64_FW_EARLY_RSE_BASE         0x0000000007600000ULL
+#define IA64_FW_EARLY_RSE_SIZE         0x0000000000008000ULL
+#define IA64_FW_EARLY_RSE_END \
+    (IA64_FW_EARLY_RSE_BASE + \
+     IA64_VPC_MAX_CPUS * IA64_FW_EARLY_RSE_SIZE)
+
+#define IA64_FW_BOOTSTRAP_STACK_TOP    0x0000000008000000ULL
+#define IA64_FW_CPU_STACK_SIZE         0x0000000000020000ULL
+#define IA64_FW_BOOT_STACK_SIZE \
+    (IA64_VPC_MAX_CPUS * IA64_FW_CPU_STACK_SIZE)
+#define IA64_FW_FIXED_STACK_BASE \
+    (IA64_FW_BOOTSTRAP_STACK_TOP - IA64_FW_BOOT_STACK_SIZE)
+
 #define IA64_UART_BASE                0x00000047f0000000ULL
 #define IA64_DEBUG_UART_BASE          0x00000047f0001000ULL
 #define IA64_UART_MMIO_SIZE           0x0000000000002000ULL

@@ -693,6 +693,38 @@ static void test_smp_explicit_topology(void)
     qtest_quit(qts);
 }
 
+typedef struct TestSmpMulticoreTopology {
+    const char *name;
+    unsigned sockets;
+    unsigned cores;
+} TestSmpMulticoreTopology;
+
+static const TestSmpMulticoreTopology smp_multicore_topologies[] = {
+    { "8-sockets-2-cores", 8, 2 },
+    { "1-socket-8-cores", 1, 8 },
+    { "4-sockets-8-cores", 4, 8 },
+};
+
+static void test_smp_multicore_topology(gconstpointer opaque)
+{
+    const TestSmpMulticoreTopology *topology = opaque;
+    unsigned count = topology->sockets * topology->cores;
+    g_autofree char *args = g_strdup_printf(
+        "-smp %u,sockets=%u,cores=%u,threads=1",
+        count, topology->sockets, topology->cores);
+    QTestState *qts = ia64_vpc_start(args);
+    g_autoptr(QDict) response = NULL;
+    QList *cpus;
+
+    assert_firmware_handoff(qts, 1, count, 0, topology->sockets,
+                            topology->cores, 1, 0);
+    response = qtest_qmp(qts, "{'execute':'query-cpus-fast'}");
+    g_assert(qdict_haskey(response, "return"));
+    cpus = qdict_get_qlist(response, "return");
+    g_assert_cmpuint(qlist_size(cpus), ==, count);
+    qtest_quit(qts);
+}
+
 static void test_machine_firmware_profiles(void)
 {
     QTestState *qts;
@@ -1575,7 +1607,8 @@ static void test_savevm_restores_platform_state(const void *opaque)
 
 int main(int argc, char **argv)
 {
-    unsigned cpus;
+    static const unsigned cpu_counts[] = { 1, 2, 4, 8, 16, 32, 64 };
+    unsigned i;
 
     g_test_init(&argc, &argv, NULL);
     qtest_add_func("/ia64-vpc/acpi-reset-register",
@@ -1594,7 +1627,8 @@ int main(int argc, char **argv)
                    test_machine_firmware_profiles);
     qtest_add_func("/ia64-vpc/firmware-handoff/default-ram",
                    test_machine_default_ram);
-    for (cpus = 1; cpus <= 4; cpus++) {
+    for (i = 0; i < G_N_ELEMENTS(cpu_counts); i++) {
+        unsigned cpus = cpu_counts[i];
         g_autofree char *path =
             g_strdup_printf("/ia64-vpc/smp/topology/%u", cpus);
 
@@ -1602,6 +1636,14 @@ int main(int argc, char **argv)
     }
     qtest_add_func("/ia64-vpc/smp/explicit-topology",
                    test_smp_explicit_topology);
+    for (i = 0; i < G_N_ELEMENTS(smp_multicore_topologies); i++) {
+        const TestSmpMulticoreTopology *topology =
+            &smp_multicore_topologies[i];
+        g_autofree char *path = g_strdup_printf(
+            "/ia64-vpc/smp/multicore/%s", topology->name);
+
+        qtest_add_data_func(path, topology, test_smp_multicore_topology);
+    }
     qtest_add_func("/ia64-vpc/smp/reject-full-alat",
                    test_smp_rejects_full_alat);
     qtest_add_func("/ia64-vpc/input/default-usb",

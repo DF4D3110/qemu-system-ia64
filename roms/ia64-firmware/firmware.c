@@ -23,6 +23,7 @@
 #include "fw-uart.h"
 #include "fw-uga-io.h"
 #include "fw-usb.h"
+#include "ssdt-platform-devices.h"
 
 #define IA64_PSR_AC     (1ULL << 3)
 #define IA64_PSR_DT     (1ULL << 17)
@@ -50,8 +51,8 @@
 #define SAL_PTA_DISABLED_VALUE       (15ULL << 2)
 #define SAL_RR_VALUE(Rid) \
     (((UINT64)(Rid) << 8) | ((UINT64)SAL_RR_PREFERRED_PAGE_SHIFT << 2))
-#define SAL_BACKING_STORE_BASE       0x0000000000080000ULL
-#define SAL_BACKING_STORE_END        0x00000000000a0000ULL
+#define SAL_BACKING_STORE_BASE       IA64_FW_EARLY_RSE_BASE
+#define SAL_BACKING_STORE_END        IA64_FW_EARLY_RSE_END
 #define SAL_SYSTEM_ADDRESS_LIMIT     (1ULL << 44)
 
 #define SAL_DESCRIPTOR_ENTRYPOINT    0U
@@ -142,8 +143,8 @@
 #define FW_LOW_IMAGE_END  0x0000000005000000ULL
 #define FW_EARLY_LOADER_WINDOW_END FW_LOW_IMAGE_END
 #define FW_AUTO_ALLOCATION_BASE 0x0000000008000000ULL
-#define FW_BOOTSTRAP_STACK_TOP 0x0000000008000000ULL
-#define FW_BOOT_STACK_SIZE     0x0000000000400000ULL
+#define FW_BOOTSTRAP_STACK_TOP IA64_FW_BOOTSTRAP_STACK_TOP
+#define FW_BOOT_STACK_SIZE     IA64_FW_BOOT_STACK_SIZE
 #define IA64_EFI_MEMORY_ALIGN 0x0000000000002000ULL
 #define IA64_EFI_MIN_STACK_BYTES   0x0000000000020000ULL
 #define IA64_EFI_MIN_BACKING_BYTES 0x0000000000004000ULL
@@ -171,7 +172,7 @@
 #define FW_NVRAM_COMMIT_MAGIC 0x54494d4d4f43564eULL /* "NVCOMMIT" */
 #define FW_HIGH_RAM_RANGE_MAX 3U
 #define FW_MEMORY_AFFINITY_MAX (1U + FW_HIGH_RAM_RANGE_MAX)
-#define FW_AP_STACK_SIZE  (FW_BOOT_STACK_SIZE / FW_MAX_CPUS)
+#define FW_AP_STACK_SIZE  IA64_FW_CPU_STACK_SIZE
 #define FW_SYSTEM_TABLE_POINTER_ALIGN 0x0000000000400000ULL
 #define FW_SYSTEM_TABLE_POINTER_SIZE  0x0000000000001000ULL
 #define EFI_MEMORY_UC     0x0000000000000001ULL
@@ -1144,7 +1145,7 @@ typedef struct {
 
 typedef struct {
     ACPI_SDT_HEADER Hdr;
-    UINT8 Aml[368];
+    UINT8 Aml[IA64_SSDT_AML_SIZE];
 } __attribute__((packed)) ACPI_SSDT;
 
 typedef struct {
@@ -1695,6 +1696,26 @@ FW_STATIC_ASSERT(FW_BOOT_STACK_SIZE >=
 FW_STATIC_ASSERT(FW_AP_STACK_SIZE >=
                  IA64_EFI_MIN_STACK_BYTES,
                  efi_ap_stack_capacity);
+FW_STATIC_ASSERT(FW_MAX_CPUS == 64U, firmware_processor_capacity);
+FW_STATIC_ASSERT(IA64_FW_CPU_ASSIST_BASE ==
+                 IA64_FW_SAL_RUNTIME_BASE,
+                 cpu_assist_sal_base);
+FW_STATIC_ASSERT(IA64_FW_SAL_RUNTIME_END <=
+                 IA64_FW_DEBUG_CONTEXT_BASE,
+                 sal_debug_context_disjoint);
+FW_STATIC_ASSERT(IA64_FW_DEBUG_CONTEXT_SIZE <=
+                 IA64_FW_DEBUG_CONTEXT_STRIDE,
+                 debug_context_stride_capacity);
+FW_STATIC_ASSERT(IA64_FW_DEBUG_CONTEXT_END <=
+                 IA64_FW_DEBUG_STACK_BASE,
+                 debug_context_stack_disjoint);
+FW_STATIC_ASSERT(IA64_FW_DEBUG_STACK_END <= IA64_FW_EARLY_RSE_BASE,
+                 debug_stack_rse_disjoint);
+FW_STATIC_ASSERT(IA64_FW_EARLY_RSE_END <= IA64_FW_FIXED_STACK_BASE,
+                 early_rse_boot_stack_disjoint);
+FW_STATIC_ASSERT(IA64_FW_FIXED_STACK_BASE >= IA64_FW_CPU_ASSIST_BASE &&
+                 IA64_FW_BOOTSTRAP_STACK_TOP <= IA64_FW_CPU_ASSIST_END,
+                 fixed_stack_inside_cpu_assist);
 FW_STATIC_ASSERT((SAL_BACKING_STORE_BASE & 7U) == 0,
                  sal_backing_store_alignment);
 FW_STATIC_ASSERT(SAL_BACKING_STORE_END > SAL_BACKING_STORE_BASE,
@@ -1708,18 +1729,20 @@ FW_STATIC_ASSERT(sizeof(ACPI_RSDT) == 68, acpi_rsdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_RSDP) == 36, acpi_rsdp_size);
 FW_STATIC_ASSERT(sizeof(ACPI_FACS) == 64, acpi_facs_size);
 FW_STATIC_ASSERT(sizeof(ACPI_DSDT) == 685, acpi_dsdt_size);
-FW_STATIC_ASSERT(sizeof(ACPI_SSDT) == 404, acpi_ssdt_size);
+FW_STATIC_ASSERT(sizeof(ACPI_SSDT) ==
+                 sizeof(ACPI_SDT_HEADER) + IA64_SSDT_AML_SIZE,
+                 acpi_ssdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_MCFG_ALLOCATION) == 16,
                  acpi_mcfg_allocation_size);
 FW_STATIC_ASSERT(sizeof(ACPI_MCFG) == 60, acpi_mcfg_size);
 FW_STATIC_ASSERT(sizeof(ACPI_MADT_LSAPIC) == 12, acpi_madt_lsapic_size);
 FW_STATIC_ASSERT(sizeof(ACPI_MADT_IOSAPIC) == 16, acpi_madt_iosapic_size);
-FW_STATIC_ASSERT(sizeof(ACPI_MADT) == 108, acpi_madt_size);
+FW_STATIC_ASSERT(sizeof(ACPI_MADT) == 828, acpi_madt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_SRAT_PROCESSOR_AFFINITY) == 16,
                  acpi_srat_processor_affinity_size);
 FW_STATIC_ASSERT(sizeof(ACPI_SRAT_MEMORY_AFFINITY) == 40,
                  acpi_srat_memory_affinity_size);
-FW_STATIC_ASSERT(sizeof(ACPI_SRAT) == 272, acpi_srat_size);
+FW_STATIC_ASSERT(sizeof(ACPI_SRAT) == 1232, acpi_srat_size);
 FW_STATIC_ASSERT(sizeof(ACPI_SLIT) == 45, acpi_slit_size);
 FW_STATIC_ASSERT(sizeof(ACPI_GENERIC_ADDRESS) == 12, acpi_gas_size);
 FW_STATIC_ASSERT(sizeof(HCDP_UART_DESCRIPTOR) == 48, acpi_hcdp_uart_size);
@@ -1807,7 +1830,7 @@ FW_STATIC_ASSERT(sizeof(SMBIOS_TYPE127_END_OF_TABLE) == 4,
 #define PLATFORM_TABLE_INITIAL       6
 #define PLATFORM_TABLE_MAX           16
 #define LOADED_IMAGE_MAX             8
-#define SMBIOS_TABLE_MAX_SIZE        1024U
+#define SMBIOS_TABLE_MAX_SIZE        8192U
 static EFI_CONFIGURATION_TABLE mConfigTables[PLATFORM_TABLE_MAX];
 static EFI_SYSTEM_TABLE_POINTER *mSystemTablePointer;
 static UINT64                   mSystemTablePointerBase;
@@ -1907,64 +1930,63 @@ static ACPI_DSDT               mDsdt = {
     0x0a, 0x11,
     },
 };
-static ACPI_SSDT               mSsdt = {
-    .Aml = {
-        /*
-         * Source: ssdt-platform-devices.asl
-         *
-         * Scope (\_SB) contains CPU0..CPU3 and patchable _STA values.
-         * Scope (\_SB.PCI0) {
-         *   Name (P2EN, 0x0F)
-         *   Device (UAR0) { _HID PNP0501;
-         *     _CRS { QWordIO COM1; edge/active-high/exclusive GSI 4 } }
-         *   Device (PS2K) { _HID PNP0303; _STA { Return (P2EN) };
-         *                   _CRS { IO 0x60; IO 0x64; IRQ 1 } }
-         *   Device (PS2M) { _HID PNP0F13; _STA { Return (P2EN) };
-         *                   _CRS { IRQ 12 } }
-         * }
-         */
-        0xa0, 0x0f, 0x00, 0x15, 0x5c, 0x2e, 0x5f, 0x53, 0x42, 0x5f, 0x50, 0x43,
-        0x49, 0x30, 0x06, 0x00, 0x10, 0x47, 0x08, 0x5c, 0x5f, 0x53, 0x42, 0x5f,
-        0x08, 0x43, 0x30, 0x45, 0x4e, 0x0a, 0x0f, 0x08, 0x43, 0x31, 0x45, 0x4e,
-        0x0a, 0x0f, 0x08, 0x43, 0x32, 0x45, 0x4e, 0x0a, 0x0f, 0x08, 0x43, 0x33,
-        0x45, 0x4e, 0x0a, 0x0f, 0x5b, 0x83, 0x17, 0x43, 0x50, 0x55, 0x30, 0x00,
-        0x00, 0x00, 0x00, 0x00,
-        0x00, 0x14, 0x0b, 0x5f, 0x53, 0x54, 0x41, 0x00, 0xa4, 0x43, 0x30,
-        0x45, 0x4e, 0x5b, 0x83, 0x17, 0x43, 0x50, 0x55, 0x31, 0x01, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x14, 0x0b, 0x5f, 0x53, 0x54, 0x41, 0x00, 0xa4, 0x43,
-        0x31, 0x45, 0x4e, 0x5b, 0x83, 0x17, 0x43, 0x50, 0x55, 0x32, 0x02, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x14, 0x0b, 0x5f, 0x53, 0x54, 0x41, 0x00, 0xa4,
-        0x43, 0x32, 0x45, 0x4e, 0x5b, 0x83, 0x17, 0x43, 0x50, 0x55, 0x33, 0x03,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x14, 0x0b, 0x5f, 0x53, 0x54, 0x41, 0x00,
-        0xa4, 0x43, 0x33, 0x45, 0x4e,
-        0x10, 0x47, 0x0d, 0x5c, 0x2e, 0x5f, 0x53, 0x42, 0x5f, 0x50, 0x43, 0x49,
-        0x30, 0x08, 0x50, 0x32, 0x45, 0x4e, 0x0a, 0x0f,
-        0x5b, 0x82, 0x4c, 0x05, 0x55, 0x41, 0x52, 0x30, 0x08, 0x5f, 0x48,
-        0x49, 0x44, 0x0d, 0x50, 0x4e, 0x50, 0x30, 0x35, 0x30, 0x31, 0x00, 0x08,
-        0x5f, 0x55, 0x49, 0x44, 0x00, 0x08, 0x5f, 0x43, 0x52, 0x53, 0x11, 0x3c,
-        0x0a, 0x39,
-        0x8a, 0x2b, 0x00, 0x01, 0x0d, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0xf8, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x03,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x89, 0x06,
-        0x00, 0x03, 0x01, 0x04, 0x00, 0x00, 0x00, 0x79,
-        0x00,
-        0x5b, 0x82, 0x39, 0x50, 0x53, 0x32, 0x4b,
-        0x08, 0x5f, 0x48, 0x49, 0x44, 0x0c, 0x41, 0xd0, 0x03, 0x03, 0x14, 0x0b,
-        0x5f, 0x53, 0x54, 0x41, 0x00, 0xa4, 0x50, 0x32, 0x45, 0x4e, 0x08, 0x5f,
-        0x43, 0x52, 0x53, 0x11, 0x18, 0x0a, 0x15, 0x47, 0x01, 0x60, 0x00, 0x60,
-        0x00, 0x01, 0x01, 0x47, 0x01, 0x64, 0x00, 0x64, 0x00, 0x01, 0x01, 0x22,
-        0x02, 0x00, 0x79, 0x00, 0x5b, 0x82, 0x29, 0x50, 0x53, 0x32, 0x4d, 0x08,
-        0x5f, 0x48, 0x49, 0x44, 0x0c, 0x41, 0xd0, 0x0f, 0x13, 0x14, 0x0b, 0x5f,
-        0x53, 0x54, 0x41, 0x00, 0xa4, 0x50, 0x32, 0x45, 0x4e, 0x08, 0x5f, 0x43,
-        0x52, 0x53, 0x11, 0x08, 0x0a, 0x05, 0x22, 0x00, 0x10, 0x79, 0x00,
-    },
-};
-#define SSDT_CPU0_ENABLED_OFFSET 30U
-#define SSDT_CPU1_ENABLED_OFFSET 37U
-#define SSDT_CPU2_ENABLED_OFFSET 44U
-#define SSDT_CPU3_ENABLED_OFFSET 51U
-#define SSDT_PS2_ENABLED_OFFSET 171U
+static ACPI_SSDT               mSsdt;
+
+static void acpi_ssdt_cpu_names(UINTN Index, UINT8 Processor[4],
+                                UINT8 Enabled[4])
+{
+    if (Index < 10U) {
+        Processor[0] = 'C';
+        Processor[1] = 'P';
+        Processor[2] = 'U';
+        Processor[3] = (UINT8)('0' + Index);
+        Enabled[0] = 'C';
+        Enabled[1] = (UINT8)('0' + Index);
+        Enabled[2] = 'E';
+        Enabled[3] = 'N';
+        return;
+    }
+
+    Processor[0] = 'C';
+    Processor[1] = 'P';
+    Processor[2] = (UINT8)('0' + Index / 10U);
+    Processor[3] = (UINT8)('0' + Index % 10U);
+    Enabled[0] = 'E';
+    Enabled[1] = (UINT8)('0' + Index / 100U);
+    Enabled[2] = (UINT8)('0' + (Index / 10U) % 10U);
+    Enabled[3] = (UINT8)('0' + Index % 10U);
+}
+
+static UINT8 *acpi_ssdt_named_byte(ACPI_SSDT *Ssdt,
+                                   const UINT8 Name[4])
+{
+    UINTN i;
+
+    for (i = 0; i + 6U < sizeof(Ssdt->Aml); i++) {
+        if (Ssdt->Aml[i] == 0x08U &&
+            Ssdt->Aml[i + 1U] == Name[0] &&
+            Ssdt->Aml[i + 2U] == Name[1] &&
+            Ssdt->Aml[i + 3U] == Name[2] &&
+            Ssdt->Aml[i + 4U] == Name[3] &&
+            Ssdt->Aml[i + 5U] == 0x0aU) {
+            return &Ssdt->Aml[i + 6U];
+        }
+    }
+    return NULL;
+}
+
+static BOOLEAN acpi_ssdt_set_named_byte(ACPI_SSDT *Ssdt,
+                                        const UINT8 Name[4], UINT8 Value)
+{
+    UINT8 *value = acpi_ssdt_named_byte(Ssdt, Name);
+
+    if (value == NULL) {
+        return 0;
+    }
+    *value = Value;
+    return 1;
+}
+
 static ACPI_MCFG               mMcfg;
 static ACPI_MADT               mMadt;
 static ACPI_SRAT               mSrat;
@@ -2408,6 +2430,12 @@ static UINT64 fw_system_table_pointer_base(UINT64 LowRamEnd,
     if (base < BootStackTop &&
         base + FW_SYSTEM_TABLE_POINTER_SIZE > BootStackBase) {
         base = (BootStackBase - FW_SYSTEM_TABLE_POINTER_SIZE) &
+               ~(FW_SYSTEM_TABLE_POINTER_ALIGN - 1U);
+    }
+    if (base < IA64_FW_CPU_ASSIST_END &&
+        base + FW_SYSTEM_TABLE_POINTER_SIZE > IA64_FW_CPU_ASSIST_BASE) {
+        base = (IA64_FW_CPU_ASSIST_BASE -
+                FW_SYSTEM_TABLE_POINTER_SIZE) &
                ~(FW_SYSTEM_TABLE_POINTER_ALIGN - 1U);
     }
     if (base <= FW_EARLY_LOADER_WINDOW_END ||
@@ -12739,14 +12767,6 @@ static BOOLEAN efi_memory_map_covers_range(EFI_MEMORY_TYPE Type,
     return 0;
 }
 
-static BOOLEAN efi_memory_map_has_range_or_empty(EFI_MEMORY_TYPE Type,
-                                                 UINT64 Start, UINT64 End,
-                                                 UINT64 Attribute)
-{
-    return Start >= End ||
-           efi_memory_map_has_descriptor(Type, Start, End, Attribute);
-}
-
 static UINT64 efi_boot_stack_conventional_start(void)
 {
     return fw_compat_enabled(IA64_FW_COMPAT_EARLY_LOADER_MEMORY) ?
@@ -12755,53 +12775,23 @@ static UINT64 efi_boot_stack_conventional_start(void)
 
 static BOOLEAN efi_memory_map_has_boot_stack_layout(void)
 {
-    UINT64 conventional_start = efi_boot_stack_conventional_start();
     UINT64 pointer_start = mSystemTablePointerBase;
     UINT64 pointer_end = pointer_start + FW_SYSTEM_TABLE_POINTER_SIZE;
 
-    if (!efi_memory_map_has_descriptor(EfiRuntimeServicesData,
-                                       mBootStackBase,
-                                       mBootStackTop,
-                                       EFI_MEMORY_WB | EFI_MEMORY_RUNTIME)) {
+    if (!efi_memory_map_covers_range(
+            EfiRuntimeServicesData,
+            IA64_FW_CPU_ASSIST_BASE, IA64_FW_CPU_ASSIST_END,
+            EFI_MEMORY_WB | EFI_MEMORY_RUNTIME) ||
+        !efi_memory_map_covers_range(
+            EfiRuntimeServicesData, mBootStackBase, mBootStackTop,
+            EFI_MEMORY_WB | EFI_MEMORY_RUNTIME)) {
         return 0;
     }
 
-    if (pointer_start == 0) {
-        return efi_memory_map_has_descriptor(
-                   EfiConventionalMemory, conventional_start,
-                   mBootStackBase, EFI_MEMORY_WB) &&
-               efi_memory_map_has_range_or_empty(
-                   EfiConventionalMemory, mBootStackTop,
-                   mGuestLowRamEnd, EFI_MEMORY_WB);
-    }
-
-    if (!efi_memory_map_has_descriptor(EfiReservedMemoryType,
-                                       pointer_start, pointer_end,
-                                       EFI_MEMORY_WB)) {
-        return 0;
-    }
-
-    if (pointer_start < mBootStackBase) {
-        return efi_memory_map_has_range_or_empty(
-                   EfiConventionalMemory, conventional_start,
-                   pointer_start, EFI_MEMORY_WB) &&
-               efi_memory_map_has_range_or_empty(
-                   EfiConventionalMemory, pointer_end,
-                   mBootStackBase, EFI_MEMORY_WB) &&
-               efi_memory_map_has_range_or_empty(
-                   EfiConventionalMemory, mBootStackTop,
-                   mGuestLowRamEnd, EFI_MEMORY_WB);
-    }
-
-    return efi_memory_map_has_descriptor(
-               EfiConventionalMemory, conventional_start,
-               mBootStackBase, EFI_MEMORY_WB) &&
-           efi_memory_map_has_range_or_empty(
-               EfiConventionalMemory, mBootStackTop,
-               pointer_start, EFI_MEMORY_WB) &&
-           efi_memory_map_has_range_or_empty(
-               EfiConventionalMemory, pointer_end,
-               mGuestLowRamEnd, EFI_MEMORY_WB);
+    return pointer_start == 0 ||
+           efi_memory_map_has_descriptor(EfiReservedMemoryType,
+                                         pointer_start, pointer_end,
+                                         EFI_MEMORY_WB);
 }
 
 static BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
@@ -13498,41 +13488,55 @@ out:
     return ok;
 }
 
-static void efi_add_boot_stack_low_ram(UINTN *Index, UINT64 LowRamEnd)
+static void efi_add_conventional_with_system_pointer(UINTN *Index,
+                                                     UINT64 Start,
+                                                     UINT64 End)
 {
-    UINT64 conventional_start = efi_boot_stack_conventional_start();
     UINT64 pointer_start = mSystemTablePointerBase;
     UINT64 pointer_end = pointer_start + FW_SYSTEM_TABLE_POINTER_SIZE;
 
-    if (pointer_start != 0 && pointer_start < mBootStackBase) {
+    if (pointer_start >= Start && pointer_end <= End) {
         efi_add_memory_range(Index, EfiConventionalMemory,
-                             conventional_start, pointer_start,
+                             Start, pointer_start,
                              EFI_MEMORY_WB);
         efi_add_memory_range(Index, EfiReservedMemoryType,
                              pointer_start, pointer_end, EFI_MEMORY_WB);
         efi_add_memory_range(Index, EfiConventionalMemory,
-                             pointer_end, mBootStackBase, EFI_MEMORY_WB);
+                             pointer_end, End, EFI_MEMORY_WB);
     } else {
         efi_add_memory_range(Index, EfiConventionalMemory,
-                             conventional_start, mBootStackBase,
-                             EFI_MEMORY_WB);
+                             Start, End, EFI_MEMORY_WB);
     }
+}
 
-    efi_add_memory_range(Index, EfiRuntimeServicesData,
-                         mBootStackBase, mBootStackTop,
-                         efi_memory_attribute(EfiRuntimeServicesData,
-                                              EFI_MEMORY_WB));
+static void efi_add_boot_stack_low_ram(UINTN *Index)
+{
+    UINT64 conventional_start = efi_boot_stack_conventional_start();
 
-    if (pointer_start >= mBootStackTop) {
-        efi_add_memory_range(Index, EfiConventionalMemory,
-                             mBootStackTop, pointer_start, EFI_MEMORY_WB);
-        efi_add_memory_range(Index, EfiReservedMemoryType,
-                             pointer_start, pointer_end, EFI_MEMORY_WB);
-        efi_add_memory_range(Index, EfiConventionalMemory,
-                             pointer_end, LowRamEnd, EFI_MEMORY_WB);
+    efi_add_conventional_with_system_pointer(
+        Index, conventional_start, IA64_FW_CPU_ASSIST_BASE);
+
+    if (mBootStackBase <= IA64_FW_CPU_ASSIST_END) {
+        /*
+         * Minimum and near-minimum RAM configurations place the dynamic
+         * stack pool partially inside the fixed CPU-assist reservation.
+         * Publish the union as one runtime-data range.
+         */
+        efi_add_memory_range(
+            Index, EfiRuntimeServicesData,
+            IA64_FW_CPU_ASSIST_BASE, mBootStackTop,
+            efi_memory_attribute(EfiRuntimeServicesData, EFI_MEMORY_WB));
     } else {
-        efi_add_memory_range(Index, EfiConventionalMemory,
-                             mBootStackTop, LowRamEnd, EFI_MEMORY_WB);
+        efi_add_memory_range(
+            Index, EfiRuntimeServicesData,
+            IA64_FW_CPU_ASSIST_BASE, IA64_FW_CPU_ASSIST_END,
+            efi_memory_attribute(EfiRuntimeServicesData, EFI_MEMORY_WB));
+        efi_add_conventional_with_system_pointer(
+            Index, IA64_FW_CPU_ASSIST_END, mBootStackBase);
+        efi_add_memory_range(
+            Index, EfiRuntimeServicesData,
+            mBootStackBase, mBootStackTop,
+            efi_memory_attribute(EfiRuntimeServicesData, EFI_MEMORY_WB));
     }
 }
 
@@ -13650,7 +13654,7 @@ static void efi_init_memory_map(void)
      * keep the entire stack pool as runtime data.  AllocatePool() uses only
      * the surrounding conventional-memory ranges.
      */
-    efi_add_boot_stack_low_ram(&index, low_ram_end);
+    efi_add_boot_stack_low_ram(&index);
 
     /* Keep the high firmware scratch page unavailable to loaders. */
     efi_add_memory_range(&index, EfiReservedMemoryType, 0x80000000,
@@ -13987,7 +13991,7 @@ static BOOLEAN smbios_build_type3(void)
 
 static BOOLEAN smbios_build_type4_socket(UINTN SocketIndex)
 {
-    CHAR8 SocketName[] = "CPU 0";
+    CHAR8 SocketName[] = "CPU 00";
     const CHAR8 * const Strings[] = {
         SocketName,
         "QEMU",
@@ -14002,10 +14006,11 @@ static BOOLEAN smbios_build_type4_socket(UINTN SocketIndex)
     UINTN enabled_threads = 0;
     UINTN enabled_cores;
 
-    if (SocketIndex >= mSocketCount || SocketIndex >= 10) {
+    if (SocketIndex >= mSocketCount || SocketIndex >= 100) {
         return 0;
     }
-    SocketName[4] = (CHAR8)('0' + SocketIndex);
+    SocketName[4] = (CHAR8)('0' + SocketIndex / 10U);
+    SocketName[5] = (CHAR8)('0' + SocketIndex % 10U);
     if (first_processor < mProcessorCount) {
         enabled_threads = mProcessorCount - first_processor;
         if (enabled_threads > threads_per_socket) {
@@ -14739,7 +14744,10 @@ static BOOLEAN sal_build_system_table(void)
 
 static void efi_init_platform_tables(void)
 {
+    static const UINT8 ps2_enabled_name[4] = { 'P', '2', 'E', 'N' };
     UINTN i;
+    UINT8 processor_name[4];
+    UINT8 enabled_name[4];
     BOOLEAN vga_primary = fw_handoff_vga_console_primary();
     UINT32 vga_id = (UINT32)pci_config_read_value(0, 0, 5, 0, 0, 4);
     UINT64 debug_port_base = fw_handoff_debug_port_base();
@@ -14842,15 +14850,15 @@ static void efi_init_platform_tables(void)
     mFadt.XGpe1Block = acpi_system_memory_gas(0, 0);
     mFadt.Hdr.Checksum = table_checksum8(&mFadt, sizeof(mFadt));
 
-    mSsdt.Aml[SSDT_CPU0_ENABLED_OFFSET] = 0x0fU;
-    mSsdt.Aml[SSDT_CPU1_ENABLED_OFFSET] =
-        mProcessorCount > 1 ? 0x0fU : 0;
-    mSsdt.Aml[SSDT_CPU2_ENABLED_OFFSET] =
-        mProcessorCount > 2 ? 0x0fU : 0;
-    mSsdt.Aml[SSDT_CPU3_ENABLED_OFFSET] =
-        mProcessorCount > 3 ? 0x0fU : 0;
-    mSsdt.Aml[SSDT_PS2_ENABLED_OFFSET] =
-        fw_handoff_i8042_enabled() ? 0x0fU : 0;
+    fw_copy_mem(mSsdt.Aml, mSsdtAmlTemplate, sizeof(mSsdt.Aml));
+    for (i = 0; i < FW_MAX_CPUS; i++) {
+        acpi_ssdt_cpu_names(i, processor_name, enabled_name);
+        (void)acpi_ssdt_set_named_byte(
+            &mSsdt, enabled_name, i < mProcessorCount ? 0x0fU : 0);
+    }
+    (void)acpi_ssdt_set_named_byte(
+        &mSsdt, ps2_enabled_name,
+        fw_handoff_i8042_enabled() ? 0x0fU : 0);
     init_sdt_header(&mSsdt.Hdr, EFI_SIGNATURE_32('S', 'S', 'D', 'T'),
                     sizeof(mSsdt));
     mSsdt.Hdr.Revision = 2;
@@ -15357,10 +15365,6 @@ static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
 {
     static const UINT8 pci0_name[] = { 'P', 'C', 'I', '0' };
     static const UINT8 s5_name[] = { '_', 'S', '5', '_' };
-    static const UINT8 cpu0_name[] = { 'C', 'P', 'U', '0' };
-    static const UINT8 cpu1_name[] = { 'C', 'P', 'U', '1' };
-    static const UINT8 cpu2_name[] = { 'C', 'P', 'U', '2' };
-    static const UINT8 cpu3_name[] = { 'C', 'P', 'U', '3' };
     static const UINT8 uar0_name[] = { 'U', 'A', 'R', '0' };
     static const UINT8 hid_pci_root[] = "PNP0A03";
     static const UINT8 cid_pci[] = "PNP0A03";
@@ -15378,6 +15382,9 @@ static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         0x00, 0x00, 0x02, 0x00,
     };
     UINT32 vga_id = (UINT32)pci_config_read_value(0, 0, 5, 0, 0, 4);
+    UINT8 processor_name[4];
+    UINT8 enabled_name[4];
+    UINT8 *enabled_value;
     UINT8 hcdp_uart_flags =
         HCDP_UART_FLAG_EDGE_SENSITIVE | HCDP_UART_FLAG_INTERRUPT |
         (fw_handoff_vga_console_primary() ?
@@ -15464,29 +15471,25 @@ static BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         return 0;
     }
 
-    if (!acpi_ssdt_has_bytes(cpu0_name, sizeof(cpu0_name)) ||
-        !acpi_ssdt_has_bytes(cpu1_name, sizeof(cpu1_name)) ||
-        !acpi_ssdt_has_bytes(cpu2_name, sizeof(cpu2_name)) ||
-        !acpi_ssdt_has_bytes(cpu3_name, sizeof(cpu3_name)) ||
-        !acpi_ssdt_has_bytes(uar0_name, sizeof(uar0_name)) ||
+    if (!acpi_ssdt_has_bytes(uar0_name, sizeof(uar0_name)) ||
         !acpi_ssdt_has_bytes(hid_uart, sizeof(hid_uart) - 1) ||
         !acpi_ssdt_has_bytes(ps2_enabled, sizeof(ps2_enabled)) ||
         !acpi_ssdt_has_bytes(sta_name, sizeof(sta_name)) ||
-        mAcpiSsdt->Aml[SSDT_CPU0_ENABLED_OFFSET - 1U] != 0x0aU ||
-        mAcpiSsdt->Aml[SSDT_CPU1_ENABLED_OFFSET - 1U] != 0x0aU ||
-        mAcpiSsdt->Aml[SSDT_CPU2_ENABLED_OFFSET - 1U] != 0x0aU ||
-        mAcpiSsdt->Aml[SSDT_CPU3_ENABLED_OFFSET - 1U] != 0x0aU ||
-        mAcpiSsdt->Aml[SSDT_PS2_ENABLED_OFFSET - 1U] != 0x0aU ||
-        mAcpiSsdt->Aml[SSDT_CPU0_ENABLED_OFFSET] != 0x0fU ||
-        mAcpiSsdt->Aml[SSDT_CPU1_ENABLED_OFFSET] !=
-            (mProcessorCount > 1 ? 0x0fU : 0) ||
-        mAcpiSsdt->Aml[SSDT_CPU2_ENABLED_OFFSET] !=
-            (mProcessorCount > 2 ? 0x0fU : 0) ||
-        mAcpiSsdt->Aml[SSDT_CPU3_ENABLED_OFFSET] !=
-            (mProcessorCount > 3 ? 0x0fU : 0) ||
-        mAcpiSsdt->Aml[SSDT_PS2_ENABLED_OFFSET] !=
-            (fw_handoff_i8042_enabled() ? 0x0fU : 0) ||
         !acpi_ssdt_has_bytes(crs_name, sizeof(crs_name))) {
+        return 0;
+    }
+    for (i = 0; i < FW_MAX_CPUS; i++) {
+        acpi_ssdt_cpu_names(i, processor_name, enabled_name);
+        enabled_value = acpi_ssdt_named_byte(mAcpiSsdt, enabled_name);
+        if (!acpi_ssdt_has_bytes(processor_name, sizeof(processor_name)) ||
+            enabled_value == NULL ||
+            *enabled_value != (i < mProcessorCount ? 0x0fU : 0)) {
+            return 0;
+        }
+    }
+    enabled_value = acpi_ssdt_named_byte(mAcpiSsdt, ps2_enabled);
+    if (enabled_value == NULL ||
+        *enabled_value != (fw_handoff_i8042_enabled() ? 0x0fU : 0)) {
         return 0;
     }
 

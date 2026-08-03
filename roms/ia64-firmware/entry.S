@@ -8,7 +8,7 @@
 
     .section .text._start, "ax"
     .equ FW_BOOTSTRAP_STACK_TOP, 0x08000000
-    .equ FW_AP_BOOTSTRAP_STACK_TOP, 0x00100000
+    .equ FW_AP_BOOTSTRAP_STACK_TOP, 0x08000000
     .global _start
     .type _start, @function
     .proc _start
@@ -72,10 +72,10 @@ pal_proc_entry:
      * reverse sequence restores the caller's backing store before its
      * translation state and RSC are reinstated.
      *
-     * The machine supports at most four processors.  Each gets a 32 KiB
-     * reserved low-memory slot below 0x80000: 16 KiB for the RSE backing
-     * store followed by a 16 KiB memory stack.  Interrupts and interruption
-     * collection stay disabled while the private physical context is active.
+     * Each of the machine's 64 processors gets a 32 KiB slot in the fixed
+     * CPU-assist area: 16 KiB for the RSE backing store followed by a 16 KiB
+     * memory stack.  Interrupts and interruption collection stay disabled
+     * while the private physical context is active.
      */
     .equ SAL_PSR_I,                         (1 << 14)
     .equ SAL_PSR_IC,                        (1 << 13)
@@ -84,7 +84,7 @@ pal_proc_entry:
     .equ SAL_PSR_IT,                        (1 << 36)
     .equ SAL_PSR_TRANSLATION_MASK,          (SAL_PSR_DT | SAL_PSR_RT | SAL_PSR_IT)
     .equ SAL_PSR_PHYSICAL_ENTRY_CLEAR,      (SAL_PSR_I | SAL_PSR_IC | SAL_PSR_TRANSLATION_MASK)
-    .equ SAL_RUNTIME_AREA_TOP,              0x80000
+    .equ SAL_RUNTIME_AREA_TOP,              0x07200000
     .equ SAL_RUNTIME_AREA_SHIFT,            15
     .equ SAL_RUNTIME_BACKING_SIZE,          0x4000
     .equ SAL_RUNTIME_STACK_FRAME_SIZE,      0x100
@@ -477,7 +477,7 @@ start_secondary:
     ;;
     extr.u r14 = r14, 24, 8
     ;;
-    shl r15 = r14, 16
+    shl r15 = r14, 17
     movl r12 = (FW_AP_BOOTSTRAP_STACK_TOP - 16)
     ;;
     sub r12 = r12, r15

@@ -7,10 +7,10 @@
 #define TEST_SAL_SUCCESS            0ULL
 #define TEST_LOCAL_SAPIC_BASE       0x00000000fee00000ULL
 #define TEST_AP_WAKE_VECTOR         0xffU
-#define TEST_PROCESSOR_COUNT        4U
+#define TEST_MAX_PROCESSOR_COUNT    64U
 #define TEST_RENDEZVOUS_ROUNDS      2U
 #define TEST_HANDLER_CHECKSUM_BYTES 16U
-#define TEST_WAIT_TICKS             1000000000ULL
+#define TEST_WAIT_TICKS             5000000000ULL
 #define TEST_RETURN_TICKS           10000000ULL
 #define TEST_RENDEZVOUS_PAGE        0x0000000006000000ULL
 
@@ -25,6 +25,8 @@ typedef TEST_SAL_RETURN (*TEST_SAL_PROC)(UINT64, UINT64, UINT64, UINT64,
                                         UINT64, UINT64, UINT64, UINT64);
 
 static UINT8 sal_guid[16] = IA64_GUID_SAL;
+static UINT8 acpi20_guid[16] = IA64_GUID_ACPI20;
+static UINTN mProcessorCount;
 
 static volatile UINT64 *rendezvous_counts(VOID)
 {
@@ -66,6 +68,71 @@ static UINT64 get_u64(const VOID *Address)
     const UINT8 *p = (const UINT8 *)Address;
 
     return (UINT64)get_u32(p) | ((UINT64)get_u32(p + 4) << 32);
+}
+
+static UINTN acpi_processor_count(EFI_SYSTEM_TABLE *SystemTable)
+{
+    UINT8 *rsdp = (UINT8 *)find_config_table(SystemTable, acpi20_guid);
+    UINT8 *xsdt;
+    UINT32 xsdt_length;
+    UINTN entries;
+    UINTN i;
+
+    if (rsdp == NULL || !ia64_bytes_equal(rsdp, "RSD PTR ", 8) ||
+        get_u32(rsdp + 20U) < 36U) {
+        return 0;
+    }
+    xsdt = (UINT8 *)(UINTN)get_u64(rsdp + 24U);
+    if (xsdt == NULL || get_u32(xsdt) != 0x54445358U) {
+        return 0;
+    }
+    xsdt_length = get_u32(xsdt + 4U);
+    if (xsdt_length < 36U || (xsdt_length - 36U) % 8U != 0) {
+        return 0;
+    }
+    entries = (xsdt_length - 36U) / 8U;
+    for (i = 0; i < entries; i++) {
+        UINT8 *madt = (UINT8 *)(UINTN)get_u64(xsdt + 36U + i * 8U);
+        UINT32 madt_length;
+        UINTN offset;
+        UINT64 present = 0;
+        UINTN enabled = 0;
+
+        if (madt == NULL || get_u32(madt) != 0x43495041U) {
+            continue;
+        }
+        madt_length = get_u32(madt + 4U);
+        if (madt_length < 44U) {
+            return 0;
+        }
+        for (offset = 44U; offset + 2U <= madt_length; ) {
+            UINTN length = madt[offset + 1U];
+
+            if (length < 2U || length > madt_length - offset) {
+                return 0;
+            }
+            if (madt[offset] == 7U && length >= 12U &&
+                (get_u32(madt + offset + 8U) & 1U) != 0) {
+                UINTN id = madt[offset + 3U];
+
+                if (id >= TEST_MAX_PROCESSOR_COUNT ||
+                    (present & (1ULL << id)) != 0) {
+                    return 0;
+                }
+                present |= 1ULL << id;
+                enabled++;
+            }
+            offset += length;
+        }
+        if (offset != madt_length || enabled == 0 ||
+            enabled > TEST_MAX_PROCESSOR_COUNT ||
+            present != (enabled == TEST_MAX_PROCESSOR_COUNT ?
+                        ~(UINT64)0 : (1ULL << enabled) - 1U)) {
+            return 0;
+        }
+        return enabled;
+    }
+    return 0;
 }
 
 static UINTN sal_descriptor_size(UINT8 Type)
@@ -150,7 +217,12 @@ static VOID ap_rendezvous(VOID)
     UINTN id = (read_lid() >> 24) & 0xffU;
     UINT64 masked = 1ULL << 16;
 
-    if (id > 0 && id < TEST_PROCESSOR_COUNT) {
+    /*
+     * The SAL registration deliberately supplies GP=0, so the rendezvous
+     * handler must remain position-independent and avoid firmware-app
+     * globals.  Only processors that actually receive an IPI execute it.
+     */
+    if (id > 0 && id < TEST_MAX_PROCESSOR_COUNT) {
         volatile UINT64 *counts =
             (volatile UINT64 *)(UINTN)TEST_RENDEZVOUS_PAGE;
 
@@ -184,7 +256,7 @@ static BOOLEAN wait_for_round(UINT64 Round)
         BOOLEAN complete = 1;
 
         __asm__ volatile ("mf;;" : : : "memory");
-        for (id = 1; id < TEST_PROCESSOR_COUNT; id++) {
+        for (id = 1; id < mProcessorCount; id++) {
             if (counts[id] < Round) {
                 complete = 0;
             }
@@ -231,6 +303,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
     BOOLEAN second_round = 0;
 
     (void)ImageHandle;
+    mProcessorCount = acpi_processor_count(SystemTable);
     page_status = SystemTable->BootServices->AllocatePages(
         AllocateAddress, EfiLoaderData, 1, &rendezvous_page);
     if (page_status == EFI_SUCCESS) {
@@ -243,7 +316,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
     descriptors = find_sal_descriptors(sal, &sal_descriptor[0],
                                        &sal_descriptor[1], &wake_vector);
     ia64_test_check(&context, "sal-ap-wake",
-                    page_status == EFI_SUCCESS && descriptors &&
+                    mProcessorCount != 0 &&
+                        page_status == EFI_SUCCESS && descriptors &&
                         wake_vector == TEST_AP_WAKE_VECTOR,
                     EFI_DEVICE_ERROR, "missing-rendezvous-descriptor");
 
@@ -255,13 +329,13 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
                           TEST_HANDLER_CHECKSUM_BYTES, 0, 0, 0);
     }
     if (result.Status == TEST_SAL_SUCCESS) {
-        for (id = 1; id < TEST_PROCESSOR_COUNT; id++) {
+        for (id = 1; id < mProcessorCount; id++) {
             send_wake_ipi(id, wake_vector);
         }
         first_round = wait_for_round(1);
         if (first_round) {
             wait_for_rendezvous_return();
-            for (id = 1; id < TEST_PROCESSOR_COUNT; id++) {
+            for (id = 1; id < mProcessorCount; id++) {
                 send_wake_ipi(id, wake_vector);
             }
             second_round = wait_for_round(TEST_RENDEZVOUS_ROUNDS);
