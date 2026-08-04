@@ -437,10 +437,40 @@ The firmware supports persistent EFI boot entries, including short-form hard-dri
 
 ### Screenshots
 
-<p align="center">
-  <img width="49%" alt="Microsoft Windows Server 2008 for Itanium-Based Systems is running on qemu-system-ia64, showing winver and task manager." src="https://github.com/user-attachments/assets/cbf318e6-1202-4a11-95ed-a62f105a8f64" />
-  <img width="49%" alt="Microsoft Windows Server 2008 for Itanium-Based Systems is running on qemu-system-ia64, executing systeminfo." src="https://github.com/user-attachments/assets/ce893757-a4b0-4003-8ba8-87fad23d739c" />
-</p>
+<table align="center">
+  <tr>
+    <td width="50%">
+      <img
+        width="100%"
+        alt="Microsoft Windows Server 2008 R2"
+        src="https://github.com/user-attachments/assets/ff3563ff-7fb2-4245-bc42-6ec86ed51ce6"
+      />
+    </td>
+    <td width="50%">
+      <img
+        width="100%"
+        alt="Microsoft Windows Codename Longhorn build 4051"
+        src="https://github.com/user-attachments/assets/bab22228-ff1e-421b-bc79-c314850c2cab"
+      />
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img
+        width="100%"
+        alt="Microsoft Windows Whistler Advanced Server 64-bit Edition"
+        src="https://github.com/user-attachments/assets/3c2bf20f-51eb-4ef3-b560-7dc75a01f6ac"
+      />
+    </td>
+    <td width="50%">
+      <img
+        width="100%"
+        alt="Debian 7.11.0 with GUI"
+        src="https://github.com/user-attachments/assets/d1e5cdaa-64d6-4f91-9215-277423e268a2"
+      />
+    </td>
+  </tr>
+</table>
 
 ## Tests
 
