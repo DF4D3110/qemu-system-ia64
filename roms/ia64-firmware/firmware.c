@@ -51,8 +51,9 @@
 #define SAL_PTA_DISABLED_VALUE       (15ULL << 2)
 #define SAL_RR_VALUE(Rid) \
     (((UINT64)(Rid) << 8) | ((UINT64)SAL_RR_PREFERRED_PAGE_SHIFT << 2))
-#define SAL_BACKING_STORE_BASE       IA64_FW_EARLY_RSE_BASE
-#define SAL_BACKING_STORE_END        IA64_FW_EARLY_RSE_END
+#define SAL_BACKING_STORE_OFFSET     IA64_FW_EARLY_RSE_OFFSET
+#define SAL_BACKING_STORE_SIZE \
+    (FW_MAX_CPUS * IA64_FW_EARLY_RSE_SIZE)
 #define SAL_SYSTEM_ADDRESS_LIMIT     (1ULL << 44)
 
 #define SAL_DESCRIPTOR_ENTRYPOINT    0U
@@ -141,7 +142,7 @@
 #define FW_LOW_IMAGE_END  0x0000000005000000ULL
 #define FW_EARLY_LOADER_WINDOW_END FW_LOW_IMAGE_END
 #define FW_AUTO_ALLOCATION_BASE 0x0000000008000000ULL
-#define FW_BOOTSTRAP_STACK_TOP IA64_FW_BOOTSTRAP_STACK_TOP
+#define FW_MIN_LOW_RAM_END   IA64_FW_MIN_LOW_RAM_SIZE
 #define FW_BOOT_STACK_SIZE     IA64_FW_BOOT_STACK_SIZE
 #define IA64_EFI_MEMORY_ALIGN 0x0000000000002000ULL
 #define IA64_EFI_MIN_STACK_BYTES   0x0000000000020000ULL
@@ -1693,31 +1694,37 @@ FW_STATIC_ASSERT(FW_AP_STACK_SIZE >=
                  IA64_EFI_MIN_STACK_BYTES,
                  efi_ap_stack_capacity);
 FW_STATIC_ASSERT(FW_MAX_CPUS == 64U, firmware_processor_capacity);
-FW_STATIC_ASSERT(IA64_FW_CPU_ASSIST_BASE ==
-                 IA64_FW_SAL_RUNTIME_BASE,
+FW_STATIC_ASSERT(IA64_FW_SAL_RUNTIME_OFFSET == 0,
                  cpu_assist_sal_base);
-FW_STATIC_ASSERT(IA64_FW_SAL_RUNTIME_END <=
-                 IA64_FW_DEBUG_CONTEXT_BASE,
+FW_STATIC_ASSERT(IA64_FW_SAL_RUNTIME_END_OFFSET <=
+                 IA64_FW_DEBUG_CONTEXT_OFFSET,
                  sal_debug_context_disjoint);
 FW_STATIC_ASSERT(IA64_FW_DEBUG_CONTEXT_SIZE <=
                  IA64_FW_DEBUG_CONTEXT_STRIDE,
                  debug_context_stride_capacity);
-FW_STATIC_ASSERT(IA64_FW_DEBUG_CONTEXT_END <=
-                 IA64_FW_DEBUG_STACK_BASE,
+FW_STATIC_ASSERT(IA64_FW_DEBUG_CONTEXT_END_OFFSET <=
+                 IA64_FW_DEBUG_STACK_OFFSET,
                  debug_context_stack_disjoint);
-FW_STATIC_ASSERT(IA64_FW_DEBUG_STACK_END <= IA64_FW_EARLY_RSE_BASE,
+FW_STATIC_ASSERT(IA64_FW_DEBUG_STACK_END_OFFSET <=
+                 IA64_FW_EARLY_RSE_OFFSET,
                  debug_stack_rse_disjoint);
-FW_STATIC_ASSERT(IA64_FW_EARLY_RSE_END <= IA64_FW_FIXED_STACK_BASE,
+FW_STATIC_ASSERT(IA64_FW_EARLY_RSE_END_OFFSET <=
+                 IA64_FW_FIXED_STACK_BASE_OFFSET,
                  early_rse_boot_stack_disjoint);
-FW_STATIC_ASSERT(IA64_FW_FIXED_STACK_BASE >= IA64_FW_CPU_ASSIST_BASE &&
-                 IA64_FW_BOOTSTRAP_STACK_TOP <= IA64_FW_CPU_ASSIST_END,
+FW_STATIC_ASSERT(IA64_FW_FIXED_STACK_BASE_OFFSET <=
+                 IA64_FW_BOOTSTRAP_STACK_TOP_OFFSET &&
+                 IA64_FW_BOOTSTRAP_STACK_TOP_OFFSET <=
+                 IA64_FW_CPU_ASSIST_SIZE,
                  fixed_stack_inside_cpu_assist);
-FW_STATIC_ASSERT((SAL_BACKING_STORE_BASE & 7U) == 0,
+FW_STATIC_ASSERT(IA64_FW_CPU_ASSIST_SIZE + IA64_FW_EFI_STACK_SIZE ==
+                 IA64_FW_BOOT_STACK_SIZE,
+                 cpu_assist_and_efi_stack_capacity);
+FW_STATIC_ASSERT((SAL_BACKING_STORE_OFFSET & 7U) == 0,
                  sal_backing_store_alignment);
-FW_STATIC_ASSERT(SAL_BACKING_STORE_END > SAL_BACKING_STORE_BASE,
+FW_STATIC_ASSERT(SAL_BACKING_STORE_SIZE > 0,
                  sal_backing_store_order);
-FW_STATIC_ASSERT((SAL_BACKING_STORE_END - SAL_BACKING_STORE_BASE) /
-                 FW_MAX_CPUS >= IA64_EFI_MIN_BACKING_BYTES,
+FW_STATIC_ASSERT(SAL_BACKING_STORE_SIZE / FW_MAX_CPUS >=
+                 IA64_EFI_MIN_BACKING_BYTES,
                  sal_ap_backing_store_capacity);
 FW_STATIC_ASSERT(sizeof(ACPI_FADT) == 244, acpi_fadt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_XSDT) == 100, acpi_xsdt_size);
@@ -2235,14 +2242,9 @@ UINT64 fw_boot_stack_top(void)
 {
     UINT64 low_ram_end;
 
-    /*
-     * The entry trampoline initially uses the minimum-machine stack.  Only
-     * move it after validating the machine handoff, since this function is
-     * itself called on that bootstrap stack.
-     */
     if (!fw_handoff_low_ram_end(&low_ram_end) ||
-        low_ram_end < FW_BOOTSTRAP_STACK_TOP) {
-        return FW_BOOTSTRAP_STACK_TOP;
+        low_ram_end < FW_MIN_LOW_RAM_END) {
+        return FW_MIN_LOW_RAM_END;
     }
     return low_ram_end & ~(IA64_EFI_MEMORY_ALIGN - 1U);
 }
@@ -2406,7 +2408,7 @@ BOOLEAN fw_handoff_nvram_persistent(void)
 UINT64 fw_ap_stack_top(UINT64 ProcessorId)
 {
     if (ProcessorId == 0 || ProcessorId >= FW_MAX_CPUS) {
-        return FW_BOOTSTRAP_STACK_TOP;
+        return fw_boot_stack_top();
     }
     return fw_boot_stack_top() - ProcessorId * FW_AP_STACK_SIZE;
 }
@@ -2426,12 +2428,6 @@ static UINT64 fw_system_table_pointer_base(UINT64 LowRamEnd,
     if (base < BootStackTop &&
         base + FW_SYSTEM_TABLE_POINTER_SIZE > BootStackBase) {
         base = (BootStackBase - FW_SYSTEM_TABLE_POINTER_SIZE) &
-               ~(FW_SYSTEM_TABLE_POINTER_ALIGN - 1U);
-    }
-    if (base < IA64_FW_CPU_ASSIST_END &&
-        base + FW_SYSTEM_TABLE_POINTER_SIZE > IA64_FW_CPU_ASSIST_BASE) {
-        base = (IA64_FW_CPU_ASSIST_BASE -
-                FW_SYSTEM_TABLE_POINTER_SIZE) &
                ~(FW_SYSTEM_TABLE_POINTER_ALIGN - 1U);
     }
     if (base <= FW_EARLY_LOADER_WINDOW_END ||
@@ -4688,6 +4684,10 @@ static void prepare_sal_loader_handoff(void)
 static BOOLEAN __attribute__((noinline)) sal_loader_handoff_selftest(void)
 {
     UINT64 expected_psr = sal_loader_psr_low() | IA64_PSR_BN;
+    UINT64 backing_store_base =
+        mBootStackBase + SAL_BACKING_STORE_OFFSET;
+    UINT64 backing_store_end =
+        backing_store_base + SAL_BACKING_STORE_SIZE;
     UINTN i;
 
     fw_set_mem(&mSalHandoffProbe, sizeof(mSalHandoffProbe), 0xff);
@@ -4704,10 +4704,10 @@ static BOOLEAN __attribute__((noinline)) sal_loader_handoff_selftest(void)
         mSalHandoffProbe.Sp < mBootStackBase +
                               IA64_EFI_MIN_STACK_BYTES ||
         mSalHandoffProbe.Sp >= mBootStackTop ||
-        mSalHandoffProbe.Bsp < SAL_BACKING_STORE_BASE ||
+        mSalHandoffProbe.Bsp < backing_store_base ||
         mSalHandoffProbe.Bsp + IA64_EFI_MIN_BACKING_BYTES >
-            SAL_BACKING_STORE_END ||
-        mSalHandoffProbe.BspStore < SAL_BACKING_STORE_BASE ||
+            backing_store_end ||
+        mSalHandoffProbe.BspStore < backing_store_base ||
         mSalHandoffProbe.BspStore > mSalHandoffProbe.Bsp) {
         return 0;
     }
@@ -12686,10 +12686,6 @@ static BOOLEAN efi_memory_map_has_boot_stack_layout(void)
     UINT64 pointer_end = pointer_start + FW_SYSTEM_TABLE_POINTER_SIZE;
 
     if (!efi_memory_map_covers_range(
-            EfiRuntimeServicesData,
-            IA64_FW_CPU_ASSIST_BASE, IA64_FW_CPU_ASSIST_END,
-            EFI_MEMORY_WB | EFI_MEMORY_RUNTIME) ||
-        !efi_memory_map_covers_range(
             EfiRuntimeServicesData, mBootStackBase, mBootStackTop,
             EFI_MEMORY_WB | EFI_MEMORY_RUNTIME)) {
         return 0;
@@ -13421,30 +13417,11 @@ static void efi_add_boot_stack_low_ram(UINTN *Index)
     UINT64 conventional_start = efi_boot_stack_conventional_start();
 
     efi_add_conventional_with_system_pointer(
-        Index, conventional_start, IA64_FW_CPU_ASSIST_BASE);
-
-    if (mBootStackBase <= IA64_FW_CPU_ASSIST_END) {
-        /*
-         * Minimum and near-minimum RAM configurations place the dynamic
-         * stack pool partially inside the fixed CPU-assist reservation.
-         * Publish the union as one runtime-data range.
-         */
-        efi_add_memory_range(
-            Index, EfiRuntimeServicesData,
-            IA64_FW_CPU_ASSIST_BASE, mBootStackTop,
-            efi_memory_attribute(EfiRuntimeServicesData, EFI_MEMORY_WB));
-    } else {
-        efi_add_memory_range(
-            Index, EfiRuntimeServicesData,
-            IA64_FW_CPU_ASSIST_BASE, IA64_FW_CPU_ASSIST_END,
-            efi_memory_attribute(EfiRuntimeServicesData, EFI_MEMORY_WB));
-        efi_add_conventional_with_system_pointer(
-            Index, IA64_FW_CPU_ASSIST_END, mBootStackBase);
-        efi_add_memory_range(
-            Index, EfiRuntimeServicesData,
-            mBootStackBase, mBootStackTop,
-            efi_memory_attribute(EfiRuntimeServicesData, EFI_MEMORY_WB));
-    }
+        Index, conventional_start, mBootStackBase);
+    efi_add_memory_range(
+        Index, EfiRuntimeServicesData,
+        mBootStackBase, mBootStackTop,
+        efi_memory_attribute(EfiRuntimeServicesData, EFI_MEMORY_WB));
 }
 
 static void efi_init_memory_map(void)
@@ -13557,9 +13534,9 @@ static void efi_init_memory_map(void)
             EFI_MEMORY_WB);
     }
     /*
-     * SAL reuses each processor's RAM-top stack after ExitBootServices(), so
-     * keep the entire stack pool as runtime data.  AllocatePool() uses only
-     * the surrounding conventional-memory ranges.
+     * CPU-private assist storage and stacks remain in use after boot
+     * services finish, so publish their shared RAM-top reservation as
+     * runtime data.
      */
     efi_add_boot_stack_low_ram(&index);
 
@@ -34806,6 +34783,8 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
      */
     mBootStackTop = stack_top;
     mBootStackBase = stack_top - FW_BOOT_STACK_SIZE;
+    sal_runtime_area_top =
+        mBootStackBase + IA64_FW_SAL_RUNTIME_END_OFFSET;
     fw_init_compatibility_profile();
     mProcessorCount = fw_handoff_processor_count();
     fw_handoff_processor_topology(mProcessorCount);

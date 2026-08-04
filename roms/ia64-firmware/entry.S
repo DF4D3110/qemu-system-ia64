@@ -7,8 +7,6 @@
  */
 
     .section .text._start, "ax"
-    .equ FW_BOOTSTRAP_STACK_TOP, 0x08000000
-    .equ FW_AP_BOOTSTRAP_STACK_TOP, 0x08000000
     .global _start
     .type _start, @function
     .proc _start
@@ -20,14 +18,6 @@ _start:
     cmp.ne p6, p7 = r14, r0
     ;;
 (p6) br.cond.sptk.few start_secondary
-    ;;
-
-    /*
-     * Use the minimum-memory stack until the machine handoff has been
-     * validated.  start_after_pal moves to the selected RAM-top stack before
-     * entering the C firmware.
-     */
-    movl r12 = (FW_BOOTSTRAP_STACK_TOP - 16)
     ;;
 
     br.cond.sptk.few start_after_pal
@@ -72,10 +62,10 @@ pal_proc_entry:
      * reverse sequence restores the caller's backing store before its
      * translation state and RSC are reinstated.
      *
-     * Each of the machine's 64 processors gets a 32 KiB slot in the fixed
-     * CPU-assist area: 16 KiB for the RSE backing store followed by a 16 KiB
-     * memory stack.  Interrupts and interruption collection stay disabled
-     * while the private physical context is active.
+     * Each processor gets a 32 KiB slot in the CPU-assist area: 16 KiB for
+     * the RSE backing store followed by a 16 KiB memory stack.  Interrupts
+     * and interruption collection stay disabled while the private physical
+     * context is active.
      */
     .equ SAL_PSR_I,                         (1 << 14)
     .equ SAL_PSR_IC,                        (1 << 13)
@@ -84,7 +74,6 @@ pal_proc_entry:
     .equ SAL_PSR_IT,                        (1 << 36)
     .equ SAL_PSR_TRANSLATION_MASK,          (SAL_PSR_DT | SAL_PSR_RT | SAL_PSR_IT)
     .equ SAL_PSR_PHYSICAL_ENTRY_CLEAR,      (SAL_PSR_I | SAL_PSR_IC | SAL_PSR_TRANSLATION_MASK)
-    .equ SAL_RUNTIME_AREA_TOP,              0x07200000
     .equ SAL_RUNTIME_AREA_SHIFT,            15
     .equ SAL_RUNTIME_BACKING_SIZE,          0x4000
     .equ SAL_RUNTIME_STACK_FRAME_SIZE,      0x100
@@ -98,6 +87,13 @@ sal_proc_gp_anchor:
     .quad 0
     .quad 0
     .size sal_proc_gp_anchor, . - sal_proc_gp_anchor
+
+    .align 8
+    .global sal_runtime_area_top
+    .type sal_runtime_area_top, @object
+sal_runtime_area_top:
+    .quad 0
+    .size sal_runtime_area_top, . - sal_runtime_area_top
 
     .align 16
     .global sal_proc_entry
@@ -177,7 +173,11 @@ sal_proc_mode_valid:
     extr.u r31 = r31, 24, 8
     ;;
     shl r31 = r31, SAL_RUNTIME_AREA_SHIFT
-    movl r2 = SAL_RUNTIME_AREA_TOP
+    movl r2 = sal_runtime_area_top
+    ;;
+    add r2 = r2, r26
+    ;;
+    ld8 r2 = [r2]
     ;;
     sub r2 = r2, r31
     movl r3 = (SAL_RUNTIME_BACKING_SIZE * 2)
@@ -476,11 +476,6 @@ start_secondary:
     mov r14 = cr.lid
     ;;
     extr.u r14 = r14, 24, 8
-    ;;
-    shl r15 = r14, 17
-    movl r12 = (FW_AP_BOOTSTRAP_STACK_TOP - 16)
-    ;;
-    sub r12 = r12, r15
     ;;
     alloc r2 = ar.pfs, 0, 3, 1, 0
     ;;

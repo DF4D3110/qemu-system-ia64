@@ -262,11 +262,21 @@ static unsigned ia64_fw_debug_cpu_index(CPUIA64State *env)
     return MIN(index, IA64_VPC_MAX_CPUS - 1);
 }
 
+static hwaddr ia64_fw_cpu_assist_base(const CPUIA64State *env)
+{
+    const IA64CPU *cpu =
+        ia64_cpu_from_cpu_state(env_cpu((CPUIA64State *)env));
+    uint64_t low_ram_size = cpu->boot_info_valid ?
+        cpu->boot_info.low_ram_size : IA64_FW_MIN_LOW_RAM_SIZE;
+
+    return low_ram_size - IA64_FW_BOOT_STACK_SIZE;
+}
+
 static hwaddr ia64_fw_debug_context_pa(CPUIA64State *env)
 {
     unsigned index = ia64_fw_debug_cpu_index(env);
 
-    return IA64_FW_DEBUG_CONTEXT_BASE +
+    return ia64_fw_cpu_assist_base(env) + IA64_FW_DEBUG_CONTEXT_OFFSET +
            (hwaddr)index * IA64_FW_DEBUG_CONTEXT_STRIDE;
 }
 
@@ -295,7 +305,8 @@ uint32_t ia64_firmware_debug_enter(CPUIA64State *env, uint64_t address)
     env->gr[IA64_FW_DEBUG_GR_EXCEPTION] = exception_type;
     env->gr[IA64_FW_DEBUG_GR_CONTEXT] = ia64_fw_debug_context_pa(env);
     env->gr[IA64_FW_DEBUG_GR_CPU] = ia64_fw_debug_cpu_index(env);
-    env->gr[IA64_GR_STACK_POINTER] = IA64_FW_DEBUG_STACK_BASE +
+    env->gr[IA64_GR_STACK_POINTER] = ia64_fw_cpu_assist_base(env) +
+                  IA64_FW_DEBUG_STACK_OFFSET +
                   (ia64_fw_debug_cpu_index(env) + 1) *
                   IA64_FW_DEBUG_STACK_SIZE - 16;
     env->nat[0] &= ~((1ULL << IA64_GR_STACK_POINTER) |

@@ -74,7 +74,7 @@
      (IA64_LOCAL_SAPIC_PA - \
       (IA64_PCI_MMIO_BASE + IA64_PCI_MMIO_SIZE)) + \
      (IA64_PCI_IO_BASE - IA64_HIGH_RAM_AFTER_FIRMWARE_BASE))
-#define IA64_FW_LOW_RAM_MIN IA64_FW_BOOTSTRAP_STACK_TOP
+#define IA64_FW_LOW_RAM_MIN IA64_FW_MIN_LOW_RAM_SIZE
 #define IA64_IVT_BASE   0x10000ULL
 #define IA64_IVT_SIZE   0x8000ULL
 #define IA64_AHCI_IDP_IO_BASE   0x0000c100U
@@ -2449,14 +2449,16 @@ static IA64BootInfo ia64_vpc_boot_info(unsigned int cpu_index,
                                        uint64_t global_pointer,
                                        uint64_t low_ram_size)
 {
+    uint64_t cpu_assist_base = low_ram_size - IA64_FW_BOOT_STACK_SIZE;
     IA64BootInfo info = {
         .firmware_base = IA64_FW_BASE,
         .firmware_entry = entry,
         .global_pointer = global_pointer,
         .iva = IA64_IVT_BASE,
-        .bsp = IA64_FW_EARLY_RSE_BASE +
+        .bsp = cpu_assist_base + IA64_FW_EARLY_RSE_OFFSET +
             cpu_index * IA64_FW_EARLY_RSE_SIZE,
-        .stack_pointer = IA64_FW_BOOTSTRAP_STACK_TOP - 16 -
+        .stack_pointer = cpu_assist_base +
+            IA64_FW_BOOTSTRAP_STACK_TOP_OFFSET - 16 -
             cpu_index * IA64_FW_CPU_STACK_SIZE,
         .rsc = IA64_RSC_MODE,
         .low_ram_size = low_ram_size,
