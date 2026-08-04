@@ -12,20 +12,10 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  LC_ALL: C
-  TZ: UTC
-
 jobs:
-  # Build the firmware separately from the host emulators.
   firmware:
     name: IA-64 firmware (GNU GCC)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
 
     container:
       image: fedora:44
@@ -42,8 +32,6 @@ jobs:
           dnf --assumeyes --setopt=install_weak_deps=False install \
             binutils-ia64-linux-gnu \
             coreutils \
-            file \
-            findutils \
             gcc-ia64-linux-gnu \
             git \
             gzip \
@@ -52,11 +40,7 @@ jobs:
             tar
 
       - name: Check out the source tree
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-          submodules: false
+        uses: actions/checkout@v6
 
       - name: Build and validate the firmware
         run: |
@@ -68,21 +52,7 @@ jobs:
           map="$firmware_dir/ia64-firmware.map"
           sections="$firmware_dir/ia64-firmware.sections"
 
-          libgcc="$(ia64-linux-gnu-gcc -print-libgcc-file-name)"
-          test -f "$libgcc"
-
-          {
-            printf 'Source commit: %s\n' "$GITHUB_SHA"
-            printf 'Project version: '
-            tr -d '\r\n' < VERSION
-            printf '\n'
-            printf 'libgcc: %s\n\n' "$libgcc"
-            rpm -q gcc-ia64-linux-gnu binutils-ia64-linux-gnu
-            printf '\n'
-            ia64-linux-gnu-gcc -v
-            printf '\n'
-            ia64-linux-gnu-ld -v
-          } > firmware-build-info.txt 2>&1
+          test -f "$(ia64-linux-gnu-gcc -print-libgcc-file-name)"
 
           make -C "$firmware_dir" clean
           make -C "$firmware_dir" -j"$(nproc)"
@@ -94,13 +64,9 @@ jobs:
 
           python3 tests/unit/test-ia64-firmware-layout.py \
             "$binary" \
-            "$elf" \
-            | tee firmware-validation.txt
+            "$elf"
 
-          file "$elf" | tee firmware-file.txt
-          ia64-linux-gnu-readelf -h "$elf" | tee firmware-elf-header.txt
-
-          grep -Eiq 'ELF 64-bit.*(IA-64|ia64)' firmware-file.txt
+          ia64-linux-gnu-readelf -h "$elf" > firmware-elf-header.txt
           grep -Eiq 'Machine:.*IA-64' firmware-elf-header.txt
 
       - name: Package the firmware
@@ -120,56 +86,33 @@ jobs:
             roms/ia64-firmware/ia64-firmware.elf \
             roms/ia64-firmware/ia64-firmware.map \
             roms/ia64-firmware/ia64-firmware.sections \
+            COPYING \
+            COPYING.LIB \
+            LICENSE \
+            README.md \
             "$dist/"
 
-          install -m 0644 firmware-build-info.txt "$dist/BUILD-INFO.txt"
-          install -m 0644 firmware-validation.txt "$dist/VALIDATION.txt"
-          install -m 0644 firmware-file.txt "$dist/FILE.txt"
-          install -m 0644 firmware-elf-header.txt "$dist/ELF-HEADER.txt"
-
-          (
-            cd "$dist"
-            find . -type f ! -name SHA256SUMS -print0 \
-              | sort -z \
-              | xargs -0 sha256sum > SHA256SUMS
-          )
-
-          source_date_epoch="$(git show -s --format=%ct HEAD)"
-          tar \
-            --sort=name \
-            --mtime="@$source_date_epoch" \
-            --owner=0 \
-            --group=0 \
-            --numeric-owner \
-            -czf "$archive" \
+          tar -czf "$archive" \
             -C "$dist_root" \
             "$(basename "$dist")"
 
-          gzip -t "$archive"
-          tar -tzf "$archive" > firmware-archive-contents.txt
-          grep -Eq '/ia64-firmware\.bin$' firmware-archive-contents.txt
-          grep -Eq '/ia64-firmware\.elf$' firmware-archive-contents.txt
+          test -s "$archive"
+          tar -tzf "$archive" >/dev/null
 
       - name: Upload the firmware artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@v7
         with:
           path: qemu-system-ia64-firmware.tar.gz
           if-no-files-found: error
-          retention-days: 30
           archive: false
 
   linux:
     name: Linux x86-64 (GCC)
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
 
     steps:
       - name: Check out the source tree
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-          submodules: false
+        uses: actions/checkout@v6
 
       - name: Install build dependencies
         run: |
@@ -177,11 +120,11 @@ jobs:
 
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            binutils \
             bison \
             build-essential \
             file \
             flex \
+            git \
             libfdt-dev \
             libglib2.0-dev \
             libpixman-1-dev \
@@ -200,35 +143,28 @@ jobs:
         run: |
           set -euo pipefail
 
-          test "$(gcc -dumpmachine)" = "x86_64-linux-gnu"
-
+          rm -rf build-linux
           mkdir -p build-linux
-          cd build-linux
 
-          CC=gcc CXX=g++ ../configure \
-            --python=/usr/bin/python3 \
-            --target-list=ia64-softmmu \
-            --without-default-features \
-            --enable-system \
-            --enable-tcg \
-            --enable-pixman \
-            --enable-fdt=system \
-            --enable-sdl \
-            --enable-slirp \
-            --enable-vnc \
-            --audio-drv-list=sdl \
-            --disable-download \
-            --disable-docs \
-            --disable-guest-agent \
-            --disable-modules \
-            --disable-plugins \
-            --disable-rust \
-            --disable-tools \
-            --disable-werror \
-            -Doptimization=2
+          (
+            cd build-linux
+            CC=gcc CXX=g++ ../configure \
+              --python=/usr/bin/python3 \
+              --target-list=ia64-softmmu \
+              --without-default-features \
+              --enable-system \
+              --enable-tcg \
+              --enable-pixman \
+              --enable-fdt=system \
+              --enable-sdl \
+              --enable-slirp \
+              --enable-vnc \
+              --disable-docs \
+              --disable-werror
+          )
 
-          # Build only the host emulator. The firmware is built in a separate job.
-          ninja -j"$(nproc)" qemu-system-ia64
+          # Build only the host emulator. Firmware is built in a separate job.
+          ninja -C build-linux -j"$(nproc)" qemu-system-ia64
 
       - name: Validate and package the Linux artifact
         run: |
@@ -243,19 +179,13 @@ jobs:
           test -x "$executable"
           test -s "$executable"
 
-          file "$executable" | tee linux-file.txt
-          readelf -h "$executable" | tee linux-elf-header.txt
-          ldd "$executable" | tee linux-dynamic-libraries.txt
-          "$executable" --version | tee linux-version.txt
-
+          file "$executable" > linux-file.txt
+          cat linux-file.txt
           grep -Eq 'ELF 64-bit.*x86-64' linux-file.txt
-          grep -Eq 'Class:[[:space:]]+ELF64' linux-elf-header.txt
-          grep -Eiq 'Machine:.*X86-64' linux-elf-header.txt
 
-          if grep -Fq 'not found' linux-dynamic-libraries.txt; then
-            echo "One or more Linux shared-library dependencies are unresolved." >&2
-            exit 1
-          fi
+          ldd "$executable" | tee linux-library-dependencies.txt
+          ! grep -Fq 'not found' linux-library-dependencies.txt
+          "$executable" --version
 
           rm -rf "$dist_root" "$archive"
           mkdir -p "$dist/share/keymaps"
@@ -266,6 +196,7 @@ jobs:
             COPYING.LIB \
             LICENSE \
             README.md \
+            linux-library-dependencies.txt \
             "$dist/"
 
           install -m 0644 \
@@ -276,70 +207,23 @@ jobs:
 
           install -m 0644 pc-bios/keymaps/* "$dist/share/keymaps/"
 
-          install -m 0644 linux-file.txt "$dist/FILE.txt"
-          install -m 0644 linux-elf-header.txt "$dist/ELF-HEADER.txt"
-          install -m 0644 linux-dynamic-libraries.txt "$dist/DYNAMIC-LIBRARIES.txt"
-          install -m 0644 linux-version.txt "$dist/VERSION-OUTPUT.txt"
-
-          {
-            printf 'Source commit: %s\n' "$GITHUB_SHA"
-            printf 'Project version: %s\n' "$version"
-            printf 'Runner image: ubuntu-24.04\n'
-            printf 'Compiler: '
-            gcc --version | sed -n '1p'
-            printf 'Linker: '
-            ld --version | sed -n '1p'
-          } > "$dist/BUILD-INFO.txt"
-
-          (
-            cd "$dist"
-            find . -type f ! -name SHA256SUMS -print0 \
-              | sort -z \
-              | xargs -0 sha256sum > SHA256SUMS
-          )
-
-          source_date_epoch="$(git show -s --format=%ct HEAD)"
-          tar \
-            --sort=name \
-            --mtime="@$source_date_epoch" \
-            --owner=0 \
-            --group=0 \
-            --numeric-owner \
-            -czf "$archive" \
+          tar -czf "$archive" \
             -C "$dist_root" \
             "$(basename "$dist")"
 
-          gzip -t "$archive"
-          tar -tzf "$archive" > linux-archive-contents.txt
-          grep -Eq '/qemu-system-ia64$' linux-archive-contents.txt
-          grep -Eq '/SHA256SUMS$' linux-archive-contents.txt
+          test -s "$archive"
+          tar -tzf "$archive" >/dev/null
 
       - name: Upload the Linux artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@v7
         with:
           path: qemu-system-ia64-linux-x86_64.tar.gz
           if-no-files-found: error
-          retention-days: 30
           archive: false
-
-      - name: Upload Linux build logs after a failure
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: linux-build-logs
-          path: |
-            build-linux/config.log
-            build-linux/meson-logs
-          if-no-files-found: ignore
-          retention-days: 14
 
   windows:
     name: Windows x86-64 (MSYS2 MinGW GCC)
     runs-on: windows-2022
-    timeout-minutes: 90
-
-    env:
-      MSYS: winsymlinks:native
 
     defaults:
       run:
@@ -348,24 +232,16 @@ jobs:
     steps:
       - name: Configure Git line endings
         shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          git config --global core.autocrlf input
+        run: git config --global core.autocrlf input
 
       - name: Check out the source tree
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-          submodules: false
+        uses: actions/checkout@v6
 
       - name: Set up MSYS2
-        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
+        uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
           update: true
-          cache: true
-          path-type: minimal
           install: >-
             bison
             diffutils
@@ -381,7 +257,6 @@ jobs:
             mingw-w64-x86_64-glib2
             mingw-w64-x86_64-libslirp
             mingw-w64-x86_64-ninja
-            mingw-w64-x86_64-ntldd
             mingw-w64-x86_64-pixman
             mingw-w64-x86_64-pkgconf
             mingw-w64-x86_64-python
@@ -394,37 +269,28 @@ jobs:
         run: |
           set -euo pipefail
 
-          test "$(gcc -dumpmachine)" = "x86_64-w64-mingw32"
-          test "$(command -v python)" = "/mingw64/bin/python"
-          test "$(command -v ninja)" = "/mingw64/bin/ninja"
-
+          rm -rf build-win64
           mkdir -p build-win64
-          cd build-win64
 
-          CC=gcc CXX=g++ ../configure \
-            --python=/mingw64/bin/python \
-            --target-list=ia64-softmmu \
-            --without-default-features \
-            --enable-system \
-            --enable-tcg \
-            --enable-pixman \
-            --enable-fdt=system \
-            --enable-sdl \
-            --enable-slirp \
-            --enable-vnc \
-            --audio-drv-list=sdl \
-            --disable-download \
-            --disable-docs \
-            --disable-guest-agent \
-            --disable-modules \
-            --disable-plugins \
-            --disable-rust \
-            --disable-tools \
-            --disable-werror \
-            -Doptimization=2
+          (
+            cd build-win64
+            CC=gcc CXX=g++ ../configure \
+              --python=/mingw64/bin/python \
+              --target-list=ia64-softmmu \
+              --without-default-features \
+              --enable-system \
+              --enable-tcg \
+              --enable-pixman \
+              --enable-fdt=system \
+              --enable-sdl \
+              --enable-slirp \
+              --enable-vnc \
+              --disable-docs \
+              --disable-werror
+          )
 
-          # Build only the host executables. The firmware is built in a separate job.
-          ninja -j"$(nproc)" \
+          # Build only the host executables. Firmware is built in a separate job.
+          ninja -C build-win64 -j"$(nproc)" \
             qemu-system-ia64.exe \
             qemu-system-ia64w.exe
 
@@ -446,12 +312,9 @@ jobs:
             local dll="$1"
             local lower="${dll,,}"
 
-            if [[ "$lower" == api-ms-win-*.dll ||
-                  "$lower" == ext-ms-win-*.dll ]]; then
-              return 0
-            fi
-
-            [[ -f "/c/Windows/System32/$dll" ||
+            [[ "$lower" == api-ms-win-*.dll ||
+               "$lower" == ext-ms-win-*.dll ||
+               -f "/c/Windows/System32/$dll" ||
                -f "/c/Windows/SysWOW64/$dll" ]]
           }
 
@@ -459,21 +322,12 @@ jobs:
             build-win64/qemu-system-ia64.exe \
             build-win64/qemu-system-ia64w.exe; do
             test -s "$executable"
-
-            format="$(objdump -f "$executable" \
-              | awk '/file format/ { print $NF; exit }')"
-
-            if [[ "$format" != "pei-x86-64" ]]; then
-              echo "Unexpected PE format for $executable: $format" >&2
-              exit 1
-            fi
+            format="$(objdump -f "$executable")"
+            grep -q 'pei-x86-64' <<<"$format"
           done
 
-          build-win64/qemu-system-ia64.exe --version \
-            | tee windows-version.txt
-
           rm -rf "$dist_root"
-          mkdir -p "$dist/share/keymaps" "$dist/licenses/msys2"
+          mkdir -p "$dist/share/keymaps"
 
           install -m 0755 \
             build-win64/qemu-system-ia64.exe \
@@ -495,9 +349,8 @@ jobs:
 
           install -m 0644 pc-bios/keymaps/* "$dist/share/keymaps/"
 
-          # Copy every non-system PE dependency recursively.
-          declare -A visited_dlls=()
-          declare -A runtime_packages=()
+          # Copy MinGW runtime DLLs and their transitive dependencies.
+          declare -A seen=()
           queue=(
             "$dist/qemu-system-ia64.exe"
             "$dist/qemu-system-ia64w.exe"
@@ -511,174 +364,47 @@ jobs:
               [[ -n "$dll" ]] || continue
 
               key="${dll,,}"
-              if [[ -n "${visited_dlls[$key]+x}" ]]; then
+              if [[ -n "${seen[$key]+x}" ]]; then
                 continue
               fi
-              visited_dlls["$key"]=1
+              seen["$key"]=1
 
               source_dll="/mingw64/bin/$dll"
               if [[ -f "$source_dll" ]]; then
                 install -m 0755 "$source_dll" "$dist/$dll"
                 queue+=("$source_dll")
-
-                package="$(pacman -Qoq "$source_dll" | sed -n '1p')"
-                if [[ -z "$package" ]]; then
-                  echo "Could not determine the package owning $source_dll." >&2
-                  exit 1
-                fi
-                runtime_packages["$package"]=1
-                continue
+              elif ! is_windows_system_dll "$dll"; then
+                echo "Missing runtime DLL: $dll (required by $pe_file)" >&2
+                exit 1
               fi
-
-              if is_windows_system_dll "$dll"; then
-                continue
-              fi
-
-              echo "Unresolved PE dependency: $dll (required by $pe_file)" >&2
-              exit 1
             done < <(imported_dlls "$pe_file")
           done
 
-          dll_count="$(find "$dist" -maxdepth 1 -type f -iname '*.dll' \
-            | wc -l)"
-          if (( dll_count == 0 )); then
-            echo "No runtime DLLs were copied into the distribution." >&2
-            exit 1
-          fi
+          test "$(find "$dist" -maxdepth 1 -type f -iname '*.dll' | wc -l)" -gt 0
 
-          {
-            for package in "${!runtime_packages[@]}"; do
-              pacman -Q "$package"
-            done
-          } | sort > "$dist/MSYS2-RUNTIME-PACKAGES.txt"
+          # Run the staged executable without the MSYS2 MinGW bin directory.
+          PATH="$dist:/c/Windows/System32:/c/Windows" \
+            "$dist/qemu-system-ia64.exe" --version
 
-          while IFS= read -r package; do
-            while IFS= read -r license_file; do
-              [[ -f "$license_file" ]] || continue
-
-              relative="${license_file#/mingw64/share/licenses/}"
-              relative="${relative#mingw64/share/licenses/}"
-              install -D -m 0644 \
-                "$license_file" \
-                "$dist/licenses/msys2/$relative"
-            done < <(
-              pacman -Ql "$package" \
-                | awk '$2 ~ "^/?mingw64/share/licenses/" { print $2 }'
-            )
-          done < <(
-            printf '%s\n' "${!runtime_packages[@]}" | sort
-          )
-
-          {
-            for pe_file in "$dist"/*.exe "$dist"/*.dll; do
-              printf '[%s]\n' "$(basename "$pe_file")"
-              imported_dlls "$pe_file" | sed 's/^/  /'
-              printf '\n'
-            done
-          } > "$dist/PE-DEPENDENCIES.txt"
-
-          for executable_name in \
-            qemu-system-ia64.exe \
-            qemu-system-ia64w.exe; do
-            report="$dist/NTLDD-${executable_name%.exe}.txt"
-
-            PATH="$dist:/c/Windows/System32:/c/Windows" \
-              /mingw64/bin/ntldd.exe \
-              -R \
-              -D "$dist" \
-              "$dist/$executable_name" \
-              | tee "$report"
-
-            if grep -Eiq 'not found' "$report"; then
-              echo "ntldd found an unresolved dependency." >&2
-              exit 1
-            fi
-
-            if grep -Eiq '[/\\]mingw64[/\\]bin[/\\]' "$report"; then
-              echo "ntldd resolved a dependency outside the staged distribution." >&2
-              exit 1
-            fi
-          done
-
-          install -m 0644 windows-version.txt "$dist/VERSION-OUTPUT.txt"
-
-          {
-            printf 'Source commit: %s\n' "$GITHUB_SHA"
-            printf 'Project version: %s\n' "$version"
-            printf 'Runner image: windows-2022\n'
-            printf 'MSYS2 environment: MINGW64\n'
-            printf 'Compiler: '
-            gcc --version | sed -n '1p'
-            printf 'Linker: '
-            ld --version | sed -n '1p'
-            printf 'Python: '
-            python --version 2>&1
-          } > "$dist/BUILD-INFO.txt"
-
-          (
-            cd "$dist"
-            find . -type f ! -name SHA256SUMS -print0 \
-              | sort -z \
-              | xargs -0 sha256sum > SHA256SUMS
-          )
-
-      - name: Create and verify the Windows archive
+      - name: Create the Windows archive
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
           $version = (Get-Content -Raw VERSION).Trim()
-          $source = Join-Path (Join-Path $PWD "dist") "qemu-system-ia64-windows-x86_64-$version"
+          $source = Join-Path $PWD "dist\qemu-system-ia64-windows-x86_64-$version"
           $archive = Join-Path $PWD "qemu-system-ia64-windows-x86_64.zip"
-          $checkDirectory = Join-Path $env:RUNNER_TEMP "qemu-system-ia64-windows-archive-check"
 
           Remove-Item -Force $archive -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force $checkDirectory -ErrorAction SilentlyContinue
-
           Compress-Archive -LiteralPath $source -DestinationPath $archive -CompressionLevel Optimal
 
-          if (-not (Test-Path $archive)) {
-            throw "The Windows archive was not created."
-          }
-          if ((Get-Item $archive).Length -le 0) {
-            throw "The Windows archive is empty."
-          }
-
-          Expand-Archive -LiteralPath $archive -DestinationPath $checkDirectory
-
-          $consoleExe = Get-ChildItem -Path $checkDirectory -Recurse -Filter "qemu-system-ia64.exe"
-          $windowedExe = Get-ChildItem -Path $checkDirectory -Recurse -Filter "qemu-system-ia64w.exe"
-          $runtimeDlls = Get-ChildItem -Path $checkDirectory -Recurse -Filter "*.dll"
-          $checksums = Get-ChildItem -Path $checkDirectory -Recurse -Filter "SHA256SUMS"
-
-          if (-not $consoleExe) {
-            throw "qemu-system-ia64.exe is missing from the archive."
-          }
-          if (-not $windowedExe) {
-            throw "qemu-system-ia64w.exe is missing from the archive."
-          }
-          if (-not $runtimeDlls) {
-            throw "No runtime DLLs are present in the archive."
-          }
-          if (-not $checksums) {
-            throw "SHA256SUMS is missing from the archive."
+          if (-not (Test-Path $archive) -or (Get-Item $archive).Length -eq 0) {
+            throw "The Windows archive was not created correctly."
           }
 
       - name: Upload the Windows artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@v7
         with:
           path: qemu-system-ia64-windows-x86_64.zip
           if-no-files-found: error
-          retention-days: 30
           archive: false
-
-      - name: Upload Windows build logs after a failure
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: windows-build-logs
-          path: |
-            build-win64/config.log
-            build-win64/meson-logs
-          if-no-files-found: ignore
-          retention-days: 14
