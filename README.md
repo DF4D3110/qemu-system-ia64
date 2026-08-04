@@ -22,6 +22,11 @@ Experimental QEMU full-system emulation target for IA-64/Itanium guests.
 
 ## Quick start
 
+### Available releases ![Build status](https://github.com/syunnPC/qemu-system-ia64/actions/workflows/build.yml/badge.svg)
+
+The latest binaries (for Windows/Linux x86-64 and firmware) are available on 
+[Actions](https://github.com/syunnPC/qemu-system-ia64/actions/workflows/build.yml) and [Releases](https://github.com/syunnPC/qemu-system-ia64/releases).
+
 ### Prerequisite
 
 The firmware build requires an IA-64 ELF cross toolchain named `ia64-linux-gnu-*` in `PATH`.
