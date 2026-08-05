@@ -679,6 +679,8 @@ typedef struct IA64TlbEntry {
 typedef struct IA64MicroTlbEntry {
     uint64_t va;
     uint64_t page_mask;
+    /* PTE used by the last successful lookup, including the code-page ED. */
+    uint64_t pte;
     uint32_t rid;
     uint32_t generation;
     uint32_t slot_generation;
@@ -1168,7 +1170,9 @@ static inline uint32_t ia64_region_rid(const CPUIA64State *env, uint64_t va)
 static inline bool ia64_current_code_tlb_ed(CPUIA64State *env)
 {
     IA64CodeTlbEdCache *cached = &env->mmu.code_tlb_ed;
+    IA64MicroTlbEntry remembered;
     const IA64TlbEntry *entry;
+    uint16_t micro_index;
     uint32_t generation;
     uint32_t rid;
 
@@ -1178,6 +1182,7 @@ static inline bool ia64_current_code_tlb_ed(CPUIA64State *env)
 
     rid = ia64_region_rid(env, env->ip);
     generation = env->mmu.tlb_inst_generation;
+    micro_index = ia64_micro_tlb_index(env->ip, rid);
     if (cached->valid && cached->generation == generation &&
         cached->rid == rid &&
         ((env->ip ^ cached->va) & cached->page_mask) == 0 &&
@@ -1186,9 +1191,24 @@ static inline bool ia64_current_code_tlb_ed(CPUIA64State *env)
         return cached->ed;
     }
 
+    remembered = env->mmu.tlb_inst_micro[micro_index];
     entry = ia64_tlb_find_cached(env, env->ip, rid, true);
     if (!entry) {
         cached->valid = false;
+        /*
+         * A translated block may still be executing after the modeled ITLB
+         * slot which supplied its instruction bytes has been replaced.  ED
+         * qualifies data faults using that fetched instruction translation,
+         * not whichever entry happens to occupy the slot later.  Retain the
+         * PTE in the micro-TLB so this in-flight instruction keeps its ED.
+         * A current matching entry always wins above, and a global TLB
+         * generation change makes the remembered fetch unusable.
+         */
+        if (remembered.valid && remembered.generation == generation &&
+            remembered.rid == rid &&
+            ((env->ip ^ remembered.va) & remembered.page_mask) == 0) {
+            return (remembered.pte & IA64_PTE_ED) != 0;
+        }
         return false;
     }
 

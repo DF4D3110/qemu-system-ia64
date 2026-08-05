@@ -168,6 +168,7 @@ const IA64TlbEntry *ia64_tlb_find_slow(CPUIA64State *env, uint64_t va,
             micro[ia64_micro_tlb_index(va, rid)] = (IA64MicroTlbEntry) {
                 .va = entry->va,
                 .page_mask = entry->page_mask,
+                .pte = entry->pte,
                 .rid = entry->rid,
                 .generation = generation,
                 .slot_generation = entry->micro_generation,
