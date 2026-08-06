@@ -59,6 +59,5 @@ FW_LSI_SCRIPT_RESULT fw_scsi_reset_target(UINT8 target,
                                            UINT64 timeout_100ns);
 
 BOOLEAN fw_legacy_io_protocols_install(VOID);
-BOOLEAN fw_legacy_io_protocols_selftest(VOID);
 
 #endif /* IA64_FIRMWARE_FW_LEGACY_IO_H */

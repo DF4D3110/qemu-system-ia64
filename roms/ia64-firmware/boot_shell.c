@@ -1411,51 +1411,6 @@ static BOOLEAN fw_shell_dispatch(UINTN ArgumentCount, CHAR8 **Arguments)
     return !fw_boot_services_exited();
 }
 
-BOOLEAN fw_boot_shell_selftest(VOID)
-{
-    EFI_INPUT_KEY key;
-    EFI_TIME time;
-    UINT16 number;
-    CHAR8 line[] = "run \"fs0:\\EFI APP\\tool.efi\" arg";
-    CHAR8 *arguments[4];
-    UINTN count;
-
-    fw_set_mem(&key, sizeof(key), 0);
-    key.ScanCode = EFI_SCAN_F2;
-    if (!fw_shell_hotkey(&key)) {
-        return 0;
-    }
-    key.ScanCode = EFI_SCAN_F12;
-    if (!fw_shell_hotkey(&key)) {
-        return 0;
-    }
-    key.ScanCode = EFI_SCAN_DELETE;
-    if (!fw_shell_hotkey(&key) ||
-        conin_ansi_numeric_scan(3U) != EFI_SCAN_DELETE ||
-        conin_ansi_numeric_scan(12U) != EFI_SCAN_F2 ||
-        conin_ansi_numeric_scan(24U) != EFI_SCAN_F12 ||
-        conin_ansi_numeric_scan(16U) != 0 ||
-        !fw_shell_parse_boot_number("Boot00aF", &number) ||
-        number != 0x00afU) {
-        return 0;
-    }
-    fw_set_mem(&time, sizeof(time), 0);
-    time.Hour = 1;
-    time.Minute = 2;
-    time.Second = 3;
-    time.TimeZone = 0;
-    if (!fw_shell_parse_date("2024-02-29", &time) ||
-        fw_shell_parse_date("2023-02-29", &time) ||
-        !fw_shell_parse_time("23:59:58", &time)) {
-        return 0;
-    }
-    count = fw_shell_split_line(line, arguments, FW_ARRAY_SIZE(arguments));
-    return count == 3U && fw_shell_ascii_equal_ci(arguments[0], "run") &&
-           fw_shell_ascii_equal_ci(arguments[1],
-                                   "fs0:\\EFI APP\\tool.efi") &&
-           fw_shell_ascii_equal_ci(arguments[2], "arg");
-}
-
 void fw_boot_shell_run(VOID)
 {
     CHAR8 line[FW_SHELL_LINE_MAX];

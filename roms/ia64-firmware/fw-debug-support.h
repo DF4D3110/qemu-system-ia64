@@ -11,6 +11,5 @@
 
 BOOLEAN fw_debug_support_install(VOID);
 VOID fw_debug_support_exit_boot_services(VOID);
-BOOLEAN fw_debug_support_selftest(VOID);
 
 #endif /* IA64_FIRMWARE_FW_DEBUG_SUPPORT_H */

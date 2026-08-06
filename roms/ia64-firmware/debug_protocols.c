@@ -257,43 +257,5 @@ BOOLEAN fw_debug_port_install(VOID)
     return 1;
 }
 
-BOOLEAN fw_debug_port_selftest(VOID)
-{
-    VOID *interface = NULL;
-    UINTN size;
-    UINT8 byte = 0;
-    EFI_STATUS st;
-
-    if (mDebugPortBase == 0) {
-        return mDebugPortHandle == NULL &&
-               bs_locate_protocol((VOID *)mDebugPortProtocolGuid, NULL,
-                                  &interface) == EFI_NOT_FOUND;
-    }
-    if (mDebugPortHandle == NULL ||
-        bs_locate_protocol((VOID *)mDebugPortProtocolGuid, NULL,
-                           &interface) != EFI_SUCCESS ||
-        interface != &mDebugPortProtocol ||
-        mDebugPortProtocol.Reset(&mDebugPortProtocol) != EFI_SUCCESS) {
-        return 0;
-    }
-    st = mDebugPortProtocol.Poll(&mDebugPortProtocol);
-    if (st != EFI_SUCCESS && st != EFI_NOT_READY) {
-        return 0;
-    }
-    size = 0;
-    if (mDebugPortProtocol.Write(&mDebugPortProtocol, 0, &size, NULL) !=
-            EFI_SUCCESS ||
-        mDebugPortProtocol.Read(&mDebugPortProtocol, 0, &size, NULL) !=
-            EFI_SUCCESS) {
-        return 0;
-    }
-    if (st == EFI_NOT_READY) {
-        size = 1;
-        return mDebugPortProtocol.Read(&mDebugPortProtocol, 0, &size,
-                                       &byte) == EFI_TIMEOUT && size == 0;
-    }
-    return 1;
-}
-
 #undef DEBUG_UART_LSR_OVERRUN
 #undef DEBUG_UART_LSR_ERROR

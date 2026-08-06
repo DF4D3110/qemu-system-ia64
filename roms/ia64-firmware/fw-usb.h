@@ -108,6 +108,5 @@ void fw_usb_controller_device_path(FW_ACPI_HID_DEVICE_PATH_NODE *acpi,
                                    FW_DEVICE_PATH_NODE *end);
 
 BOOLEAN fw_usb_protocols_install(VOID);
-BOOLEAN fw_usb_protocols_selftest(VOID);
 
 #endif /* IA64_FIRMWARE_FW_USB_H */

@@ -298,39 +298,3 @@ BOOLEAN fw_pointer_install(VOID)
     }
     return 1;
 }
-
-BOOLEAN fw_pointer_selftest(VOID)
-{
-    EFI_SIMPLE_POINTER_STATE saved_state = mSimplePointerState;
-    EFI_SIMPLE_POINTER_STATE state;
-    UINT8 saved_packet[3];
-    UINT8 saved_packet_bytes = mSimplePointerPacketBytes;
-    BOOLEAN saved_changed = mSimplePointerChanged;
-    BOOLEAN ok;
-
-    if (!fw_handoff_i8042_enabled()) {
-        return 1;
-    }
-    fw_copy_mem(saved_packet, mSimplePointerPacket, sizeof(saved_packet));
-    fw_set_mem(&mSimplePointerState, sizeof(mSimplePointerState), 0);
-    mSimplePointerPacketBytes = 0;
-    mSimplePointerChanged = 0;
-    fw_pointer_consume_byte(0x09U);
-    fw_pointer_consume_byte(5U);
-    fw_pointer_consume_byte(0xfdU);
-    ok = simple_pointer_get_state(&mSimplePointerProtocol, &state) ==
-             EFI_SUCCESS &&
-         state.RelativeMovementX == 5 &&
-         state.RelativeMovementY == 3 &&
-         state.RelativeMovementZ == 0 && state.LeftButton &&
-         !state.RightButton &&
-         simple_pointer_get_state(&mSimplePointerProtocol, &state) ==
-             EFI_NOT_READY &&
-         simple_pointer_get_state(&mSimplePointerProtocol, NULL) ==
-             EFI_INVALID_PARAMETER;
-    mSimplePointerState = saved_state;
-    fw_copy_mem(mSimplePointerPacket, saved_packet, sizeof(saved_packet));
-    mSimplePointerPacketBytes = saved_packet_bytes;
-    mSimplePointerChanged = saved_changed;
-    return ok;
-}

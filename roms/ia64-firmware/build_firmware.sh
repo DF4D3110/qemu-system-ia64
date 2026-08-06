@@ -49,7 +49,8 @@ while IFS= read -r source || [ -n "$source" ]; do
             ;;
         *.c)
             object_depfile="${object}.d"
-            "$CC" -O2 -fno-builtin -ffreestanding -nostdinc -nostdlib \
+            "$CC" -O2 -ffunction-sections -fdata-sections \
+                -fno-builtin -ffreestanding -nostdinc -nostdlib \
                 -G 0 -mno-sdata -fno-stack-protector -fno-common \
                 -fno-optimize-sibling-calls -fno-pic \
                 -isystem "$CC_INCLUDE_DIR" \
@@ -75,7 +76,7 @@ if [ -z "$LINKER_SCRIPT" ]; then
     exit 2
 fi
 
-"$LD" -nostdlib -static -T "$LINKER_SCRIPT" -Map="$FW_MAP" \
+"$LD" -nostdlib -static --gc-sections -T "$LINKER_SCRIPT" -Map="$FW_MAP" \
     -o "$FW_ELF" "$@" "$LIBGCC"
 "$OBJCOPY" -O binary "$FW_ELF" "$OUT_BIN"
 "$SIZE" -A "$FW_ELF" > "$FW_SECTIONS"

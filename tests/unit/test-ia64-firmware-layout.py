@@ -10,7 +10,7 @@ import sys
 
 
 FW_LOAD_BASE = 0x00100000
-FW_RECLAIM_BASE = 0x00800000
+FW_PUBLIC_END = 0x00300000
 RUNTIME_ALIGNMENT = 0x2000
 
 
@@ -59,20 +59,23 @@ def run_checks(binary: str, elf: str):
     yield "firmware has no unresolved symbols"
 
     sym = symbols(elf)
-    required = ("_start", "_end", "__gp", "pal_proc_entry",
+    required = ("_start", "_end", "_bss_end", "__firmware_payload_end",
+                "__gp", "pal_proc_entry",
                 "sal_proc_gp_anchor", "sal_proc_entry", "sal_proc_dispatch",
                 "__runtime_code_start", "__runtime_data_start")
     missing = [name for name in required if name not in sym]
     if missing:
         raise RuntimeError("missing ABI linker symbols: " + ", ".join(missing))
-    if sym["_start"] != FW_LOAD_BASE or not (
-            FW_LOAD_BASE < sym["_end"] <= FW_RECLAIM_BASE):
+    if sym["_start"] != FW_LOAD_BASE or sym["_end"] != FW_PUBLIC_END:
         raise RuntimeError(
             f"firmware address range {sym['_start']:#x}-{sym['_end']:#x} "
-            "exceeds the reserved low-memory image window")
-    if os.path.getsize(binary) > FW_RECLAIM_BASE - FW_LOAD_BASE:
-        raise RuntimeError("flat firmware binary exceeds its reserved window")
-    yield "firmware fits reserved image window"
+            "does not match the 1--3 MiB public reservation")
+    if sym["_bss_end"] != sym["__firmware_payload_end"] or not (
+            FW_LOAD_BASE < sym["__firmware_payload_end"] < sym["_end"]):
+        raise RuntimeError("firmware payload does not end below 3 MiB")
+    if os.path.getsize(binary) > FW_PUBLIC_END - FW_LOAD_BASE:
+        raise RuntimeError("flat firmware binary exceeds the 3 MiB boundary")
+    yield "firmware payload fits the 3 MiB public reservation"
 
     elf_header = command(["ia64-linux-gnu-readelf", "-h", elf])
     entry = re.search(r"Entry point address:\s+0x([0-9a-fA-F]+)", elf_header)
@@ -145,6 +148,8 @@ def run_checks(binary: str, elf: str):
         if size and address < previous_end:
             raise RuntimeError(f"allocated section {name} overlaps its predecessor")
         previous_end = max(previous_end, address + size)
+    if previous_end > sym["__firmware_payload_end"]:
+        raise RuntimeError("allocated section extends beyond firmware payload")
     yield "allocated firmware sections do not overlap"
 
 

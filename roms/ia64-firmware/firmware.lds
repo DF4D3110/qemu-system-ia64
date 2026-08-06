@@ -8,11 +8,11 @@ SECTIONS
     . = 0x100000;
 
     .text.boot : {
-        *(.text._start)
-        *(.text.pal_proc_entry)
-        *(.text.start_after_pal)
-        *(.text.start_secondary)
-        *(.text.fw_pal_halt_light)
+        KEEP(*(.text._start))
+        KEEP(*(.text.pal_proc_entry))
+        KEEP(*(.text.start_after_pal))
+        KEEP(*(.text.start_secondary))
+        KEEP(*(.text.fw_pal_halt_light))
     }
 
     . = ALIGN(0x2000);
@@ -65,11 +65,16 @@ SECTIONS
 
     .bss : {
         _bss_start = .;
-        *(.bss*)
+        *(SORT_BY_ALIGNMENT(.bss*))
         *(COMMON)
         . = ALIGN(8);
         _bss_end = .;
     }
 
+    __firmware_payload_end = .;
+    ASSERT(__firmware_payload_end < 0x300000,
+           "firmware payload must remain below 3 MiB")
+
+    . = 0x300000;
     _end = .;
 }

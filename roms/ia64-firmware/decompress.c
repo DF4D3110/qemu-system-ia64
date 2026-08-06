@@ -44,16 +44,6 @@ typedef struct {
     FW_DEC_CODEBOOK position;
 } FW_DEC_WORKSPACE;
 
-struct _FW_EFI_DECOMPRESS_PROTOCOL {
-    EFI_STATUS (*GetInfo)(FW_EFI_DECOMPRESS_PROTOCOL *This, VOID *Source,
-                          UINT32 SourceSize, UINT32 *DestinationSize,
-                          UINT32 *ScratchSize);
-    EFI_STATUS (*Decompress)(FW_EFI_DECOMPRESS_PROTOCOL *This, VOID *Source,
-                             UINT32 SourceSize, VOID *Destination,
-                             UINT32 DestinationSize, VOID *Scratch,
-                             UINT32 ScratchSize);
-};
-
 static UINT32 fw_dec_u32(const UINT8 *bytes)
 {
     return (UINT32)bytes[0] |
@@ -438,62 +428,3 @@ const UINT8 fw_decompress_protocol_guid[16] = {
     0xfe, 0x7c, 0x11, 0xd8, 0xa6, 0x94, 0xd4, 0x11,
     0x9a, 0x3a, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d,
 };
-
-BOOLEAN fw_decompress_selftest(void)
-{
-    static const UINT8 compressed[] = {
-        0x49, 0x00, 0x00, 0x00, 0x22, 0x01, 0x00, 0x00,
-        0x00, 0x3d, 0x4b, 0x92, 0x8e, 0x1c, 0x7e, 0x3f,
-        0xe8, 0x06, 0xe5, 0x20, 0x01, 0x90, 0xf9, 0x1a,
-        0x03, 0x2f, 0xd4, 0x89, 0x07, 0x7c, 0xb6, 0xc6,
-        0xa6, 0x58, 0xad, 0x26, 0x24, 0x00, 0x10, 0x21,
-        0x67, 0x1d, 0x0a, 0x48, 0x63, 0xa9, 0xaa, 0x33,
-        0x70, 0x3b, 0x29, 0xa8, 0x70, 0x63, 0x92, 0x74,
-        0x67, 0x2f, 0x10, 0xdc, 0x2d, 0x05, 0xe8, 0xf0,
-        0xa6, 0xaa, 0xec, 0xb6, 0xeb, 0xf0, 0xc7, 0x2d,
-        0x76, 0x39, 0x26, 0xff, 0x5e, 0x1f, 0xe4, 0x00,
-        0x00,
-    };
-    static const UINT8 expected_half[] =
-        "EFI decompression protocol test vector. "
-        "EFI decompression protocol test vector.\n"
-        "0123456789abcdef0123456789abcdef"
-        "0123456789abcdef0123456789abcdef\n";
-    static FW_DEC_WORKSPACE workspace;
-    static UINT8 output[290];
-    UINT32 destination_size = 0;
-    UINT32 scratch_size = 0;
-    UINTN i;
-
-    if (fw_decompress_protocol.GetInfo(&fw_decompress_protocol,
-                                       (VOID *)compressed,
-                                       sizeof(compressed), &destination_size,
-                                       &scratch_size) != EFI_SUCCESS ||
-        destination_size != sizeof(output) ||
-        scratch_size != sizeof(workspace) ||
-        fw_decompress_protocol.Decompress(&fw_decompress_protocol,
-                                          (VOID *)compressed,
-                                          sizeof(compressed), output,
-                                          sizeof(output), &workspace,
-                                          sizeof(workspace)) != EFI_SUCCESS) {
-        return 0;
-    }
-    for (i = 0; i < sizeof(output); i++) {
-        if (output[i] != expected_half[i % (sizeof(expected_half) - 1U)]) {
-            return 0;
-        }
-    }
-    return fw_decompress_protocol.GetInfo(
-               &fw_decompress_protocol, (VOID *)compressed,
-               sizeof(compressed) - 1U, &destination_size,
-               &scratch_size) == EFI_INVALID_PARAMETER &&
-           fw_decompress_protocol.Decompress(
-               &fw_decompress_protocol, (VOID *)compressed,
-               sizeof(compressed) - 1U, output, sizeof(output),
-               &workspace, sizeof(workspace)) == EFI_INVALID_PARAMETER &&
-           fw_decompress_protocol.Decompress(
-               &fw_decompress_protocol, (VOID *)compressed,
-               sizeof(compressed),
-               output, sizeof(output) - 1U, &workspace,
-               sizeof(workspace)) == EFI_INVALID_PARAMETER;
-}

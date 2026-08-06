@@ -6,6 +6,5 @@
 #include "fw-base.h"
 
 BOOLEAN fw_debug_port_install(void);
-BOOLEAN fw_debug_port_selftest(void);
 
 #endif /* IA64_FIRMWARE_FW_DEBUG_PORT_H */
