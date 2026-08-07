@@ -358,6 +358,32 @@ When `i8042=off` is used, the machine automatically attaches a USB keyboard and 
 
 Omitting `-vga` selects the default ATI-compatible display. This is recommended for graphical guests. Use `-vga std` only when standard VGA compatibility is specifically needed.
 
+The IA-64 VBE bridge takes its preferred resolution from properties of the
+VGA device, rather than from machine properties. Specify `-vga ati` together
+with the ATI VGA globals. For example, to expose 3840x2160 modes and a matching
+DDC EDID with 32 MiB of video memory:
+
+```sh
+./build/qemu-system-ia64 \
+  -machine ia64-vpc \
+  -bios ./build/roms/ia64-firmware/ia64-firmware.bin \
+  -vga ati \
+  -global ati-vga.xres=3840 \
+  -global ati-vga.yres=2160 \
+  -global ati-vga.vgamem_mb=32 \
+  -display gtk
+```
+
+`xres` and `yres` must be specified together. They select the preferred
+resolution and, unless `xmax` and `ymax` are also supplied, the largest
+resolution advertised through INT 10h VBE. Increase `vgamem_mb` when the
+preferred 32-bpp mode does not fit; the IA-64 fixed PCI layout supports up to
+64 MiB and 5120x2880x32. The default remains 1280x1024 with 16 MiB.
+
+The host monitor resolution is not detected automatically. Explicit VGA
+properties therefore give the same guest-visible modes with GTK, SDL, VNC,
+and headless display backends.
+
 ### Networking
 
 An e1000, 82540EM-compatible PCI network controller is attached by default.

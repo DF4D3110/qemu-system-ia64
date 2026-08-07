@@ -2117,27 +2117,37 @@ bool pci_init_nic_in_slot(PCIBus *rootbus, const char *model,
     return true;
 }
 
-PCIDevice *pci_vga_init(PCIBus *bus)
+PCIDevice *pci_vga_new(void)
 {
     vga_interface_created = true;
     switch (vga_interface_type) {
     case VGA_CIRRUS:
-        return pci_create_simple(bus, -1, "cirrus-vga");
+        return pci_new(-1, "cirrus-vga");
     case VGA_ATI:
-        return pci_create_simple(bus, -1, "ati-vga");
+        return pci_new(-1, "ati-vga");
     case VGA_QXL:
-        return pci_create_simple(bus, -1, "qxl-vga");
+        return pci_new(-1, "qxl-vga");
     case VGA_STD:
-        return pci_create_simple(bus, -1, "VGA");
+        return pci_new(-1, "VGA");
     case VGA_VMWARE:
-        return pci_create_simple(bus, -1, "vmware-svga");
+        return pci_new(-1, "vmware-svga");
     case VGA_VIRTIO:
-        return pci_create_simple(bus, -1, "virtio-vga");
+        return pci_new(-1, "virtio-vga");
     case VGA_NONE:
     default: /* Other non-PCI types. Checking for unsupported types is already
                 done in vl.c. */
         return NULL;
     }
+}
+
+PCIDevice *pci_vga_init(PCIBus *bus)
+{
+    PCIDevice *dev = pci_vga_new();
+
+    if (dev != NULL) {
+        pci_realize_and_unref(dev, bus, &error_fatal);
+    }
+    return dev;
 }
 
 /* Whether a given bus number is in range of the secondary

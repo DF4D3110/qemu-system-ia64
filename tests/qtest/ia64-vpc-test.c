@@ -321,6 +321,8 @@ static void test_int10_rom(void)
                     "QEMU IA64 VBE", 13);
     g_assert_cmphex(lduw_le_p(rom + IA64_INT10_ROM_MODES_OFFSET),
                     ==, 0x111);
+    g_assert_cmphex(lduw_le_p(rom + IA64_INT10_ROM_MODES_OFFSET + 13 * 2),
+                    ==, 0xffff);
     g_assert_cmphex(rom[IA64_INT10_ROM_HANDLER_OFFSET], ==, 0x55);
     g_assert_cmphex(rom[IA64_INT10_ROM_HANDLER_OFFSET + 1], ==, 0x89);
     g_assert_cmphex(rom[IA64_INT10_ROM_HANDLER_OFFSET +
@@ -461,6 +463,291 @@ static void test_int10_vbe(void)
 static void test_int10_vbe_std(void)
 {
     test_int10_vbe_for_device("-vga std");
+}
+
+static bool int10_mode_list_contains(QTestState *qts, uint16_t expected)
+{
+    uint64_t address = IA64_INT10_ROM_BASE + IA64_INT10_ROM_MODES_OFFSET;
+    size_t i;
+
+    for (i = 0; i < (IA64_INT10_ROM_SIZE - IA64_INT10_ROM_MODES_OFFSET) / 2;
+         i++, address += 2) {
+        uint16_t mode = qtest_readw(qts, address);
+
+        if (mode == expected) {
+            return true;
+        }
+        if (mode == 0xffff) {
+            return false;
+        }
+    }
+    g_assert_not_reached();
+}
+
+static void assert_edid_checksum(const uint8_t *edid)
+{
+    unsigned int checksum = 0;
+    size_t i;
+
+    for (i = 0; i < 128; i++) {
+        checksum += edid[i];
+    }
+    g_assert_cmphex(checksum & 0xff, ==, 0);
+}
+
+static size_t int10_read_edid_block(QTestState *qts, uint16_t block,
+                                    TestInt10Registers *regs,
+                                    uint8_t response[128])
+{
+    *regs = (TestInt10Registers) {
+        .ax = 0x4f15,
+        .bx = 1,
+        .dx = block,
+    };
+    return int10_call(qts, regs, response, 128);
+}
+
+static void test_int10_vbe_4k_for_device(const char *extra_args,
+                                         uint16_t mode_number)
+{
+    uint8_t response[512];
+    TestInt10Registers regs = {
+        .ax = 0x4f00,
+        .di = 0x0100,
+        .es = 0x2000,
+        .input_signature = IA64_VBE2_SIGNATURE,
+    };
+    QTestState *qts = ia64_vpc_start(extra_args);
+    size_t length;
+
+    length = int10_call(qts, &regs, response, sizeof(response));
+    g_assert_cmpuint(length, ==, 512);
+    g_assert_cmphex(regs.ax, ==, 0x004f);
+    g_assert_cmphex(lduw_le_p(response + 18), ==, 512);
+    g_assert_true(int10_mode_list_contains(qts, mode_number));
+
+    regs = (TestInt10Registers) {
+        .ax = 0x4f01,
+        .cx = mode_number,
+    };
+    length = int10_call(qts, &regs, response, sizeof(response));
+    g_assert_cmpuint(length, ==, 256);
+    g_assert_cmphex(regs.ax, ==, 0x004f);
+    g_assert_cmphex(lduw_le_p(response + 16), ==, 3840 * 4);
+    g_assert_cmphex(lduw_le_p(response + 18), ==, 3840);
+    g_assert_cmphex(lduw_le_p(response + 20), ==, 2160);
+    g_assert_cmphex(response[25], ==, 32);
+
+    regs = (TestInt10Registers) {
+        .ax = 0x4f02,
+        .bx = 0x4000 | mode_number,
+    };
+    length = int10_call(qts, &regs, response, sizeof(response));
+    g_assert_cmpuint(length, ==, 0);
+    g_assert_cmphex(regs.ax, ==, 0x004f);
+    g_assert_cmphex(test_vbe_read(qts, VBE_DISPI_INDEX_XRES), ==, 3840);
+    g_assert_cmphex(test_vbe_read(qts, VBE_DISPI_INDEX_YRES), ==, 2160);
+    g_assert_cmphex(test_vbe_read(qts, VBE_DISPI_INDEX_BPP), ==, 32);
+
+    length = int10_read_edid_block(qts, 0, &regs, response);
+    g_assert_cmpuint(length, ==, 128);
+    g_assert_cmphex(regs.ax, ==, 0x004f);
+    g_assert_cmphex(response[126], ==, 2);
+    assert_edid_checksum(response);
+
+    length = int10_read_edid_block(qts, 2, &regs, response);
+    g_assert_cmpuint(length, ==, 128);
+    g_assert_cmphex(regs.ax, ==, 0x004f);
+    g_assert_cmphex(response[0], ==, 0x70);
+    g_assert_cmpuint(lduw_le_p(response + 12) + 1, ==, 3840);
+    g_assert_cmpuint(lduw_le_p(response + 20) + 1, ==, 2160);
+    assert_edid_checksum(response);
+
+    length = int10_read_edid_block(qts, 3, &regs, response);
+    g_assert_cmpuint(length, ==, 0);
+    g_assert_cmphex(regs.ax, ==, 0x014f);
+    qtest_quit(qts);
+}
+
+static void test_int10_vbe_4k(void)
+{
+    test_int10_vbe_4k_for_device(
+        "-vga ati "
+        "-global ati-vga.xres=3840 -global ati-vga.yres=2160 "
+        "-global ati-vga.vgamem_mb=32",
+        0x181);
+}
+
+static void test_int10_vbe_4k_std(void)
+{
+    test_int10_vbe_4k_for_device(
+        "-vga std "
+        "-global VGA.xres=3840 -global VGA.yres=2160 "
+        "-global VGA.vgamem_mb=32",
+        0x181);
+}
+
+static void test_int10_vbe_native_mode(void)
+{
+    uint8_t response[256];
+    TestInt10Registers regs = {
+        .ax = 0x4f01,
+        .cx = 0x1f2,
+    };
+    QTestState *qts = ia64_vpc_start(
+        "-vga ati "
+        "-global ati-vga.xres=1928 -global ati-vga.yres=1080");
+    size_t length;
+
+    g_assert_true(int10_mode_list_contains(qts, 0x1f2));
+    length = int10_call(qts, &regs, response, sizeof(response));
+    g_assert_cmpuint(length, ==, 256);
+    g_assert_cmphex(regs.ax, ==, 0x004f);
+    g_assert_cmphex(lduw_le_p(response + 18), ==, 1928);
+    g_assert_cmphex(lduw_le_p(response + 20), ==, 1080);
+    g_assert_cmphex(response[25], ==, 32);
+    qtest_quit(qts);
+}
+
+static void test_int10_vbe_maximum(void)
+{
+    QTestState *qts = ia64_vpc_start(
+        "-vga ati "
+        "-global ati-vga.xres=1920 -global ati-vga.yres=1080 "
+        "-global ati-vga.xmax=3840 -global ati-vga.ymax=2160 "
+        "-global ati-vga.vgamem_mb=32");
+
+    g_assert_true(int10_mode_list_contains(qts, 0x169));
+    g_assert_true(int10_mode_list_contains(qts, 0x181));
+    g_assert_false(int10_mode_list_contains(qts, 0x184));
+    qtest_quit(qts);
+}
+
+static void test_int10_vbe_5k_edid(void)
+{
+    uint8_t response[512];
+    TestInt10Registers regs = {
+        .ax = 0x4f00,
+        .di = 0x0100,
+        .es = 0x2000,
+        .input_signature = IA64_VBE2_SIGNATURE,
+    };
+    QTestState *qts = ia64_vpc_start(
+        "-vga ati "
+        "-global ati-vga.xres=5120 -global ati-vga.yres=2880 "
+        "-global ati-vga.vgamem_mb=64");
+    size_t length;
+
+    length = int10_call(qts, &regs, response, sizeof(response));
+    g_assert_cmpuint(length, ==, 512);
+    g_assert_cmphex(lduw_le_p(response + 18), ==, 1024);
+    g_assert_true(int10_mode_list_contains(qts, 0x187));
+
+    regs = (TestInt10Registers) {
+        .ax = 0x4f01,
+        .cx = 0x187,
+    };
+    length = int10_call(qts, &regs, response, sizeof(response));
+    g_assert_cmpuint(length, ==, 256);
+    g_assert_cmphex(regs.ax, ==, 0x004f);
+    g_assert_cmphex(lduw_le_p(response + 16), ==, 5120 * 4);
+    g_assert_cmphex(lduw_le_p(response + 18), ==, 5120);
+    g_assert_cmphex(lduw_le_p(response + 20), ==, 2880);
+    g_assert_cmphex(response[25], ==, 32);
+
+    regs = (TestInt10Registers) {
+        .ax = 0x4f02,
+        .bx = 0x4187,
+    };
+    length = int10_call(qts, &regs, response, sizeof(response));
+    g_assert_cmpuint(length, ==, 0);
+    g_assert_cmphex(regs.ax, ==, 0x004f);
+    g_assert_cmphex(test_vbe_read(qts, VBE_DISPI_INDEX_XRES), ==, 5120);
+    g_assert_cmphex(test_vbe_read(qts, VBE_DISPI_INDEX_YRES), ==, 2880);
+    g_assert_cmphex(test_vbe_read(qts, VBE_DISPI_INDEX_BPP), ==, 32);
+
+    length = int10_read_edid_block(qts, 0, &regs, response);
+    g_assert_cmpuint(length, ==, 128);
+    g_assert_cmphex(regs.ax, ==, 0x004f);
+    g_assert_cmphex(response[126], ==, 2);
+    assert_edid_checksum(response);
+
+    length = int10_read_edid_block(qts, 1, &regs, response);
+    g_assert_cmpuint(length, ==, 128);
+    g_assert_cmphex(regs.ax, ==, 0x004f);
+    assert_edid_checksum(response);
+
+    length = int10_read_edid_block(qts, 2, &regs, response);
+    g_assert_cmpuint(length, ==, 128);
+    g_assert_cmphex(regs.ax, ==, 0x004f);
+    g_assert_cmphex(response[0], ==, 0x70);
+    g_assert_cmpuint(lduw_le_p(response + 12) + 1, ==, 5120);
+    g_assert_cmpuint(lduw_le_p(response + 20) + 1, ==, 2880);
+    assert_edid_checksum(response);
+
+    length = int10_read_edid_block(qts, 3, &regs, response);
+    g_assert_cmpuint(length, ==, 0);
+    g_assert_cmphex(regs.ax, ==, 0x014f);
+    qtest_quit(qts);
+}
+
+static void assert_vga_start_fails(const char *global_property,
+                                   const char *message)
+{
+    const char *argv[] = {
+        qtest_qemu_binary(NULL),
+        "-machine", "ia64-vpc",
+        "-vga", "ati",
+        "-global", global_property,
+        "-display", "none",
+        NULL,
+    };
+    g_autofree char *stderr_text = NULL;
+    g_autoptr(GError) error = NULL;
+    int wait_status;
+
+    g_assert_true(g_spawn_sync(NULL, (char **)argv, NULL,
+                               G_SPAWN_STDOUT_TO_DEV_NULL,
+                               NULL, NULL, NULL, &stderr_text,
+                               &wait_status, &error));
+    g_assert_no_error(error);
+    g_assert_true(WIFEXITED(wait_status));
+    g_assert_cmpint(WEXITSTATUS(wait_status), ==, 1);
+    g_assert_nonnull(strstr(stderr_text, message));
+}
+
+static void test_int10_vbe_invalid_properties(void)
+{
+    assert_vga_start_fails("ati-vga.xres=1366",
+                           "not a multiple of 8 required by Bochs VBE");
+    assert_vga_start_fails("ati-vga.xmax=3840",
+                           "xmax and ymax must be set together");
+    assert_vga_start_fails("ati-vga.vgamem_mb=128",
+                           "not addressable through the IA-64 framebuffer");
+
+    /* Use a complete property set for validation that happens after realize. */
+    const char *argv[] = {
+        qtest_qemu_binary(NULL),
+        "-machine", "ia64-vpc",
+        "-vga", "ati",
+        "-global", "ati-vga.xres=3840",
+        "-global", "ati-vga.yres=2160",
+        "-global", "ati-vga.vgamem_mb=16",
+        "-display", "none",
+        NULL,
+    };
+    g_autofree char *stderr_text = NULL;
+    g_autoptr(GError) error = NULL;
+    int wait_status;
+
+    g_assert_true(g_spawn_sync(NULL, (char **)argv, NULL,
+                               G_SPAWN_STDOUT_TO_DEV_NULL,
+                               NULL, NULL, NULL, &stderr_text,
+                               &wait_status, &error));
+    g_assert_no_error(error);
+    g_assert_true(WIFEXITED(wait_status));
+    g_assert_cmpint(WEXITSTATUS(wait_status), ==, 1);
+    g_assert_nonnull(strstr(stderr_text, "set vgamem_mb=32 or larger"));
 }
 
 static void test_int10_legacy_for_device(const char *extra_args)
@@ -1616,6 +1903,17 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/vga/int10-rom", test_int10_rom);
     qtest_add_func("/ia64-vpc/vga/int10-vbe", test_int10_vbe);
     qtest_add_func("/ia64-vpc/vga/int10-vbe-std", test_int10_vbe_std);
+    qtest_add_func("/ia64-vpc/vga/int10-vbe-4k", test_int10_vbe_4k);
+    qtest_add_func("/ia64-vpc/vga/int10-vbe-4k-std",
+                   test_int10_vbe_4k_std);
+    qtest_add_func("/ia64-vpc/vga/int10-vbe-native",
+                   test_int10_vbe_native_mode);
+    qtest_add_func("/ia64-vpc/vga/int10-vbe-maximum",
+                   test_int10_vbe_maximum);
+    qtest_add_func("/ia64-vpc/vga/int10-vbe-5k-edid",
+                   test_int10_vbe_5k_edid);
+    qtest_add_func("/ia64-vpc/vga/int10-vbe-invalid-properties",
+                   test_int10_vbe_invalid_properties);
     qtest_add_func("/ia64-vpc/vga/int10-legacy", test_int10_legacy);
     qtest_add_func("/ia64-vpc/vga/int10-legacy-std",
                    test_int10_legacy_std);

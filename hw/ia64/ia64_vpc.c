@@ -114,6 +114,14 @@
 #define IA64_VBE2_SIGNATURE     0x32454256U
 #define IA64_VBE_IO_INDEX       0x01ceU
 #define IA64_VBE_IO_DATA        0x01d0U
+#define IA64_VBE_DEFAULT_XRES   1280U
+#define IA64_VBE_DEFAULT_YRES   1024U
+#define IA64_VBE_MAX_MODES      96U
+#define IA64_VBE_NATIVE_MODE_16 0x1f0U
+#define IA64_VBE_NATIVE_MODE_24 0x1f1U
+#define IA64_VBE_NATIVE_MODE_32 0x1f2U
+#define IA64_VGA_FIXED_FB_SIZE  (IA64_VGA_MMIO_PCI_BASE - \
+                                 IA64_VGA_FB_PCI_BASE)
 #define IA64_VGA_PLANAR_MEMORY_SIZE (256 * KiB)
 #define IA64_BDA_VIDEO_MODE      0x00000449U
 #define IA64_BDA_VIDEO_COLUMNS   0x0000044aU
@@ -179,6 +187,12 @@ typedef struct IA64VbeMode {
     uint8_t bpp;
 } IA64VbeMode;
 
+typedef struct IA64VbeResolution {
+    uint16_t base_number;
+    uint16_t width;
+    uint16_t height;
+} IA64VbeResolution;
+
 typedef struct IA64VgaLegacyMode {
     uint8_t number;
     uint8_t columns;
@@ -192,7 +206,7 @@ typedef struct IA64VgaLegacyMode {
     const uint8_t *graphics;
 } IA64VgaLegacyMode;
 
-static const IA64VbeMode ia64_vbe_modes[] = {
+static const IA64VbeMode ia64_vbe_legacy_modes[] = {
     { 0x111,  640,  480, 16 },
     { 0x112,  640,  480, 24 },
     { 0x114,  800,  600, 16 },
@@ -206,6 +220,35 @@ static const IA64VbeMode ia64_vbe_modes[] = {
     { 0x143,  800,  600, 32 },
     { 0x144, 1024,  768, 32 },
     { 0x145, 1280, 1024, 32 },
+};
+
+/*
+ * Additional QEMU OEM modes.  Mode numbers are stable even when a configured
+ * maximum resolution filters entries out of the option-ROM mode list.
+ */
+static const IA64VbeResolution ia64_vbe_oem_resolutions[] = {
+    { 0x146, 1152,  864 },
+    { 0x149, 1280,  720 },
+    { 0x14c, 1280,  768 },
+    { 0x14f, 1280,  800 },
+    { 0x152, 1280,  960 },
+    { 0x155, 1360,  768 },
+    { 0x158, 1400, 1050 },
+    { 0x15b, 1440,  900 },
+    { 0x15e, 1600,  900 },
+    { 0x161, 1600, 1200 },
+    { 0x164, 1680, 1050 },
+    { 0x167, 1920, 1080 },
+    { 0x16a, 1920, 1200 },
+    { 0x16d, 2048, 1152 },
+    { 0x170, 2048, 1536 },
+    { 0x173, 2560, 1080 },
+    { 0x176, 2560, 1440 },
+    { 0x179, 2560, 1600 },
+    { 0x17c, 3440, 1440 },
+    { 0x17f, 3840, 2160 },
+    { 0x182, 4096, 2160 },
+    { 0x185, 5120, 2880 },
 };
 
 /* Standard VGA BIOS mode 12h: 640x480, 16-color planar graphics. */
@@ -400,6 +443,14 @@ struct IA64VpcMachineState {
     uint8_t int10_dpms_state;
     uint8_t int10_legacy_mode;
     uint8_t int10_legacy_columns;
+    IA64VbeMode vbe_modes[IA64_VBE_MAX_MODES];
+    uint16_t vbe_mode_count;
+    uint32_t vbe_prefx;
+    uint32_t vbe_prefy;
+    uint32_t vbe_maxx;
+    uint32_t vbe_maxy;
+    uint8_t vbe_edid[384];
+    uint8_t vbe_edid_blocks;
 #endif
 
     Object *pci_fixup_reset;
@@ -419,16 +470,121 @@ struct IA64VpcMachineState {
 };
 
 #ifdef CONFIG_IA64_VPC_GRAPHICS
-static const IA64VbeMode *ia64_vbe_find_mode(uint16_t number)
+static const IA64VbeMode *ia64_vbe_find_mode(IA64VpcMachineState *s,
+                                              uint16_t number)
 {
     size_t i;
 
-    for (i = 0; i < G_N_ELEMENTS(ia64_vbe_modes); i++) {
-        if (ia64_vbe_modes[i].number == number) {
-            return &ia64_vbe_modes[i];
+    for (i = 0; i < s->vbe_mode_count; i++) {
+        if (s->vbe_modes[i].number == number) {
+            return &s->vbe_modes[i];
         }
     }
     return NULL;
+}
+
+static bool ia64_vpc_prepare_vga_properties(IA64VpcMachineState *s,
+                                             PCIDevice *vga,
+                                             Error **errp)
+{
+    Object *obj = OBJECT(vga);
+    static const char * const required[] = {
+        "xres", "yres", "xmax", "ymax", "vgamem_mb",
+    };
+    uint64_t xres;
+    uint64_t yres;
+    uint64_t xmax;
+    uint64_t ymax;
+    size_t i;
+
+    for (i = 0; i < G_N_ELEMENTS(required); i++) {
+        if (!object_property_find(obj, required[i])) {
+            error_setg(errp,
+                       "VGA device '%s' does not provide the '%s' property "
+                       "required by the IA-64 VBE bridge",
+                       object_get_typename(obj), required[i]);
+            return false;
+        }
+    }
+
+    xres = object_property_get_uint(obj, "xres", errp);
+    if (*errp) {
+        return false;
+    }
+    yres = object_property_get_uint(obj, "yres", errp);
+    if (*errp) {
+        return false;
+    }
+    xmax = object_property_get_uint(obj, "xmax", errp);
+    if (*errp) {
+        return false;
+    }
+    ymax = object_property_get_uint(obj, "ymax", errp);
+    if (*errp) {
+        return false;
+    }
+
+    if ((xres == 0) != (yres == 0)) {
+        error_setg(errp, "VGA properties xres and yres must be set together");
+        return false;
+    }
+    if ((xmax == 0) != (ymax == 0)) {
+        error_setg(errp, "VGA properties xmax and ymax must be set together");
+        return false;
+    }
+
+    if (xres == 0) {
+        xres = IA64_VBE_DEFAULT_XRES;
+        yres = IA64_VBE_DEFAULT_YRES;
+        if (!object_property_set_uint(obj, "xres", xres, errp) ||
+            !object_property_set_uint(obj, "yres", yres, errp)) {
+            return false;
+        }
+    }
+    if (xmax == 0) {
+        xmax = xres;
+        ymax = yres;
+        if (!object_property_set_uint(obj, "xmax", xmax, errp) ||
+            !object_property_set_uint(obj, "ymax", ymax, errp)) {
+            return false;
+        }
+    }
+
+    if (xres < 8 || yres < 1 ||
+        xres > VBE_DISPI_MAX_XRES || yres > VBE_DISPI_MAX_YRES) {
+        error_setg(errp,
+                   "VGA preferred resolution %" PRIu64 "x%" PRIu64
+                   " is outside the Bochs VBE range 8x1 to %ux%u",
+                   xres, yres, VBE_DISPI_MAX_XRES, VBE_DISPI_MAX_YRES);
+        return false;
+    }
+    if (xmax > VBE_DISPI_MAX_XRES || ymax > VBE_DISPI_MAX_YRES) {
+        error_setg(errp,
+                   "VGA maximum resolution %" PRIu64 "x%" PRIu64
+                   " exceeds the Bochs VBE limit %ux%u",
+                   xmax, ymax, VBE_DISPI_MAX_XRES, VBE_DISPI_MAX_YRES);
+        return false;
+    }
+    if (xres > xmax || yres > ymax) {
+        error_setg(errp,
+                   "VGA preferred resolution %" PRIu64 "x%" PRIu64
+                   " exceeds maximum resolution %" PRIu64 "x%" PRIu64,
+                   xres, yres, xmax, ymax);
+        return false;
+    }
+    if (xres & 7) {
+        error_setg(errp,
+                   "VGA preferred horizontal resolution %" PRIu64
+                   " is not a multiple of 8 required by Bochs VBE",
+                   xres);
+        return false;
+    }
+
+    s->vbe_prefx = xres;
+    s->vbe_prefy = yres;
+    s->vbe_maxx = xmax;
+    s->vbe_maxy = ymax;
+    return true;
 }
 
 static const IA64VgaLegacyMode *ia64_vga_find_legacy_mode(uint8_t number)
@@ -467,6 +623,198 @@ static uint32_t ia64_vbe_memory_size(void)
 {
     return (uint32_t)ia64_vbe_read(VBE_DISPI_INDEX_VIDEO_MEMORY_64K) *
            (64 * KiB);
+}
+
+static uint64_t ia64_vbe_mode_size(const IA64VbeMode *mode)
+{
+    return (uint64_t)mode->width * mode->height *
+           DIV_ROUND_UP(mode->bpp, 8);
+}
+
+static bool ia64_vbe_has_geometry(IA64VpcMachineState *s,
+                                  const IA64VbeMode *candidate)
+{
+    size_t i;
+
+    for (i = 0; i < s->vbe_mode_count; i++) {
+        const IA64VbeMode *mode = &s->vbe_modes[i];
+
+        if (mode->width == candidate->width &&
+            mode->height == candidate->height &&
+            mode->bpp == candidate->bpp) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void ia64_vbe_add_mode(IA64VpcMachineState *s,
+                              const IA64VbeMode *mode)
+{
+    g_assert(s->vbe_mode_count < IA64_VBE_MAX_MODES);
+    s->vbe_modes[s->vbe_mode_count++] = *mode;
+}
+
+static void ia64_vbe_add_filtered_modes(IA64VpcMachineState *s,
+                                        const IA64VbeMode *modes,
+                                        size_t count,
+                                        uint32_t memory_size)
+{
+    size_t i;
+
+    for (i = 0; i < count; i++) {
+        const IA64VbeMode *mode = &modes[i];
+
+        if (mode->width <= s->vbe_maxx && mode->height <= s->vbe_maxy &&
+            ia64_vbe_mode_size(mode) <= memory_size) {
+            ia64_vbe_add_mode(s, mode);
+        }
+    }
+}
+
+static void ia64_vbe_add_oem_modes(IA64VpcMachineState *s,
+                                   uint32_t memory_size)
+{
+    static const uint8_t bpps[] = { 16, 24, 32 };
+    size_t i;
+    size_t depth;
+
+    for (i = 0; i < G_N_ELEMENTS(ia64_vbe_oem_resolutions); i++) {
+        const IA64VbeResolution *resolution =
+            &ia64_vbe_oem_resolutions[i];
+
+        for (depth = 0; depth < G_N_ELEMENTS(bpps); depth++) {
+            IA64VbeMode mode = {
+                .number = resolution->base_number + depth,
+                .width = resolution->width,
+                .height = resolution->height,
+                .bpp = bpps[depth],
+            };
+
+            if (mode.width <= s->vbe_maxx && mode.height <= s->vbe_maxy &&
+                ia64_vbe_mode_size(&mode) <= memory_size) {
+                ia64_vbe_add_mode(s, &mode);
+            }
+        }
+    }
+}
+
+static bool ia64_vpc_build_vbe_config(IA64VpcMachineState *s, Error **errp)
+{
+    static const uint8_t native_bpps[] = { 16, 24, 32 };
+    static const uint16_t native_numbers[] = {
+        IA64_VBE_NATIVE_MODE_16,
+        IA64_VBE_NATIVE_MODE_24,
+        IA64_VBE_NATIVE_MODE_32,
+    };
+    PCIIORegion *fb = &s->vga_dev->io_regions[0];
+    PCIIORegion *mmio = &s->vga_dev->io_regions[2];
+    qemu_edid_info edid_info = {
+        .vendor = "RHT",
+        .name = "QEMU IA64",
+        .prefx = s->vbe_prefx,
+        .prefy = s->vbe_prefy,
+        .maxx = s->vbe_maxx,
+        .maxy = s->vbe_maxy,
+        .refresh_rate = 60000,
+    };
+    uint32_t memory_size;
+    uint64_t required_size;
+    uint64_t required_mb;
+    uint64_t suggested_mb;
+    size_t edid_size;
+    size_t i;
+
+    _Static_assert(G_N_ELEMENTS(ia64_vbe_legacy_modes) +
+                   G_N_ELEMENTS(ia64_vbe_oem_resolutions) * 3 +
+                   G_N_ELEMENTS(native_bpps) <= IA64_VBE_MAX_MODES,
+                   "IA-64 VBE mode array is too small");
+
+    if (fb->memory == NULL || mmio->memory == NULL) {
+        error_setg(errp,
+                   "VGA device '%s' does not provide framebuffer BAR 0 and "
+                   "MMIO BAR 2 required by the IA-64 VBE bridge",
+                   object_get_typename(OBJECT(s->vga_dev)));
+        return false;
+    }
+    if (fb->size > IA64_VGA_FIXED_FB_SIZE) {
+        error_setg(errp,
+                   "VGA framebuffer aperture is 0x%" PRIx64
+                   " bytes, exceeding the IA-64 fixed-window limit of "
+                   "0x%" PRIx64 " bytes",
+                   (uint64_t)fb->size, (uint64_t)IA64_VGA_FIXED_FB_SIZE);
+        return false;
+    }
+
+    memory_size = ia64_vbe_memory_size();
+    if (memory_size == 0 || memory_size > fb->size ||
+        memory_size > IA64_VGA_FIXED_FB_SIZE) {
+        error_setg(errp,
+                   "VGA memory size 0x%x is not addressable through the "
+                   "IA-64 framebuffer aperture of 0x%" PRIx64 " bytes",
+                   memory_size, (uint64_t)fb->size);
+        return false;
+    }
+
+    required_size = (uint64_t)s->vbe_prefx * s->vbe_prefy * 4;
+    if (required_size > memory_size) {
+        required_mb = DIV_ROUND_UP(required_size, MiB);
+        suggested_mb = 1;
+        while (suggested_mb < required_mb) {
+            suggested_mb <<= 1;
+        }
+        suggested_mb = MAX(suggested_mb, 16);
+        error_setg(errp,
+                   "VGA preferred mode %ux%ux32 requires %" PRIu64
+                   " MiB of video memory; set vgamem_mb=%" PRIu64
+                   " or larger",
+                   s->vbe_prefx, s->vbe_prefy, required_mb, suggested_mb);
+        return false;
+    }
+
+    s->vbe_mode_count = 0;
+    if (s->vbe_prefx == IA64_VBE_DEFAULT_XRES &&
+        s->vbe_prefy == IA64_VBE_DEFAULT_YRES &&
+        s->vbe_maxx == IA64_VBE_DEFAULT_XRES &&
+        s->vbe_maxy == IA64_VBE_DEFAULT_YRES) {
+        for (i = 0; i < G_N_ELEMENTS(ia64_vbe_legacy_modes); i++) {
+            ia64_vbe_add_mode(s, &ia64_vbe_legacy_modes[i]);
+        }
+    } else {
+        ia64_vbe_add_filtered_modes(s, ia64_vbe_legacy_modes,
+                                    G_N_ELEMENTS(ia64_vbe_legacy_modes),
+                                    memory_size);
+        ia64_vbe_add_oem_modes(s, memory_size);
+        for (i = 0; i < G_N_ELEMENTS(native_bpps); i++) {
+            IA64VbeMode native = {
+                .number = native_numbers[i],
+                .width = s->vbe_prefx,
+                .height = s->vbe_prefy,
+                .bpp = native_bpps[i],
+            };
+
+            if (!ia64_vbe_has_geometry(s, &native)) {
+                ia64_vbe_add_mode(s, &native);
+            }
+        }
+    }
+
+    memset(s->vbe_edid, 0, sizeof(s->vbe_edid));
+    /*
+     * Preserve the historical single-block EDID for the default mode.  For
+     * configured modes, give qemu_edid_generate() room for CEA and DisplayID
+     * extensions when the preferred timing no longer fits in a base EDID
+     * detailed-timing descriptor (4K60 is one such case).
+     */
+    edid_size = s->vbe_prefx == IA64_VBE_DEFAULT_XRES &&
+                s->vbe_prefy == IA64_VBE_DEFAULT_YRES &&
+                s->vbe_maxx == IA64_VBE_DEFAULT_XRES &&
+                s->vbe_maxy == IA64_VBE_DEFAULT_YRES ?
+                128 : sizeof(s->vbe_edid);
+    qemu_edid_generate(s->vbe_edid, edid_size, &edid_info);
+    s->vbe_edid_blocks = 1 + s->vbe_edid[126];
+    g_assert(s->vbe_edid_blocks <= sizeof(s->vbe_edid) / 128);
+    return true;
 }
 
 static void ia64_vga_writeb(uint16_t port, uint8_t value)
@@ -682,7 +1030,7 @@ static void ia64_int10_controller_info(IA64VpcMachineState *s)
 static void ia64_int10_mode_info(IA64VpcMachineState *s)
 {
     const IA64VbeMode *mode =
-        ia64_vbe_find_mode(s->int10_request.cx & 0x01ff);
+        ia64_vbe_find_mode(s, s->int10_request.cx & 0x01ff);
     uint32_t pitch;
     uint32_t image_size;
     uint32_t memory_size;
@@ -764,7 +1112,6 @@ static const IA64VbeMode *ia64_int10_current_mode(IA64VpcMachineState *s,
     uint16_t bpp;
     size_t i;
 
-    (void)s;
     if (!(enable & VBE_DISPI_ENABLED)) {
         *number = 3;
         return NULL;
@@ -772,11 +1119,11 @@ static const IA64VbeMode *ia64_int10_current_mode(IA64VpcMachineState *s,
     width = ia64_vbe_read(VBE_DISPI_INDEX_XRES);
     height = ia64_vbe_read(VBE_DISPI_INDEX_YRES);
     bpp = ia64_vbe_read(VBE_DISPI_INDEX_BPP);
-    for (i = 0; i < G_N_ELEMENTS(ia64_vbe_modes); i++) {
-        if (ia64_vbe_modes[i].width == width &&
-            ia64_vbe_modes[i].height == height &&
-            ia64_vbe_modes[i].bpp == bpp) {
-            mode = &ia64_vbe_modes[i];
+    for (i = 0; i < s->vbe_mode_count; i++) {
+        if (s->vbe_modes[i].width == width &&
+            s->vbe_modes[i].height == height &&
+            s->vbe_modes[i].bpp == bpp) {
+            mode = &s->vbe_modes[i];
             break;
         }
     }
@@ -790,7 +1137,7 @@ static const IA64VbeMode *ia64_int10_current_mode(IA64VpcMachineState *s,
 static void ia64_int10_set_mode(IA64VpcMachineState *s)
 {
     const IA64VbeMode *mode =
-        ia64_vbe_find_mode(s->int10_request.bx & 0x01ff);
+        ia64_vbe_find_mode(s, s->int10_request.bx & 0x01ff);
     uint32_t image_size;
     uint16_t enable;
 
@@ -931,28 +1278,20 @@ static void ia64_int10_dpms(IA64VpcMachineState *s)
 
 static void ia64_int10_ddc(IA64VpcMachineState *s)
 {
-    qemu_edid_info edid_info = {
-        .vendor = "RHT",
-        .name = "QEMU IA64",
-        .prefx = 1280,
-        .prefy = 1024,
-        .maxx = 1280,
-        .maxy = 1024,
-        .refresh_rate = 60000,
-    };
     uint8_t subfunction = s->int10_request.bx;
+    uint16_t block = s->int10_request.dx;
 
     switch (subfunction) {
     case 0:
         s->int10_result.bx = 0x0103;
         break;
     case 1:
-        if (s->int10_request.dx != 0) {
+        if (block >= s->vbe_edid_blocks) {
             ia64_int10_vbe_failure(s);
             return;
         }
         ia64_int10_response_size(s, 128);
-        qemu_edid_generate(s->int10_response, 128, &edid_info);
+        memcpy(s->int10_response, s->vbe_edid + block * 128, 128);
         break;
     default:
         ia64_int10_vbe_failure(s);
@@ -1195,7 +1534,7 @@ static void ia64_vpc_install_int10(IA64VpcMachineState *s)
     g_assert(IA64_INT10_ROM_REVISION_OFFSET + sizeof(ia64_vbe_revision) <=
              IA64_INT10_ROM_MODES_OFFSET);
     g_assert(IA64_INT10_ROM_MODES_OFFSET +
-             (G_N_ELEMENTS(ia64_vbe_modes) + 1) * 2 < sizeof(rom));
+             (s->vbe_mode_count + 1) * 2 < sizeof(rom));
     rom[0] = 0x55;
     rom[1] = 0xaa;
     rom[2] = IA64_INT10_ROM_SIZE / 512;
@@ -1233,12 +1572,12 @@ static void ia64_vpc_install_int10(IA64VpcMachineState *s)
            ia64_vbe_product, sizeof(ia64_vbe_product));
     memcpy(rom + IA64_INT10_ROM_REVISION_OFFSET,
            ia64_vbe_revision, sizeof(ia64_vbe_revision));
-    for (i = 0; i < G_N_ELEMENTS(ia64_vbe_modes); i++) {
+    for (i = 0; i < s->vbe_mode_count; i++) {
         stw_le_p(rom + IA64_INT10_ROM_MODES_OFFSET + i * 2,
-                 ia64_vbe_modes[i].number);
+                 s->vbe_modes[i].number);
     }
     stw_le_p(rom + IA64_INT10_ROM_MODES_OFFSET +
-             G_N_ELEMENTS(ia64_vbe_modes) * 2, 0xffff);
+             s->vbe_mode_count * 2, 0xffff);
 
     for (i = 0; i < sizeof(rom) - 1; i++) {
         checksum += rom[i];
@@ -1577,6 +1916,11 @@ typedef struct IA64VpcCompatDefault {
 } IA64VpcCompatDefault;
 
 static const IA64VpcCompatDefault ia64_vpc_compat_defaults[] = {
+    /* Keep the VGA's EDID and the IA-64 VBE default at the legacy 1280x1024. */
+    { "ati-vga", "xres", "1280" },
+    { "ati-vga", "yres", "1024" },
+    { "VGA", "xres", "1280" },
+    { "VGA", "yres", "1024" },
     /*
      * Some IA-64 USB hub drivers use an alignment-requiring 32-bit load for
      * packed extended-property descriptors.  Do not expose the optional
@@ -2786,7 +3130,21 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
 #endif
 
 #ifdef CONFIG_IA64_VPC_GRAPHICS
-    s->vga_dev = pci_vga_init(pci_bus);
+    s->vga_dev = pci_vga_new();
+    if (s->vga_dev != NULL) {
+        if (!ia64_vpc_prepare_vga_properties(s, s->vga_dev, errp)) {
+            object_unref(OBJECT(s->vga_dev));
+            s->vga_dev = NULL;
+            return false;
+        }
+        if (!pci_realize_and_unref(s->vga_dev, pci_bus, errp)) {
+            s->vga_dev = NULL;
+            return false;
+        }
+        if (!ia64_vpc_build_vbe_config(s, errp)) {
+            return false;
+        }
+    }
 #endif
     if (!ia64_vpc_enable_vga_legacy_switch(s->vga_dev, errp)) {
         return false;

@@ -66,6 +66,50 @@ Machine properties
   ``zero`` is the default.
   The full model is not currently SMP-safe and is rejected with more than one vCPU.
 
+VBE display modes
+-----------------
+
+The IA-64 INT 10h implementation builds its VBE mode list and DDC EDID from
+the selected VGA device's existing ``xres``, ``yres``, ``xmax``, ``ymax``,
+and ``vgamem_mb`` properties.  ``xres`` and ``yres`` select the preferred
+resolution and are also the VBE mode-list limit when ``xmax`` and ``ymax``
+are not specified.  An exact 16-, 24-, and 32-bpp preferred mode is added
+when the resolution is not in the built-in mode table.  The default remains
+1280x1024 with 16 MiB of video memory.
+
+Use ``-vga`` together with ``-global`` because a VGA global property by
+itself suppresses creation of the default display device.  For example, an
+ATI-compatible 3840x2160 display needs 32 MiB of video memory::
+
+  -vga ati \
+  -global ati-vga.xres=3840 \
+  -global ati-vga.yres=2160 \
+  -global ati-vga.vgamem_mb=32
+
+The equivalent standard VGA configuration is::
+
+  -vga std \
+  -global VGA.xres=3840 \
+  -global VGA.yres=2160 \
+  -global VGA.vgamem_mb=32
+
+``xmax`` and ``ymax`` may be used to make the enumerated limit larger than
+the preferred resolution.  They must be specified together, and the
+preferred resolution must not exceed them.  Modes which do not fit in the
+configured video memory are omitted, while failure to fit the preferred
+32-bpp mode is a startup error.
+
+The IA-64 fixed PCI layout places the framebuffer at 0xc4000000 and VGA MMIO
+at 0xc8000000, limiting the framebuffer aperture and ``vgamem_mb`` to 64 MiB.
+This accommodates 5120x2880x32, while 7680x4320x32 requires a different PCI
+layout and is not supported.  The common Bochs VBE implementation also
+requires the horizontal preferred resolution to be a multiple of eight;
+for example, use 1360x768 instead of 1366x768.
+
+The host monitor size is not detected automatically.  Explicit VGA
+properties give consistent behavior with GTK, VNC, SPICE, and headless
+display backends.
+
 Firmware and boot media
 -----------------------
 

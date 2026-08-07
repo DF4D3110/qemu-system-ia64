@@ -78,10 +78,11 @@ static int i2c_ddc_tx(I2CSlave *i2c, uint8_t data)
     return 0;
 }
 
-static void i2c_ddc_init(Object *obj)
+static void i2c_ddc_realize(DeviceState *dev, Error **errp)
 {
-    I2CDDCState *s = I2CDDC(obj);
+    I2CDDCState *s = I2CDDC(dev);
 
+    (void)errp;
     qemu_edid_generate(s->edid_blob, sizeof(s->edid_blob), &s->edid_info);
 }
 
@@ -105,6 +106,7 @@ static void i2c_ddc_class_init(ObjectClass *oc, const void *data)
     I2CSlaveClass *isc = I2C_SLAVE_CLASS(oc);
 
     device_class_set_legacy_reset(dc, i2c_ddc_reset);
+    dc->realize = i2c_ddc_realize;
     dc->vmsd = &vmstate_i2c_ddc;
     device_class_set_props(dc, i2c_ddc_properties);
     isc->event = i2c_ddc_event;
@@ -116,7 +118,6 @@ static const TypeInfo i2c_ddc_info = {
     .name = TYPE_I2CDDC,
     .parent = TYPE_I2C_SLAVE,
     .instance_size = sizeof(I2CDDCState),
-    .instance_init = i2c_ddc_init,
     .class_init = i2c_ddc_class_init
 };
 
