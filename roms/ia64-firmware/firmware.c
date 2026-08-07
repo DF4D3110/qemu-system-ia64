@@ -123,7 +123,7 @@
 #define ACPI_FADT_FLAG_RESET_REG_SUP (1U << 10)
 #define ACPI_FADT_FLAG_SW_CPU_SLP    (1U << 13)
 #define VGA_MODE_TEXT_WIDTH  640U
-#define VGA_MODE_TEXT_HEIGHT 480U
+#define VGA_MODE_TEXT_HEIGHT 400U
 #define VGA_MODE_800_WIDTH   800U
 #define VGA_MODE_800_HEIGHT  600U
 #define VGA_MODE_1024_WIDTH  1024U
@@ -4586,9 +4586,10 @@ static UINT64 text_pixel_pair(UINT32 Left, UINT32 Right)
 }
 
 /*
- * SimpleTextOut exposes a conventional 80x25 grid, while GOP mode 0 is
- * square-pixel 640x480.  Scale the logical 640x400 text plane over the
- * complete GOP surface so row 24 is the physical bottom row.
+ * SimpleTextOut exposes a conventional 80x25 grid.  GOP mode 0 is the
+ * matching 640x400 surface, so the 8x16 font is rendered at its native
+ * aspect ratio.  Keep the scaling path for text drawn after a GOP client
+ * selects one of the larger graphics modes.
  */
 static void text_graphics_cell_bounds(UINTN Column, UINTN Row,
                                       UINTN *X0, UINTN *Y0,
@@ -28559,7 +28560,7 @@ void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
     uart_puts("Console Out:          Serial 16550 + VGA text\r\n");
     uart_puts("Console In:           Serial/PS2/USB ready\r\n");
     uart_puts("Graphics Output:      GOP/UGA VGA BGRx "
-              "640x480x32, 800x600x32, 1024x768x32, "
+              "640x400x32, 800x600x32, 1024x768x32, "
               "1280x1024x32 @ 0xc4000000\r\n");
     uart_puts("UEFI Boot Services:   LoadImage/StartImage/GetMemoryMap ready\r\n");
     uart_puts("Block I/O Protocol:   installed (");
