@@ -111,7 +111,6 @@ mkdir -p build-win64
     --host-cc=gcc \
     --python=/usr/bin/python3 \
     --target-list=ia64-softmmu \
-    --without-default-features \
     --enable-system \
     --enable-tcg \
     --enable-pixman \

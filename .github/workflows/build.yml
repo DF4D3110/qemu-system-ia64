@@ -6,6 +6,8 @@ on:
       - main
     tags:
       - "v*"
+    paths-ignore:
+      - README.md
   pull_request:
   workflow_dispatch:
 
@@ -151,7 +153,6 @@ jobs:
             CC=gcc CXX=g++ ../configure \
               --python=/usr/bin/python3 \
               --target-list=ia64-softmmu \
-              --without-default-features \
               --enable-system \
               --enable-tcg \
               --enable-pixman \
@@ -277,7 +278,6 @@ jobs:
             CC=gcc CXX=g++ ../configure \
               --python=/mingw64/bin/python \
               --target-list=ia64-softmmu \
-              --without-default-features \
               --enable-system \
               --enable-tcg \
               --enable-pixman \
