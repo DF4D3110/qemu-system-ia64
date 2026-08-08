@@ -399,6 +399,7 @@ struct IA64VpcMachineClass {
     MachineClass parent_class;
 
     uint64_t firmware_compat_flags;
+    bool default_ahci;
 };
 
 struct IA64VpcMachineState {
@@ -2960,6 +2961,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     DriveInfo *sata_drives[6] = { NULL };
     AHCIPCIState *ahci;
 #endif
+    uint32_t reserved_pci_slots = 1U << 0;
     int i;
 
     if (!ia64_vpc_validate_configuration(machine, s, errp)) {
@@ -3046,11 +3048,17 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     pci_bus = PCI_BUS(qdev_get_child_bus(pci_host, "pci"));
 
     /*
-     * Slot 0 is intentionally empty in the default machine.  Reserve it while
-     * creating the built-in devices so their historical slot numbers remain
-     * stable, then release it for an explicitly requested PCI controller.
+     * Slot 0 is intentionally empty.  When AHCI is omitted, reserve its
+     * historical slot 1 too so the remaining built-in devices do not move.
+     * Release both slots after creating those devices so explicitly requested
+     * PCI controllers can use them.
      */
-    pci_bus_set_slot_reserved_mask(pci_bus, 1U << 0);
+#ifdef CONFIG_IA64_VPC_STORAGE
+    if (!ivmc->default_ahci) {
+        reserved_pci_slots |= 1U << 1;
+    }
+#endif
+    pci_bus_set_slot_reserved_mask(pci_bus, reserved_pci_slots);
     pci_io = pci_bus->address_space_io;
 
     /*
@@ -3084,17 +3092,16 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
                                                IA64_PCI_INTX_GSI_BASE + i));
     }
 
-    /*
-     * AHCI remains available for guests that support SATA.  Firmware boot
-     * storage is provided by the LSI SCSI HBA below.
-     */
+    /* The Itanium 2 profile adds AHCI; firmware boots from LSI SCSI below. */
 #ifdef CONFIG_IA64_VPC_STORAGE
-    s->ahci_dev = pci_create_simple(pci_bus, -1, TYPE_ICH9_AHCI);
-    ia64_vpc_configure_ahci(s->ahci_dev);
-    ahci = ICH9_AHCI(s->ahci_dev);
-    g_assert(ahci->ahci.ports <= ARRAY_SIZE(sata_drives));
-    ide_drive_get(sata_drives, ahci->ahci.ports);
-    ahci_ide_create_devs(&ahci->ahci, sata_drives);
+    if (ivmc->default_ahci) {
+        s->ahci_dev = pci_create_simple(pci_bus, -1, TYPE_ICH9_AHCI);
+        ia64_vpc_configure_ahci(s->ahci_dev);
+        ahci = ICH9_AHCI(s->ahci_dev);
+        g_assert(ahci->ahci.ports <= ARRAY_SIZE(sata_drives));
+        ide_drive_get(sata_drives, ahci->ahci.ports);
+        ahci_ide_create_devs(&ahci->ahci, sata_drives);
+    }
 #endif
 
     isa_bus = isa_bus_new(NULL, get_system_memory(), pci_io, errp);
@@ -3159,7 +3166,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
 #ifdef CONFIG_IA64_VPC_NETWORK
     ia64_vpc_init_network(s, pci_bus);
 #endif
-    pci_bus_clear_slot_reserved_mask(pci_bus, 1U << 0);
+    pci_bus_clear_slot_reserved_mask(pci_bus, reserved_pci_slots);
 
     s->powerdown_notifier.notify = ia64_vpc_powerdown_req;
     qemu_register_powerdown_notifier(&s->powerdown_notifier);
@@ -3279,6 +3286,7 @@ static void itanium_vpc_machine_class_init(ObjectClass *oc, const void *data)
     mc->desc = "IA-64 virtual PC with early Itanium firmware compatibility";
     mc->default_cpu_type = IA64_CPU_TYPE_NAME("merced");
     ivmc->firmware_compat_flags = IA64_FW_COMPAT_LEGACY_LOADER_MASK;
+    ivmc->default_ahci = false;
     ia64_vpc_add_compat_defaults(mc);
 }
 
@@ -3293,6 +3301,7 @@ static void itanium2_vpc_machine_class_init(ObjectClass *oc, const void *data)
     mc->alias = "ia64-vpc";
     mc->default_cpu_type = IA64_CPU_TYPE_NAME("montecito");
     ivmc->firmware_compat_flags = 0;
+    ivmc->default_ahci = true;
     ia64_vpc_add_compat_defaults(mc);
 }
 

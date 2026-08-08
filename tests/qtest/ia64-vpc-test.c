@@ -1168,6 +1168,43 @@ static void assert_pci_device(QPCIBus *bus, const ExpectedPCIDevice *expected)
     g_free(dev);
 }
 
+static void count_pci_device(QPCIDevice *dev, int devfn, void *opaque)
+{
+    unsigned int *count = opaque;
+
+    (void)devfn;
+    (*count)++;
+    g_free(dev);
+}
+
+static unsigned int pci_device_count(QPCIBus *bus, uint16_t vendor,
+                                     uint16_t device)
+{
+    unsigned int count = 0;
+
+    qpci_device_foreach(bus, vendor, device, count_pci_device, &count);
+    return count;
+}
+
+static void test_pci_itanium_no_default_ahci(void)
+{
+    QTestState *qts =
+        qtest_init("-machine itanium-vpc -m 256M -S");
+    QGenericPCIBus gbus;
+    unsigned int function;
+
+    ia64_qpci_init(&gbus, qts);
+    g_assert_cmpuint(pci_device_count(&gbus.bus, PCI_VENDOR_ID_INTEL,
+                                     0x2922), ==, 0);
+    for (function = 0; function < 8; function++) {
+        QPCIDevice *empty =
+            qpci_device_find(&gbus.bus, QPCI_DEVFN(1, function));
+
+        g_assert_null(empty);
+    }
+    qtest_quit(qts);
+}
+
 static void test_pci_default_layout(void)
 {
     static const ExpectedPCIDevice devices[] = {
@@ -1950,6 +1987,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/nvram/commit-and-restart",
                    test_nvram_commit_and_restart);
     qtest_add_func("/ia64-vpc/pci/default-layout", test_pci_default_layout);
+    qtest_add_func("/ia64-vpc/pci/itanium-no-default-ahci",
+                   test_pci_itanium_no_default_ahci);
     qtest_add_func("/ia64-vpc/pci/explicit-cmd646-slot0",
                    test_pci_explicit_cmd646_slot0);
     qtest_add_func("/ia64-vpc/network/resources-survive-reset",
