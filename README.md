@@ -207,7 +207,7 @@ The default machine is `ia64-vpc`. It models an Itanium 2 based virtual PC inten
 | --- | --- | --- |
 | Machine | `ia64-vpc` | Backward-compatible alias of `itanium2-vpc`; `itanium-vpc` is available for first-generation compatibility |
 | CPU | `montecito` | `merced` and `madison` are also available |
-| vCPUs | 1 | Configurable from 1 to 4; use `-accel tcg,thread=single` for one vCPU and `thread=multi` for two to four vCPUs |
+| vCPUs | 1 | Configurable from 1 to 64; use `-accel tcg,thread=single` for one vCPU and `thread=multi` for 2 to 64 vCPUs |
 | RAM | 2 GiB | Override with the standard QEMU `-m` option |
 | Firmware | Project-owned IA-64 EFI firmware | Built from source under `roms/ia64-firmware/` |
 | Graphics | ATI-compatible PCI graphics | Standard VGA is available with `-vga std` |
