@@ -82,6 +82,8 @@ static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
         ((psr >> 8) & IA64_TB_FLAG_PSR_IC) |
         ((psr << 5) & IA64_TB_FLAG_BE) |
         ((uint32_t)cpu->env.instruction_group_start << 7) |
+        (cpu->env.mmu.icache_sync_deferred ?
+         IA64_TB_FLAG_ICACHE_SYNC : 0) |
         ((psr >> (IA64_PSR_CPL_SHIFT - IA64_TB_FLAG_CPL_SHIFT)) &
          IA64_TB_FLAG_CPL_MASK);
 

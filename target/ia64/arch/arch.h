@@ -24,6 +24,7 @@ void ia64_mmu_itr_insert(CPUIA64State *env, uint64_t pte,
                          uint64_t raw, uint32_t fault_slot);
 void ia64_mmu_ptr_purge(CPUIA64State *env, uint64_t ifa,
                         uint64_t size_reg, uint32_t is_data);
+void ia64_mmu_invalidate_tc(CPUIA64State *env);
 void ia64_mmu_ptc_purge(CPUIA64State *env, uint64_t va,
                         uint64_t size_reg, uint32_t mode);
 uint64_t ia64_mmu_tpa(CPUIA64State *env, uint64_t va);

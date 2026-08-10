@@ -331,3 +331,35 @@ bool ia64_exec_physical_rw(uint64_t addr, void *buffer, size_t size,
                             MEMTXATTRS_UNSPECIFIED, buffer, size,
                             is_write) == MEMTX_OK;
 }
+
+void ia64_exec_invalidate_phys_range(CPUIA64State *env, uint64_t addr,
+                                     uint64_t length)
+{
+    hwaddr start = addr;
+    hwaddr remaining = length;
+
+    /*
+     * TB addresses use RAMBlock offsets, not guest physical addresses.
+     * Resolve aliases so high RAM invalidates the correct backing pages.
+     */
+    RCU_READ_LOCK_GUARD();
+    while (remaining != 0) {
+        hwaddr xlat;
+        hwaddr len = remaining;
+        MemoryRegion *mr;
+
+        mr = address_space_translate(&address_space_memory, start, &xlat,
+                                     &len, false, MEMTXATTRS_UNSPECIFIED);
+        if (len == 0) {
+            break;
+        }
+        if (memory_region_is_ram(mr) || memory_region_is_romd(mr)) {
+            ram_addr_t ram_addr = memory_region_get_ram_addr(mr) + xlat;
+
+            tb_invalidate_phys_range(env_cpu(env), ram_addr,
+                                     ram_addr + len - 1);
+        }
+        start += len;
+        remaining -= len;
+    }
+}

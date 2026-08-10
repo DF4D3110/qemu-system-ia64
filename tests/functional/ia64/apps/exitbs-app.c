@@ -32,6 +32,7 @@ static BOOLEAN legacy_text_handoff_is_ready(void)
 
 static UINT8 sal_guid[16] = IA64_GUID_SAL;
 static UINT8 smbios_guid[16] = IA64_GUID_SMBIOS;
+static UINT8 gop_guid[16] = IA64_GUID_GOP;
 static UINT8 debug_image_guid[16] = {
     0x77, 0x2e, 0x15, 0x49, 0xda, 0x1a, 0x64, 0x47,
     0xb7, 0xa2, 0x7a, 0xfe, 0xfe, 0xd9, 0x5e, 0x8b,
@@ -296,6 +297,20 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
     BOOLEAN runtime_pointers_mapped;
     BOOLEAN runtime_functions_mapped;
     BOOLEAN configuration_tables_mapped;
+    EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = NULL;
+    BOOLEAN graphics_mode_selected;
+
+    /*
+     * Match a loader such as GRUB gfxterm: explicitly select a GOP graphics
+     * mode, then rely on the firmware's IA-64 ExitBootServices handoff to
+     * restore the legacy text mode used by vgacon.
+     */
+    graphics_mode_selected =
+        boot_services->LocateProtocol(gop_guid, NULL, (VOID **)&gop) ==
+            EFI_SUCCESS &&
+        gop != NULL && gop->SetMode != NULL &&
+        gop->SetMode(gop, 1U) == EFI_SUCCESS &&
+        vbe_read(VBE_DISPI_INDEX_ENABLE) != 0;
 
     status = get_final_memory_map(boot_services, &map, &map_size, &map_key,
                                   &descriptor_size, &descriptor_version);
@@ -375,7 +390,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
             SystemTable->ConfigurationTable == configuration_table,
         EFI_DEVICE_ERROR, "configuration-table-changed");
     ia64_test_check(
-        &context, "legacy-text-handoff", legacy_text_handoff_is_ready(),
+        &context, "legacy-text-handoff",
+        graphics_mode_selected && legacy_text_handoff_is_ready(),
         EFI_DEVICE_ERROR, "vga-not-in-legacy-text-mode");
     convert_address = runtime_services;
     original_address = convert_address;

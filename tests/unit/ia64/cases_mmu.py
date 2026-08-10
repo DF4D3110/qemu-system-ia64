@@ -30,6 +30,9 @@ from .encoding import (
     IA64_EXCP_UNALIGNED,
     IA64_FIRMWARE_IVT_BASE,
     IA64_FW_IDENTITY_BASE,
+    IA64_GENERAL_VECTOR,
+    IA64_GENEX_UNIMPL_DATA_ADDR,
+    IA64_IMPL_PA_BITS,
     IA64_IMPL_VA_MSB,
     IA64_INST_ACCESS_BIT_VECTOR,
     IA64_INST_ACCESS_VECTOR,
@@ -164,6 +167,8 @@ KERNEL_REGION5_RR = (5 << 8) | LOW_VECTOR_ITIR | 1
 PERCPU_ADDR = 0xfffffffffffc0000
 PERCPU_ITIR = 18 << 2
 REGION7_GRANULE_RR = (7 << 8) | (24 << 2)
+PERCPU_OLD_DATA = 0x1111111111111111
+PERCPU_OLD_DATA_LOW, _ = bundle_words(0x00, PERCPU_OLD_DATA, 0, 0)
 PERCPU_NEW_DATA = 0x2222222222222222
 PERCPU_NEW_DATA_LOW, _ = bundle_words(0x00, PERCPU_NEW_DATA, 0, 0)
 PTE_ACCESSED = 1 << 5
@@ -3622,6 +3627,29 @@ test_ssm_ic_inflight_dtlb_sets_ni = require_registers(
         "r31": IA64_ISR_R | IA64_ISR_NI,
     }, entry=0x10)
 
+test_kr3_update_does_not_serialize_inflight_psr_ic = require_registers(
+    "kr3_update_does_not_serialize_inflight_psr_ic", [
+        (0x10, *movl_mlx(2, HIGH_TR_BASE + 0x58000)),
+        (0x20, *movl_mlx(20, 0x1140000)),
+        (0x30, 0x00, ssm(IA64_PSR_DT), nop_i(), nop_i()),
+        (0x40, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x50, 0x00, ssm(IA64_PSR_IC), nop_i(), nop_i()),
+        (0x60, 0x00, mov_m_gr_ar(20, 3), nop_i(), nop_i()),
+        (0x70, 0x00, ld8(8, 2), nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR, 0x00, mov_m_cr_gr(31, 17), nop_i(),
+         nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_ALT_DTLB_VECTOR + 0x10,
+                 IA64_ALT_DTLB_VECTOR + 0x10)),
+        (IA64_DATA_NESTED_TLB_VECTOR, 0x10, nop_m(), adds(30, 1, 0),
+         br_cond(IA64_DATA_NESTED_TLB_VECTOR,
+                 IA64_DATA_NESTED_TLB_VECTOR)),
+    ], {
+        "ip": IA64_ALT_DTLB_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r31": IA64_ISR_R | IA64_ISR_NI,
+    }, entry=0x10)
+
 test_rsm_ic_inflight_dtlb_not_data_nested = require_registers(
     "rsm_ic_inflight_dtlb_not_data_nested", [
         (0x10, *movl_mlx(2, HIGH_TR_BASE + 0x60000)),
@@ -6345,6 +6373,55 @@ test_percpu_alt_dtlb_uses_updated_kr3_after_ptc_e = require_registers(
         "r31": PERCPU_NEW_DATA_LOW,
     }, entry=0x10)
 
+test_percpu_kr3_update_evicts_old_tc_mapping = require_registers(
+    "percpu_kr3_update_evicts_old_tc_mapping", [
+        (0x10, *movl_mlx(17, PERCPU_ADDR + 0x4b8)),
+        (0x20, *movl_mlx(18, 0x00100000052c0661)),
+        (0x30, *movl_mlx(19, REGION7_GRANULE_RR)),
+        (0x40, *movl_mlx(20, 0x5300000)),
+        (0x50, 0x00, mov_m_gr_ar(20, 3), nop_i(), nop_i()),
+        (0x60, 0x00, mov_rr_write(19, 17), nop_i(), nop_i()),
+        (0x70, 0x00, adds(7, PERCPU_ITIR, 0), nop_i(), nop_i()),
+        (0x80, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+        (0x90, *movl_mlx(16, PERCPU_ADDR)),
+        (0xa0, 0x00, mov_m_gr_cr(16, 20), nop_i(), nop_i()),
+        (0xb0, 0x00, itc_d(18), nop_i(), nop_i()),
+        (0xc0, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_DT)),
+        (0xd0, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0xe0, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0xf0, 0x00, ld8(30, 17), nop_i(), nop_i()),
+        (0x100, *movl_mlx(20, 0x1140000)),
+        (0x110, 0x00, mov_m_gr_ar(20, 3), nop_i(), nop_i()),
+        (0x120, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x130, 0x00, ld8(31, 17), nop_i(), nop_i()),
+        (0x140, 0x10, nop_m(), nop_i(), br_cond(0x140, 0x140)),
+        (IA64_ALT_DTLB_VECTOR, 0x00, mov_m_cr_gr(16, 20), nop_i(),
+         nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x10, 0x00, mov_m_ar_gr(19, 3), nop_i(),
+         nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x20, *movl_mlx(26, 0x40000)),
+        (IA64_ALT_DTLB_VECTOR + 0x30, 0x00, sub_reg(19, 19, 26), nop_i(),
+         nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x40, 0x00, adds(21, 0x661, 0), nop_i(),
+         nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x50, 0x00, or_reg(19, 19, 21), nop_i(),
+         nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x60, 0x00, adds(25, PERCPU_ITIR, 0),
+         nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x70, 0x00, mov_m_gr_cr(25, 21), nop_i(),
+         nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x80, 0x00, itc_d(19), nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x90, 0x10, nop_m(), nop_i(), rfi_b()),
+        (0x52c04b8, 0x00, PERCPU_OLD_DATA, 0, 0),
+        (0x11004b8, 0x00, PERCPU_NEW_DATA, 0, 0),
+    ], {
+        "ip": 0x140,
+        "exception": IA64_EXCP_NONE,
+        "r30": PERCPU_OLD_DATA_LOW,
+        "r31": PERCPU_NEW_DATA_LOW,
+    }, entry=0x10)
+
+
 def test_srlz_i_without_pending_itlb_change_keeps_tb_cache(qemu):
     stats, output = run_program_jit(qemu, [
         (0x10, 0x10, nop_m(), srlz_i(),
@@ -6354,6 +6431,61 @@ def test_srlz_i_without_pending_itlb_change_keeps_tb_cache(qemu):
         raise AssertionError(f"missing translated TB:\n{output}")
     if stats.get("TB flush count") != 0:
         raise AssertionError(f"srlz.i caused TB flush:\n{output}")
+
+
+def test_sync_i_without_pending_fc_i_keeps_tb_cache(qemu):
+    stats, output = run_program_jit(qemu, [
+        (0x10, 0x00, sync_i(), nop_i(), nop_i()),
+        (0x20, 0x10, nop_m(), nop_i(),
+         br_cond(0x20, 0x20)),
+    ], entry=0x10)
+    if stats.get("TB count", 0) < 1:
+        raise AssertionError(f"missing translated TB:\n{output}")
+    if stats.get("TB flush count") != 0:
+        raise AssertionError(
+            f"sync.i without fc.i caused TB flush:\n{output}")
+
+
+def test_fc_i_sync_i_coalesces_global_tb_flush(qemu):
+    stats, output = run_program_jit(qemu, [
+        (0x10, *movl_mlx(16, 0x200)),
+        (0x20, *movl_mlx(17, 0x240)),
+        (0x30, 0x00, fc_i(16), nop_i(), nop_i()),
+        (0x40, 0x01, fc_i(17), nop_i(), nop_i()),
+        (0x50, 0x01, sync_i(), nop_i(), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(),
+         br_cond(0x60, 0x60)),
+    ], entry=0x10)
+    if stats.get("TB flush count") != 1:
+        raise AssertionError(
+            "fc.i window was not completed by one global TB flush:\n" +
+            output)
+
+
+test_fc_i_unimplemented_physical_address_faults = require_registers(
+    "fc_i_unimplemented_physical_address_faults", [
+        (0x10, *movl_mlx(16, 1 << IA64_IMPL_PA_BITS)),
+        (0x20, *movl_mlx(19, IA64_PSR_IC)),
+        (0x30, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x40, 0x01, srlz_d(), nop_i(), nop_i()),
+        (0x50, 0x00, fc_i(16), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR, 0x00,
+         mov_m_cr_gr(8, 19), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(9, 17), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x20, 0x00,
+         mov_m_cr_gr(10, 20), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x30, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_GENERAL_VECTOR + 0x30,
+                 IA64_GENERAL_VECTOR + 0x30)),
+    ], {
+        "ip": IA64_GENERAL_VECTOR + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x50,
+        "r9": (IA64_GENEX_UNIMPL_DATA_ADDR | IA64_ISR_R |
+               IA64_ISR_NA),
+        "r10": 1 << IA64_IMPL_PA_BITS,
+    }, entry=0x10)
 
 
 def test_itlb_mapping_change_keeps_reusable_tb_cache(qemu):
@@ -6379,6 +6511,49 @@ def test_itlb_mapping_change_keeps_reusable_tb_cache(qemu):
         raise AssertionError(
             f"instruction mapping change discarded reusable TBs:\n{output}")
 
+
+FC_HIGH_RAM_TARGET = 0x80210000
+FC_ABOVE_4G_RAM_TARGET = 0x100100000
+
+
+def test_fc_i_high_ram_invalidates_translated_target(qemu):
+    stats, output = run_program_jit(qemu, [
+        (0x10, *movl_mlx(16, FC_HIGH_RAM_TARGET)),
+        (0x20, *movl_mlx(17, 0x60)),
+        (0x30, 0x00, nop_m(), mov_br_gr(1, 17),
+         mov_br_gr(2, 16)),
+        (0x40, 0x10, nop_m(), nop_i(), br_indirect(2)),
+        (0x60, 0x10, fc_i(16), nop_i(), br_cond(0x60, 0x70)),
+        (0x70, 0x01, sync_i(), nop_i(), nop_i()),
+        (0x80, 0x01, srlz_i(), nop_i(), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+        (FC_HIGH_RAM_TARGET, 0x10, nop_m(), adds(30, 1, 0),
+         br_indirect(1)),
+    ], entry=0x10, terminal_ip=0x90, memory="4G")
+    if stats.get("TB invalidate count", 0) < 1:
+        raise AssertionError(
+            "fc.i did not invalidate code in aliased high RAM:\n" + output)
+
+
+def test_fc_i_above_4g_ram_invalidates_translated_target(qemu):
+    stats, output = run_program_jit(qemu, [
+        (0x10, *movl_mlx(16, FC_ABOVE_4G_RAM_TARGET)),
+        (0x20, *movl_mlx(17, 0x60)),
+        (0x30, 0x00, nop_m(), mov_br_gr(1, 17),
+         mov_br_gr(2, 16)),
+        (0x40, 0x10, nop_m(), nop_i(), br_indirect(2)),
+        (0x60, 0x10, fc_i(16), nop_i(), br_cond(0x60, 0x70)),
+        (0x70, 0x01, sync_i(), nop_i(), nop_i()),
+        (0x80, 0x01, srlz_i(), nop_i(), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+        (FC_ABOVE_4G_RAM_TARGET, 0x10, nop_m(), adds(30, 1, 0),
+         br_indirect(1)),
+    ], entry=0x10, terminal_ip=0x90, memory="8G")
+    if stats.get("TB invalidate count", 0) < 1:
+        raise AssertionError(
+            "fc.i did not invalidate code above 4 GiB RAM:\n" + output)
+
+
 _fc_patch_low, _fc_patch_high = bundle_words(
     0x11, nop_m(), adds(31, 2, 0), br_cond(0x100, 0x150)
 )
@@ -6396,9 +6571,9 @@ test_fc_i_invalidates_translated_target = require_registers(
          nop_i()),
         (0x90, 0x10, fc_i(16), nop_i(),
          br_cond(0x90, 0xa0)),
-        (0xa0, 0x00, sync_i(), nop_i(),
+        (0xa0, 0x01, sync_i(), nop_i(),
          nop_i()),
-        (0xb0, 0x00, srlz_i(), nop_i(),
+        (0xb0, 0x01, srlz_i(), nop_i(),
          nop_i()),
         (0xc0, 0x10, nop_m(), nop_i(),
          br_cond(0xc0, 0x100)),
@@ -6433,9 +6608,9 @@ test_fc_i_invalidates_translated_cache_line = require_registers(
          nop_i()),
         (0xb0, 0x10, fc_i(20), nop_i(),
          br_cond(0xb0, 0xc0)),
-        (0xc0, 0x00, sync_i(), nop_i(),
+        (0xc0, 0x01, sync_i(), nop_i(),
          nop_i()),
-        (0xd0, 0x00, srlz_i(), nop_i(),
+        (0xd0, 0x01, srlz_i(), nop_i(),
          nop_i()),
         (0xe0, 0x10, nop_m(), nop_i(),
          br_cond(0xe0, 0x120)),
@@ -6505,8 +6680,12 @@ CASE_NAMES = (
     'dtlb_miss_slot1_resumes_without_replaying_slot0',
     'dtr_match_ignores_vrn',
     'exception_preserves_translation_bits',
+    'fc_i_above_4g_ram_invalidates_translated_target',
+    'fc_i_high_ram_invalidates_translated_target',
     'fc_i_invalidates_translated_cache_line',
     'fc_i_invalidates_translated_target',
+    'fc_i_sync_i_coalesces_global_tb_flush',
+    'fc_i_unimplemented_physical_address_faults',
     'fetchadd4_alt_dtlb_sets_read_write_isr',
     'firmware_identity_ends_after_iva_handoff',
     'firmware_identity_does_not_override_user_mapping',
@@ -6576,6 +6755,7 @@ CASE_NAMES = (
     'itr_i_slot_uses_low_8_bits',
     'itr_i_survives_region_register_write',
     'itr_i_uses_region_rid',
+    'kr3_update_does_not_serialize_inflight_psr_ic',
     'lfetch_fault_checks_translation',
     'lfetch_nonfault_suppresses_translation_fault',
     'long_vhpt_not_present_ignores_software_fields',
@@ -6604,6 +6784,7 @@ CASE_NAMES = (
     'mov_rr_merced_unimplemented_rid_bit_faults',
     'no_ic_data_access_enters_vector_with_ni',
     'percpu_alt_dtlb_uses_updated_kr3_after_ptc_e',
+    'percpu_kr3_update_evicts_old_tc_mapping',
     'probe_dt_disabled_maintenance_bits_grant',
     'lfetch_fault_natpage_isr_code',
     'probe_fault_short_vhpt_not_present_raises_page_fault',
@@ -6689,6 +6870,7 @@ CASE_NAMES = (
     'ssm_ic_inflight_dtlb_sets_ni',
     'ssm_ic_inflight_short_vhpt_entry_miss_raises_vhpt',
     'ssm_pk_invalidates_cached_keyless_access',
+    'sync_i_without_pending_fc_i_keeps_tb_cache',
     'tak_nat_source_consumes_non_access',
     'tak_not_present_dtlb_returns_one',
     'tak_uses_short_vhpt_walk',
@@ -6734,6 +6916,8 @@ CASE_METADATA = {
     'itc_i_present_reserved_pte_field_fault': CaseMetadata(terminal_is_fault_ip=True),
     'itr_i_8k_translation_uses_unrounded_paddr': CaseMetadata(nonterminal_effect_loop=True),
     'itr_i_clear_accessed_raises_inst_access_bit': CaseMetadata(nonterminal_effect_loop=True),
+    'kr3_update_does_not_serialize_inflight_psr_ic':
+        CaseMetadata(nonterminal_effect_loop=True),
     'ptr_i_purges_matching_itr_by_address': CaseMetadata(nonterminal_effect_loop=True),
     'rsm_ic_inflight_dtlb_not_data_nested': CaseMetadata(nonterminal_effect_loop=True),
     'sal_boot_nonstandard_direct_tc_is_purgeable_after_iva_handoff':

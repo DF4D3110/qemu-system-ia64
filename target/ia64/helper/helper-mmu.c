@@ -3,6 +3,7 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "exec/helper-proto.h"
+#include "exec/tb-flush.h"
 #include "arch/arch.h"
 #include "trace.h"
 
@@ -44,6 +45,47 @@ void helper_merced_dtlb1_touch(CPUIA64State *env, uint64_t va, uint32_t size)
 void helper_fc(CPUIA64State *env, uint64_t addr)
 {
     ia64_mmu_fc(env, addr);
+}
+
+uint32_t helper_sync_i(CPUIA64State *env)
+{
+    CPUState *cs = env_cpu(env);
+
+    /*
+     * fc.i performs precise invalidation as an optimization, but sync.i is
+     * the architectural point at which all preceding instruction-cache
+     * flushes become visible.  TCG's translated-code cache is global and can
+     * contain aliases not represented by a single guest physical interval,
+     * so conservatively complete the pending window with one global flush.
+     * The generated code exits after this instruction, allowing the queued
+     * operation to run from a safe CPU-loop context.
+     */
+    if (!env->mmu.icache_flush_pending &&
+        !env->mmu.icache_sync_deferred) {
+        return 0;
+    }
+
+    /*
+     * An atomic helper can make TCG repeat an IA-64 bundle under the global
+     * exclusive lock.  Flushing the code cache from target code in that
+     * context would invalidate the TB that is still executing.  Complete the
+     * architected instruction now and let the flagged next TB perform the
+     * host-side flush after cpu_exec_step_atomic() releases the lock.
+     */
+    if (cpu_in_exclusive_context(cs)) {
+        env->mmu.icache_sync_deferred = true;
+        return 2;
+    }
+
+    env->mmu.icache_flush_pending = false;
+    env->mmu.icache_sync_deferred = false;
+    queue_tb_flush(cs);
+    return 1;
+}
+
+void helper_sync_i_exit(CPUIA64State *env)
+{
+    cpu_loop_exit_noexc(env_cpu(env));
 }
 
 void helper_itr_insert(CPUIA64State *env, uint64_t pte, uint64_t slot_reg,

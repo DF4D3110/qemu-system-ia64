@@ -481,6 +481,7 @@ typedef enum IA64ApplicationRegisterIndex {
     IA64_AR_KR0 = 0,
     IA64_AR_KR1 = 1,
     IA64_AR_KR2 = 2,
+    IA64_AR_KR3 = 3,
     IA64_AR_KR7 = 7,
     IA64_AR_RSC = 16,
     IA64_AR_BSP = 17,
@@ -962,6 +963,7 @@ static inline void ia64_rse_mark_gr_dirty(CPUIA64State *env, uint32_t reg)
 }
 
 void ia64_set_cfm_rrb_fr(CPUIA64State *env, uint32_t new_rrb);
+void ia64_set_cfm_rrb_pr(CPUIA64State *env, uint32_t new_rrb);
 void ia64_flush_suppressed_tlb(CPUIA64State *env);
 void ia64_firmware_debug_capture(CPUIA64State *env, uint16_t vector,
                                  bool collected);
@@ -1151,12 +1153,18 @@ ia64_tlb_find_cached(CPUIA64State *env, uint64_t va, uint32_t rid,
     IA64MicroTlbEntry *cached = &micro[ia64_micro_tlb_index(va, rid)];
     uint32_t generation = is_ifetch ? env->mmu.tlb_inst_generation :
                                       env->mmu.tlb_data_generation;
+    uint16_t tlb_count = is_ifetch ? env->mmu.tlb_inst_count :
+                                     env->mmu.tlb_data_count;
 
     if (cached->valid && cached->generation == generation &&
         cached->rid == rid &&
-        ((va ^ cached->va) & cached->page_mask) == 0 &&
-        cached->slot_generation == tlb[cached->slot].micro_generation) {
-        return &tlb[cached->slot];
+        ((va ^ cached->va) & cached->page_mask) == 0) {
+        if (cached->slot < tlb_count &&
+            cached->slot_generation == tlb[cached->slot].micro_generation) {
+            if (ia64_tlb_match(&tlb[cached->slot], va, rid)) {
+                return &tlb[cached->slot];
+            }
+        }
     }
 
     return ia64_tlb_find_slow(env, va, rid, is_ifetch);

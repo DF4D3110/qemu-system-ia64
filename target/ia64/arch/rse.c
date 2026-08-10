@@ -1278,7 +1278,7 @@ static void ia64_rse_restore_frame(CPUIA64State *env, uint32_t preserved,
         env->cfm_sor = 0;
         env->cfm_rrb_gr = 0;
         ia64_set_cfm_rrb_fr(env, 0);
-        env->cfm_rrb_pr = 0;
+        ia64_set_cfm_rrb_pr(env, 0);
         return;
     }
 
@@ -1376,7 +1376,8 @@ static void ia64_rse_return_to_frame(CPUIA64State *env, uint64_t pfm,
     env->cfm_rrb_gr = (pfm & IA64_CFM_RRB_GR_MASK) >> IA64_CFM_RRB_GR_SHIFT;
     ia64_set_cfm_rrb_fr(env, (pfm & IA64_CFM_RRB_FR_MASK) >>
                              IA64_CFM_RRB_FR_SHIFT);
-    env->cfm_rrb_pr = (pfm & IA64_CFM_RRB_PR_MASK) >> IA64_CFM_RRB_PR_SHIFT;
+    ia64_set_cfm_rrb_pr(
+        env, (pfm & IA64_CFM_RRB_PR_MASK) >> IA64_CFM_RRB_PR_SHIFT);
     env->rse.rse_bol = ia64_rse_wrap_phys((int32_t)env->rse.rse_bol -
                                       (int32_t)preserved);
 
@@ -1599,7 +1600,7 @@ void ia64_rfi(CPUIA64State *env, uint64_t fault_ip, uint32_t fault_slot)
         env->cfm_sor = 0;
         env->cfm_rrb_gr = 0;
         ia64_set_cfm_rrb_fr(env, 0);
-        env->cfm_rrb_pr = 0;
+        ia64_set_cfm_rrb_pr(env, 0);
         ia64_rse_invalidate_non_current(env);
         ia64_alat_invala(env);
         ia64_ia32_enter(env);
@@ -1684,17 +1685,6 @@ static void ia64_rotate_rotating_gr_right(CPUIA64State *env)
                                    IA64_STACKED_GR_BASE + count, false);
 }
 
-static void ia64_rotate_predicates_right(CPUIA64State *env)
-{
-    uint8_t last = env->pr[IA64_PR_LAST] & 1;
-
-    memmove(&env->pr[IA64_PR_ROTATING_NEXT],
-            &env->pr[IA64_PR_ROTATING_BASE],
-            47 * sizeof(env->pr[IA64_PR_TRUE]));
-    env->pr[IA64_PR_ROTATING_BASE] = last;
-    env->pr[IA64_PR_TRUE] = 1;
-}
-
 static void ia64_rotate_loop_regs(CPUIA64State *env)
 {
     uint32_t rotating_gr_count = ia64_rse_rotating_gr_count(env);
@@ -1702,7 +1692,6 @@ static void ia64_rotate_loop_regs(CPUIA64State *env)
     ia64_rse_check(env, "ctop");
     ia64_rse_sync_frame_out(env);
     ia64_rotate_rotating_gr_right(env);
-    ia64_rotate_predicates_right(env);
     if (rotating_gr_count != 0) {
         env->cfm_rrb_gr = env->cfm_rrb_gr ?
                           env->cfm_rrb_gr - 1 : rotating_gr_count - 1;
@@ -1710,8 +1699,8 @@ static void ia64_rotate_loop_regs(CPUIA64State *env)
     ia64_set_cfm_rrb_fr(env, env->cfm_rrb_fr ?
                              env->cfm_rrb_fr - 1 :
                              IA64_ROTATING_FR_COUNT - 1);
-    env->cfm_rrb_pr = env->cfm_rrb_pr ?
-                      env->cfm_rrb_pr - 1 : 47;
+    ia64_set_cfm_rrb_pr(env, env->cfm_rrb_pr ?
+                             env->cfm_rrb_pr - 1 : 47);
 }
 
 void ia64_rse_br_call(CPUIA64State *env, uint32_t b_reg,
@@ -1742,7 +1731,7 @@ void ia64_rse_br_call(CPUIA64State *env, uint32_t b_reg,
     env->cfm_sor = 0;
     env->cfm_rrb_gr = 0;
     ia64_set_cfm_rrb_fr(env, 0);
-    env->cfm_rrb_pr = 0;
+    ia64_set_cfm_rrb_pr(env, 0);
     if (!move_outputs) {
         ia64_rse_sync_frame_in(env);
     }
@@ -1791,7 +1780,7 @@ void ia64_rse_br_ia(CPUIA64State *env, uint32_t b_reg,
     env->cfm_sor = 0;
     env->cfm_rrb_gr = 0;
     ia64_set_cfm_rrb_fr(env, 0);
-    env->cfm_rrb_pr = 0;
+    ia64_set_cfm_rrb_pr(env, 0);
     ia64_rse_invalidate_non_current(env);
     ia64_alat_invala(env);
     ia64_ia32_enter(env);
@@ -1913,7 +1902,7 @@ void ia64_rse_cover(CPUIA64State *env)
     env->cfm_sor = 0;
     env->cfm_rrb_gr = 0;
     ia64_set_cfm_rrb_fr(env, 0);
-    env->cfm_rrb_pr = 0;
+    ia64_set_cfm_rrb_pr(env, 0);
     ia64_invalidate_stacked_alat(env);
     ia64_rse_check(env, "cover");
     IA64_TRACE_RSE_STATE(env, "cover");
@@ -2091,11 +2080,11 @@ void ia64_rse_clrrrb(CPUIA64State *env, uint32_t predicate_only)
      */
     ia64_rse_sync_frame_out(env);
     if (predicate_only) {
-        env->cfm_rrb_pr = 0;
+        ia64_set_cfm_rrb_pr(env, 0);
     } else {
         env->cfm_rrb_gr = 0;
         ia64_set_cfm_rrb_fr(env, 0);
-        env->cfm_rrb_pr = 0;
+        ia64_set_cfm_rrb_pr(env, 0);
     }
     ia64_rse_sync_frame_in(env);
     ia64_invalidate_stacked_alat(env);

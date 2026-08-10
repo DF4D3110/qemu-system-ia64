@@ -1834,21 +1834,14 @@ static void ia64_update_predicate_known(DisasContext *ctx,
         ia64_invalidate_predicate_mask(
             ctx, (uint64_t)insn->operands.common.immediate);
         break;
-    case IA64_OP_MOV_PR_ROT_IMM: {
-        bool definitely_executes =
-            ia64_current_insn_definitely_executes(ctx, insn);
-        uint64_t value = (uint64_t)insn->operands.common.immediate;
-
-        for (uint8_t reg = 16; reg < IA64_PR_COUNT; reg++) {
-            IA64KnownPredicate old = ia64_predicate_known(ctx, reg);
-            IA64KnownPredicate result = (value & (UINT64_C(1) << reg)) ?
-                IA64_PREDICATE_ONE : IA64_PREDICATE_ZERO;
-
-            ia64_predicate_commit_result(ctx, reg, old, result,
-                                         definitely_executes);
-        }
+    case IA64_OP_MOV_PR_ROT_IMM:
+        /*
+         * The immediate addresses physical predicates as if RRB.PR were
+         * zero, while cpu_pr[] is the current logical view.  RRB.PR is not
+         * part of the TB flags, so conservatively forget the rotating values.
+         */
+        ia64_invalidate_predicate_mask(ctx, rotating_mask);
         break;
-    }
     case IA64_OP_CLRRRB:
     case IA64_OP_CLRRRB_PR:
     case IA64_OP_ALLOC:
@@ -2077,11 +2070,16 @@ static void ia64_gen_note_successful_bundle(uint64_t bundle_ip,
     }
 }
 
-static void ia64_gen_exit_to(DisasContext *ctx, uint64_t ip)
+static void ia64_gen_prepare_exit_to(DisasContext *ctx, uint64_t ip)
 {
     ia64_gen_save_fault_slot_from_ri();
     ia64_gen_clear_ri();
     tcg_gen_movi_i64(cpu_ip, ip);
+}
+
+static void ia64_gen_exit_to(DisasContext *ctx, uint64_t ip)
+{
+    ia64_gen_prepare_exit_to(ctx, ip);
     tcg_gen_exit_tb(NULL, 0);
 }
 
@@ -2130,17 +2128,28 @@ void ia64_gen_lookup_current_completed(DisasContext *ctx,
     tcg_gen_lookup_and_goto_ptr();
 }
 
-static void ia64_gen_exit_to_slot(DisasContext *ctx, uint64_t ip, uint8_t slot)
+static void ia64_gen_prepare_exit_to_slot(DisasContext *ctx, uint64_t ip,
+                                          uint8_t slot)
 {
     if (slot >= 3) {
-        ia64_gen_exit_to(ctx, ip + 16);
+        ia64_gen_prepare_exit_to(ctx, ip + 16);
         return;
     }
 
     ia64_gen_set_fault_slot(slot);
     ia64_gen_set_ri(slot);
     tcg_gen_movi_i64(cpu_ip, ip);
-    tcg_gen_exit_tb(NULL, 0);
+}
+
+void ia64_gen_prepare_exit_to_slot_completed(
+    DisasContext *ctx, uint64_t ip, uint8_t slot, uint64_t completed_ip,
+    bool record_iipa, bool track_psr_suppression)
+{
+    ia64_gen_note_successful_bundle(completed_ip, record_iipa,
+                                    track_psr_suppression);
+    ia64_gen_store_instruction_group_start(
+        ctx->restart.next_instruction_group_start);
+    ia64_gen_prepare_exit_to_slot(ctx, ip, slot);
 }
 
 void ia64_gen_exit_to_slot_completed(DisasContext *ctx, uint64_t ip,
@@ -2149,11 +2158,9 @@ void ia64_gen_exit_to_slot_completed(DisasContext *ctx, uint64_t ip,
                                      bool record_iipa,
                                      bool track_psr_suppression)
 {
-    ia64_gen_note_successful_bundle(completed_ip, record_iipa,
-                                    track_psr_suppression);
-    ia64_gen_store_instruction_group_start(
-        ctx->restart.next_instruction_group_start);
-    ia64_gen_exit_to_slot(ctx, ip, slot);
+    ia64_gen_prepare_exit_to_slot_completed(
+        ctx, ip, slot, completed_ip, record_iipa, track_psr_suppression);
+    tcg_gen_exit_tb(NULL, 0);
 }
 
 void ia64_gen_goto_completed(DisasContext *ctx, uint64_t ip,
@@ -3615,6 +3622,22 @@ static void ia64_tr_init_disas_context(DisasContextBase *db, CPUState *cs)
 
 static void ia64_tr_tb_start(DisasContextBase *db, CPUState *cs)
 {
+    if (db->tb->flags & IA64_TB_FLAG_ICACHE_SYNC) {
+        TCGv_i32 flush = tcg_temp_new_i32();
+        TCGLabel *deferred = gen_new_label();
+
+        /*
+         * The guest IP/RI already identify the instruction after sync.i.
+         * Complete its deferred host-side action before executing that
+         * instruction, then return to the CPU loop to process the queued
+         * global flush.
+         */
+        gen_helper_sync_i(flush, tcg_env);
+        tcg_gen_brcondi_i32(TCG_COND_EQ, flush, 2, deferred);
+        gen_helper_sync_i_exit(tcg_env);
+        gen_set_label(deferred);
+        tcg_gen_exit_tb(NULL, 0);
+    }
 }
 
 static void ia64_tr_insn_start(DisasContextBase *db, CPUState *cs)

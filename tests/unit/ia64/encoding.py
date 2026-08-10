@@ -134,7 +134,8 @@ def parse_jit_stats(output):
     return stats
 
 
-def run_program_jit(qemu, bundles, entry=0x10, terminal_ip=None):
+def run_program_jit(qemu, bundles, entry=0x10, terminal_ip=None,
+                    memory=None):
     bundles = normalized_bundles(bundles)
     if terminal_ip is None:
         terminal_ip = bundles[-1][0]
@@ -145,6 +146,7 @@ def run_program_jit(qemu, bundles, entry=0x10, terminal_ip=None):
         expected=StateExpectation({"ip": terminal_ip}),
         completion=Completion(terminal_ip=terminal_ip, timeout_s=3.0),
         machine_args=("alat=full",),
+        memory=memory,
     )
     result = run_microprogram(qemu, program, extra_hmp=("info jit",))
     output = result.extra_hmp["info jit"]

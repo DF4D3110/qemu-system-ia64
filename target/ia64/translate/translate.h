@@ -23,6 +23,7 @@
 #define IA64_TB_FLAG_PSR_IC       (1u << 5)
 #define IA64_TB_FLAG_BE           (1u << 6)
 #define IA64_TB_FLAG_GROUP_START  (1u << 7)
+#define IA64_TB_FLAG_ICACHE_SYNC  (1u << 8)
 #define IA64_TB_FLAG_IA32_PSR_DB  (1u << 29)
 #define IA64_TB_FLAG_IA32_PSR_AC  (1u << 30)
 #define IA64_TB_FLAG_PSR_IS       (1u << 31)
@@ -210,6 +211,9 @@ void ia64_gen_exit_to_slot_completed(DisasContext *ctx, uint64_t ip,
                                      uint8_t slot, uint64_t completed_ip,
                                      bool record_iipa,
                                      bool track_psr_suppression);
+void ia64_gen_prepare_exit_to_slot_completed(
+    DisasContext *ctx, uint64_t ip, uint8_t slot, uint64_t completed_ip,
+    bool record_iipa, bool track_psr_suppression);
 void ia64_gen_sync_ip_for_helper(const Ia64Instruction *insn);
 void ia64_gen_note_stacked_gr_write(const Ia64Instruction *insn, uint8_t reg);
 bool ia64_insn_must_start_group(const Ia64Instruction *insn);

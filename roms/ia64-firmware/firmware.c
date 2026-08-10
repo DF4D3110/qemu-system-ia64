@@ -2450,7 +2450,6 @@ static UINT32 mGraphicsWidth;
 static UINT32 mGraphicsHeight;
 static UINT32 mGraphicsStride;
 static BOOLEAN                mGraphicsActive;
-static BOOLEAN                mGraphicsHandoffClaimed;
 static FW_CONIN_KEY_NOTIFY_RECORD mConInKeyNotifyRecords[FW_CONIN_KEY_NOTIFY_MAX];
 static BOOLEAN                mConInBufferedKeyValid;
 static EFI_INPUT_KEY          mConInBufferedKey;
@@ -7729,14 +7728,16 @@ static void graphics_select_text_mode(void)
  * draw directly into the already-active GOP framebuffer without calling a
  * mutating GOP method, then hand a non-framebuffer Linux kernel to us.
  *
- * Preserve graphics when the loader explicitly selected or blitted a GOP/UGA
- * mode.  Otherwise, when PCDP designates VGA as the primary OS console,
- * restore the legacy text state expected by vgacon.  Serial-primary boots do
- * not need or want a display transition.
+ * A loader selecting or blitting a GOP/UGA mode does not establish that the
+ * loaded IA-64 kernel can consume the framebuffer.  In particular, Linux
+ * deliberately excludes FB_EFI on IA-64 and its boot parameters carry no
+ * framebuffer geometry.  Whenever PCDP designates VGA as the primary OS
+ * console, restore the legacy text state expected by vgacon.  Serial-primary
+ * boots do not need or want a display transition.
  */
 static void graphics_prepare_os_handoff(BOOLEAN VgaPrimary)
 {
-    if (!VgaPrimary || mGraphicsHandoffClaimed || !mGraphicsActive) {
+    if (!VgaPrimary || !mGraphicsActive) {
         return;
     }
 
@@ -7748,19 +7749,6 @@ static void graphics_prepare_os_handoff(BOOLEAN VgaPrimary)
     graphics_clear_framebuffer();
     graphics_select_text_mode();
     text_clear_legacy_cells();
-}
-
-static void __attribute__((noinline))
-graphics_begin_loader_handoff(BOOLEAN TopLevelLoader)
-{
-    /*
-     * Only a firmware-launched top-level loader starts a new ownership
-     * window.  Nested StartImage() calls made by that loader may load a video
-     * driver, so their GOP/UGA activity must remain attributed to the loader.
-     */
-    if (TopLevelLoader) {
-        mGraphicsHandoffClaimed = 0;
-    }
 }
 
 static BOOLEAN graphics_rect_in_bounds(UINTN X, UINTN Y, UINTN Width,
@@ -7954,18 +7942,6 @@ static EFI_STATUS graphics_blt(EFI_GRAPHICS_OUTPUT_BLT_PIXEL *BltBuffer,
     }
 }
 
-static BOOLEAN graphics_blt_claims_handoff(
-    EFI_GRAPHICS_OUTPUT_BLT_OPERATION BltOperation,
-    UINTN Width, UINTN Height)
-{
-    if (Width == 0 || Height == 0) {
-        return 0;
-    }
-    return BltOperation == EfiBltVideoFill ||
-           BltOperation == EfiBltBufferToVideo ||
-           BltOperation == EfiBltVideoToVideo;
-}
-
 static EFI_STATUS gop_query_mode(EFI_GRAPHICS_OUTPUT_PROTOCOL *This,
                                  UINT32 ModeNumber, UINTN *SizeOfInfo,
                                  EFI_GRAPHICS_OUTPUT_MODE_INFORMATION **Info)
@@ -7992,14 +7968,8 @@ static EFI_STATUS gop_query_mode(EFI_GRAPHICS_OUTPUT_PROTOCOL *This,
 static EFI_STATUS gop_set_mode(EFI_GRAPHICS_OUTPUT_PROTOCOL *This,
                                UINT32 ModeNumber)
 {
-    EFI_STATUS st;
-
     (void)This;
-    st = graphics_select_mode(ModeNumber, 0);
-    if (st == EFI_SUCCESS) {
-        mGraphicsHandoffClaimed = 1;
-    }
-    return st;
+    return graphics_select_mode(ModeNumber, 0);
 }
 
 static EFI_STATUS gop_blt(EFI_GRAPHICS_OUTPUT_PROTOCOL *This,
@@ -8009,16 +7979,9 @@ static EFI_STATUS gop_blt(EFI_GRAPHICS_OUTPUT_PROTOCOL *This,
                           UINTN DestinationX, UINTN DestinationY,
                           UINTN Width, UINTN Height, UINTN Delta)
 {
-    EFI_STATUS st;
-
     (void)This;
-    st = graphics_blt(BltBuffer, BltOperation, SourceX, SourceY,
-                      DestinationX, DestinationY, Width, Height, Delta);
-    if (st == EFI_SUCCESS &&
-        graphics_blt_claims_handoff(BltOperation, Width, Height)) {
-        mGraphicsHandoffClaimed = 1;
-    }
-    return st;
+    return graphics_blt(BltBuffer, BltOperation, SourceX, SourceY,
+                        DestinationX, DestinationY, Width, Height, Delta);
 }
 
 static EFI_STATUS uga_get_mode(EFI_UGA_DRAW_PROTOCOL *This,
@@ -8054,12 +8017,7 @@ static EFI_STATUS uga_set_mode(EFI_UGA_DRAW_PROTOCOL *This,
     for (mode = 0; mode < mGopMode.MaxMode; mode++) {
         if (graphics_mode_matches(mode, HorizontalResolution,
                                   VerticalResolution, ColorDepth)) {
-            EFI_STATUS st = graphics_select_mode(mode, 0);
-
-            if (st == EFI_SUCCESS) {
-                mGraphicsHandoffClaimed = 1;
-            }
-            return st;
+            return graphics_select_mode(mode, 0);
         }
     }
     return EFI_UNSUPPORTED;
@@ -8072,16 +8030,9 @@ static EFI_STATUS uga_blt(EFI_UGA_DRAW_PROTOCOL *This,
                           UINTN DestinationX, UINTN DestinationY,
                           UINTN Width, UINTN Height, UINTN Delta)
 {
-    EFI_STATUS st;
-
     (void)This;
-    st = graphics_blt(BltBuffer, BltOperation, SourceX, SourceY,
-                      DestinationX, DestinationY, Width, Height, Delta);
-    if (st == EFI_SUCCESS &&
-        graphics_blt_claims_handoff(BltOperation, Width, Height)) {
-        mGraphicsHandoffClaimed = 1;
-    }
-    return st;
+    return graphics_blt(BltBuffer, BltOperation, SourceX, SourceY,
+                        DestinationX, DestinationY, Width, Height, Delta);
 }
 
 static BOOLEAN fw_notify_tpl_valid(EFI_TPL NotifyTpl)
@@ -10199,7 +10150,6 @@ EFI_STATUS bs_start_image(EFI_HANDLE ImageHandle, UINTN *ExitDataSize,
     rec->started = 1;
     sal_loader_handoff = mSalLoaderHandoffPending;
     mSalLoaderHandoffPending = 0;
-    graphics_begin_loader_handoff(sal_loader_handoff);
 
     if (__builtin_setjmp(frame->jump) != 0) {
         frame = start_image_top_frame();

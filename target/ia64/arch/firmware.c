@@ -133,13 +133,7 @@ static uint64_t ia64_fw_debug_getq(const CPUIA64State *env, size_t offset)
 
 static uint64_t ia64_fw_debug_pr(const CPUIA64State *env)
 {
-    uint64_t value = 1;
-    unsigned i;
-
-    for (i = 1; i < IA64_PR_COUNT; i++) {
-        value |= (env->pr[i] & 1) << i;
-    }
-    return value;
+    return ia64_system_read_pr(env);
 }
 
 static uint64_t ia64_fw_debug_int_nat(const CPUIA64State *env)
@@ -391,7 +385,7 @@ static void ia64_fw_debug_restore_rse(CPUIA64State *env)
     env->cfm_sor = state->cfm_sor;
     env->cfm_rrb_gr = state->cfm_rrb_gr;
     ia64_set_cfm_rrb_fr(env, state->cfm_rrb_fr);
-    env->cfm_rrb_pr = state->cfm_rrb_pr;
+    ia64_set_cfm_rrb_pr(env, state->cfm_rrb_pr);
     env->rse.rse_cfle = state->cfle;
 }
 
@@ -492,10 +486,7 @@ uint32_t ia64_firmware_debug_restore(CPUIA64State *env)
         ia64_fpreg_from_spill(env, i, low, high);
     }
     pr = ia64_fw_debug_getq(env, FW_DEBUG_CTX_PR) | 1;
-    for (i = 1; i < IA64_PR_COUNT; i++) {
-        env->pr[i] = (pr >> i) & 1;
-    }
-    env->pr[IA64_PR_TRUE] = 1;
+    ia64_system_write_pr(env, pr, UINT64_MAX);
     for (i = 0; i < IA64_BR_COUNT; i++) {
         env->br[i] = ia64_fw_debug_getq(env, FW_DEBUG_CTX_B0 + i * 8);
     }

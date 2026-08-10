@@ -22,15 +22,56 @@
 
 
 static void ia64_swap_banked_gr(CPUIA64State *env);
-uint64_t ia64_system_read_pr(CPUIA64State *env)
+uint64_t ia64_system_read_pr(const CPUIA64State *env)
 {
-    uint64_t value = 0;
+    uint64_t value = 1;
 
-    for (uint32_t i = 0; i < IA64_PR_COUNT; i++) {
-        value |= (env->pr[i] & 1) << i;
+    /*
+     * mov r=pr operates as if CFM.rrb.pr were zero.  env->pr[] is the
+     * current logical view, so place every rotating predicate at its raw
+     * physical bit position in the packed result.
+     */
+    for (uint32_t logical = 1; logical < IA64_PR_COUNT; logical++) {
+        uint32_t physical = logical;
+
+        if (logical >= IA64_PR_ROTATING_BASE) {
+            physical = IA64_PR_ROTATING_BASE +
+                ((logical - IA64_PR_ROTATING_BASE + env->cfm_rrb_pr) %
+                 (IA64_PR_COUNT - IA64_PR_ROTATING_BASE));
+        }
+        value |= (uint64_t)(env->pr[logical] & 1) << physical;
     }
 
     return value;
+}
+
+void ia64_set_cfm_rrb_pr(CPUIA64State *env, uint32_t new_rrb)
+{
+    enum { ROTATING_COUNT = IA64_PR_COUNT - IA64_PR_ROTATING_BASE };
+    uint64_t old_pr[ROTATING_COUNT];
+    uint32_t old_rrb = env->cfm_rrb_pr % ROTATING_COUNT;
+    uint32_t shift;
+
+    new_rrb %= ROTATING_COUNT;
+    if (new_rrb == old_rrb) {
+        env->cfm_rrb_pr = new_rrb;
+        return;
+    }
+
+    /*
+     * Predicate helpers address env->pr[] by logical register number.
+     * Changing RRB.PR must not move the underlying physical predicates,
+     * so rebase that logical view just as ia64_set_cfm_rrb_fr() does for
+     * rotating floating-point registers.
+     */
+    memcpy(old_pr, &env->pr[IA64_PR_ROTATING_BASE], sizeof(old_pr));
+    shift = (new_rrb + ROTATING_COUNT - old_rrb) % ROTATING_COUNT;
+    for (uint32_t logical = 0; logical < ROTATING_COUNT; logical++) {
+        env->pr[IA64_PR_ROTATING_BASE + logical] =
+            old_pr[(logical + shift) % ROTATING_COUNT];
+    }
+    env->cfm_rrb_pr = new_rrb;
+    env->pr[IA64_PR_TRUE] = 1;
 }
 
 
@@ -114,20 +155,19 @@ void ia64_system_epc(CPUIA64State *env, uint64_t fault_ip, uint64_t raw,
 void ia64_system_write_pr(CPUIA64State *env, uint64_t value, uint64_t mask)
 {
     mask &= ~1ULL;
-    if (ctpop64(mask) > IA64_PR_COUNT / 2) {
-        for (uint32_t i = 1; i < IA64_PR_COUNT; i++) {
-            if (mask & (1ULL << i)) {
-                env->pr[i] = (value >> i) & 1;
-            }
-        }
-        env->pr[IA64_PR_TRUE] = 1;
-        return;
-    }
     while (mask) {
-        uint32_t i = ctz64(mask);
+        uint32_t physical = ctz64(mask);
+        uint32_t logical = physical;
 
         mask &= mask - 1;
-        env->pr[i] = (value >> i) & 1;
+        if (physical >= IA64_PR_ROTATING_BASE) {
+            logical = IA64_PR_ROTATING_BASE +
+                ((physical - IA64_PR_ROTATING_BASE +
+                  (IA64_PR_COUNT - IA64_PR_ROTATING_BASE) -
+                  env->cfm_rrb_pr) %
+                 (IA64_PR_COUNT - IA64_PR_ROTATING_BASE));
+        }
+        env->pr[logical] = (value >> physical) & 1;
     }
     env->pr[IA64_PR_TRUE] = 1;
 }
@@ -225,6 +265,8 @@ void ia64_system_validate_ar_access(CPUIA64State *env, uint64_t value,
 
 void ia64_system_write_ar(CPUIA64State *env, uint32_t ar_num, uint64_t value)
 {
+    uint64_t old_value;
+
     if (ar_num >= IA64_AR_COUNT) {
         return;
     }
@@ -261,7 +303,19 @@ void ia64_system_write_ar(CPUIA64State *env, uint32_t ar_num, uint64_t value)
     } else if (ar_num == 66) {
         value &= 0x3f;
     }
+    old_value = env->ar[ar_num];
     env->ar[ar_num] = value;
+    if (ar_num == IA64_AR_KR3 && value != old_value) {
+        /*
+         * IA-64 operating systems use KR3 as the physical base from which
+         * their alternate DTLB miss handler constructs the per-CPU mapping.
+         * QEMU's deterministic TC can otherwise retain a mapping made from
+         * the old base indefinitely.  Hardware may replace TC entries at any
+         * time, so trigger that legal replacement event when the base moves;
+         * translation-register entries remain intact.
+         */
+        ia64_mmu_invalidate_tc(env);
+    }
     if (ar_num == 19) {
         /*
          * Software supplies RNAT for BSPSTORE's group.  RNATBitIndex

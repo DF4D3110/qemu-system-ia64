@@ -5,7 +5,7 @@
 
 #include "cpu.h"
 
-uint64_t ia64_system_read_pr(CPUIA64State *env);
+uint64_t ia64_system_read_pr(const CPUIA64State *env);
 void ia64_system_epc(CPUIA64State *env, uint64_t fault_ip, uint64_t raw,
                      uint32_t fault_slot);
 void ia64_system_write_pr(CPUIA64State *env, uint64_t value, uint64_t mask);

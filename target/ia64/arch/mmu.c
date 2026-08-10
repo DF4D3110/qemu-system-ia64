@@ -13,7 +13,6 @@
 #include "exec/cpu-common.h"
 #include "exec/cputlb.h"
 #include "exec/tb-flush.h"
-#include "exec/translation-block.h"
 #include "exec/target_page.h"
 #include "exec/tlb-flags.h"
 #include "trace.h"
@@ -233,20 +232,19 @@ void ia64_mmu_fc(CPUIA64State *env, uint64_t addr)
 {
     uint64_t pa;
 
-    if ((env->psr & IA64_PSR_DT) &&
-        !ia64_va_is_implemented(env, addr)) {
+    if ((env->psr & IA64_PSR_DT) ?
+        !ia64_va_is_implemented(env, addr) :
+        !ia64_pa_is_implemented(env, addr)) {
         ia64_raise_unimplemented_data_address(
             env, addr, IA64_ISR_R, true, false, ia64_current_code_tlb_ed(env));
     }
 
     if (ia64_data_address_to_phys(env, addr, &pa)) {
         uint64_t start = pa & ~(IA64_L0_CACHE_LINE_SIZE - 1);
-        uint64_t end = start + IA64_L0_CACHE_LINE_SIZE - 1;
 
-        if (end < start) {
-            end = UINT64_MAX;
-        }
-        tb_invalidate_phys_range(env_cpu(env), start, end);
+        ia64_exec_invalidate_phys_range(env, start,
+                                        IA64_L0_CACHE_LINE_SIZE);
+        env->mmu.icache_flush_pending = true;
     }
 }
 
@@ -650,6 +648,24 @@ static inline void ia64_assert_pending_purge_counts(CPUIA64State *env)
     (void)env;
 }
 #endif
+
+static void ia64_mark_pending_purge_all_tc_env(CPUIA64State *env)
+{
+    ia64_mark_pending_purge_all_tc(
+        env->mmu.tlb_data, env->mmu.tlb_data_count,
+        &env->mmu.pending_purge_data_count, 'd');
+    if (ia64_merced_dtlb1_enabled(env)) {
+        uint16_t i;
+
+        for (i = 0; i < IA64_DTLB1_MAX; i++) {
+            ia64_merced_dtlb1_invalidate_slot(env, i);
+        }
+    }
+    ia64_mark_pending_purge_all_tc(
+        env->mmu.tlb_inst, env->mmu.tlb_inst_count,
+        &env->mmu.pending_purge_inst_count, 'i');
+    ia64_assert_pending_purge_counts(env);
+}
 
 static bool ia64_complete_pending_purges(CPUIA64State *env,
                                          IA64TlbEntry *tlb, uint16_t *count,
@@ -1073,19 +1089,7 @@ void ia64_mmu_ptc_purge(CPUIA64State *env, uint64_t va, uint64_t size_reg,
          * propagate.  Keep each vCPU's translation caches independent rather
          * than reproducing an incidental sibling purge.
          */
-        ia64_mark_pending_purge_all_tc(
-            env->mmu.tlb_data, env->mmu.tlb_data_count,
-            &env->mmu.pending_purge_data_count, 'd');
-        if (ia64_merced_dtlb1_enabled(env)) {
-            uint16_t i;
-
-            for (i = 0; i < IA64_DTLB1_MAX; i++) {
-                ia64_merced_dtlb1_invalidate_slot(env, i);
-            }
-        }
-        ia64_mark_pending_purge_all_tc(
-            env->mmu.tlb_inst, env->mmu.tlb_inst_count,
-            &env->mmu.pending_purge_inst_count, 'i');
+        ia64_mark_pending_purge_all_tc_env(env);
     } else {
         ia64_merced_dtlb1_purge_range(env, va, ps, rid, true);
         ia64_mark_pending_purge_entries(
@@ -1096,6 +1100,16 @@ void ia64_mmu_ptc_purge(CPUIA64State *env, uint64_t va, uint64_t size_reg,
             &env->mmu.pending_purge_inst_count, va, ps, rid, true, 'i');
     }
     ia64_assert_pending_purge_counts(env);
+}
+
+void ia64_mmu_invalidate_tc(CPUIA64State *env)
+{
+    bool psr_ic_inflight = env->exception_state.psr_ic_inflight;
+
+    ia64_mark_pending_purge_all_tc_env(env);
+    ia64_tlb_serialize(env, 1, 1);
+    /* TC replacement is not an instruction/data serialization event. */
+    env->exception_state.psr_ic_inflight = psr_ic_inflight;
 }
 
 uint64_t ia64_mmu_tpa(CPUIA64State *env, uint64_t va)
