@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions, support, ideas, and general discussion
+    url: https://github.com/syunnPC/qemu-system-ia64/discussions
+    about: Use GitHub Discussions for anything that is not a concrete bug report.

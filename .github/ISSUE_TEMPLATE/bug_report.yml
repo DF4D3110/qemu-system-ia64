@@ -1,0 +1,185 @@
+name: Bug report
+description: Report a reproducible problem with qemu-system-ia64
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for taking the time to report a problem.
+
+        Before opening an issue, [search both open and closed issues](https://github.com/syunnPC/qemu-system-ia64/issues?q=is%3Aissue). If the same problem has already been reported, add any new information to the existing issue instead of opening a duplicate.
+
+        Issues are for concrete defects. Questions, configuration help, feature ideas, and other topics that are not bug reports belong in [GitHub Discussions](https://github.com/syunnPC/qemu-system-ia64/discussions).
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched [open and closed issues](https://github.com/syunnPC/qemu-system-ia64/issues?q=is%3Aissue) and confirmed that this problem has not already been reported.
+          required: true
+        - label: This report describes a concrete defect, not a question, support request, feature idea, or general discussion.
+          required: true
+
+  - type: dropdown
+    id: host_environment
+    attributes:
+      label: Host environment
+      description: Select the environment in which qemu-system-ia64 is running.
+      options:
+        - Linux
+        - Windows
+        - WSL
+        - macOS
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: host_os_version
+    attributes:
+      label: Host OS version
+      description: Provide the distribution or edition, exact version, build number, and WSL version where applicable.
+      placeholder: "For example: Windows 11 24H2 build 26100, or Ubuntu 24.04 under WSL 2"
+    validations:
+      required: true
+
+  - type: input
+    id: host_cpu
+    attributes:
+      label: Host CPU
+      description: Provide the exact CPU model if possible.
+      placeholder: "For example: AMD Ryzen 9 7950X"
+    validations:
+      required: true
+
+  - type: input
+    id: host_memory
+    attributes:
+      label: Host memory
+      description: Provide the total amount of physical memory available on the host.
+      placeholder: "For example: 64 GiB"
+    validations:
+      required: true
+
+  - type: textarea
+    id: command_line
+    attributes:
+      label: Complete QEMU command line
+      description: Include every argument that can be shared. Redact only sensitive values, while preserving the option and overall structure.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: guest_os
+    attributes:
+      label: Guest OS
+      description: Identify the guest as precisely as possible, including architecture, edition, version, build number, service pack, and installation state.
+      placeholder: "For example: Windows Server 2008 R2 for Itanium-Based Systems with SP1, build 7601"
+    validations:
+      required: true
+
+  - type: textarea
+    id: installation_media
+    attributes:
+      label: Guest installation media
+      description: Provide the exact filename and SHA-256 of the installation image, and its source or download URL if available. Write N/A and explain why if no installation medium is involved.
+      placeholder: |
+        Filename:
+        SHA-256:
+        Source or URL:
+    validations:
+      required: true
+
+  - type: textarea
+    id: emulator_build
+    attributes:
+      label: Emulator and firmware build
+      description: Provide the SHA-256 of the executable and firmware binary. Also provide the source commit, release, or download URL if known.
+      placeholder: |
+        Executable filename:
+        Executable SHA-256:
+        Firmware filename:
+        Firmware SHA-256:
+        Source commit or release:
+        Download URL, if applicable:
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        SHA-256 examples:
+
+        - Windows PowerShell: `Get-FileHash -Algorithm SHA256 <file>`
+        - Linux or WSL: `sha256sum <file>`
+        - macOS: `shasum -a 256 <file>`
+
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected behavior
+      description: Describe what should happen under the same conditions.
+    validations:
+      required: true
+
+  - type: textarea
+    id: symptoms
+    attributes:
+      label: Actual behavior
+      description: Describe the concrete symptoms, including the complete error message and the point at which the problem occurs.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction details
+      description: Explain the exact steps and conditions required to reproduce the problem. State whether it occurs every time, intermittently, or only under particular conditions.
+      placeholder: |
+        1. Start QEMU with the command line above.
+        2. ...
+
+        Reproduction rate:
+        Conditions that affect reproduction:
+    validations:
+      required: true
+
+  - type: textarea
+    id: smp_comparison
+    attributes:
+      label: SMP comparison
+      description: If possible, compare a single-vCPU/single-threaded TCG configuration with a multi-vCPU/multi-threaded TCG configuration. Include the tested command-line changes and results, or state that this was not tested.
+      placeholder: |
+        Single: -smp 1 -accel tcg,thread=single
+        Result:
+
+        Multi: -smp 2 -accel tcg,thread=multi
+        Result:
+
+  - type: textarea
+    id: vga_comparison
+    attributes:
+      label: VGA comparison
+      description: If possible and relevant, test with `-vga std` and with no VGA option at all. Do not specify a resolution or VRAM size for this comparison. Include the results, or state that this was not tested or is not relevant.
+      placeholder: |
+        With -vga std:
+        With no VGA, resolution, or VRAM options:
+
+  - type: textarea
+    id: wsl_linux_comparison
+    attributes:
+      label: Windows versus WSL/Linux comparison
+      description: For a problem seen with the Windows executable, if possible build or run the Linux version under WSL with an equivalent configuration and state whether the problem also occurs. Otherwise state that this was not tested or is not applicable.
+      placeholder: |
+        Windows result:
+        Linux build under WSL result:
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+      description: Add relevant logs, screenshots, crash dumps, bisect results, or other information that may help diagnose the problem.
