@@ -873,23 +873,7 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
         }
         break;
     }
-    case IA64_OP_SYNC_I: {
-        TCGv_i32 flush = tcg_temp_new_i32();
-        TCGLabel *done = gen_new_label();
-        TCGLabel *deferred = gen_new_label();
-
-        gen_helper_sync_i(flush, tcg_env);
-        tcg_gen_brcondi_i32(TCG_COND_EQ, flush, 0, done);
-        ia64_gen_prepare_exit_to_slot_completed(
-            ctx, insn->address, insn->slot + 1, insn->address,
-            record_iipa, track_psr_suppression);
-        tcg_gen_brcondi_i32(TCG_COND_EQ, flush, 2, deferred);
-        gen_helper_sync_i_exit(tcg_env);
-        gen_set_label(deferred);
-        tcg_gen_exit_tb(NULL, 0);
-        gen_set_label(done);
-        break;
-    }
+    case IA64_OP_SYNC_I:
     case IA64_OP_FWB:
         break;
     case IA64_OP_TAK:

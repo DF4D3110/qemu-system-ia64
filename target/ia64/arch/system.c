@@ -10,8 +10,6 @@
 #include "arch/system.h"
 #include "exec/cpu-common.h"
 #include "exec/cputlb.h"
-#include "exec/tb-flush.h"
-#include "exec/translation-block.h"
 #include "exec/tlb-flags.h"
 
 #define IA64_CPUID_VENDOR0           0x49656e69756e6547ULL /* "GenuineI" */
@@ -567,12 +565,12 @@ void ia64_write_cr(CPUIA64State *env, uint32_t cr_num, uint64_t value)
             ia64_firmware_owns_iva(value)) {
             /*
              * The firmware identity window is an emulator boot facility,
-             * not an architectural translation.  Drop cached mappings when
-             * IVA ownership passes between firmware and the operating
-             * system.
+             * not an architectural translation.  IVA ownership changes its
+             * data mappings, which are held in the virtual soft TLB.  Code
+             * in the firmware window is self-identifying, so translated code
+             * remains reusable across the handoff.
              */
             tlb_flush(env_cpu(env));
-            queue_tb_flush(env_cpu(env));
             ia64_tlb_bump_generation(env, false);
             ia64_tlb_bump_generation(env, true);
         }

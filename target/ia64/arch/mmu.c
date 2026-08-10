@@ -244,7 +244,6 @@ void ia64_mmu_fc(CPUIA64State *env, uint64_t addr)
 
         ia64_exec_invalidate_phys_range(env, start,
                                         IA64_L0_CACHE_LINE_SIZE);
-        env->mmu.icache_flush_pending = true;
     }
 }
 

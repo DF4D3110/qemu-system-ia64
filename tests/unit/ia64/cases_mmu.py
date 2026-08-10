@@ -6433,6 +6433,24 @@ def test_srlz_i_without_pending_itlb_change_keeps_tb_cache(qemu):
         raise AssertionError(f"srlz.i caused TB flush:\n{output}")
 
 
+def test_firmware_iva_handoff_keeps_tb_cache(qemu):
+    stats, output = run_program_jit(qemu, [
+        (0x10, *movl_mlx(2, 0x4000000)),
+        (0x20, *movl_mlx(3, IA64_FIRMWARE_IVT_BASE)),
+        (0x30, 0x01, mov_m_gr_cr(2, 2), nop_i(), nop_i()),
+        (0x40, 0x01, srlz_i(), nop_i(), nop_i()),
+        (0x50, 0x01, mov_m_gr_cr(3, 2), nop_i(), nop_i()),
+        (0x60, 0x01, srlz_i(), nop_i(), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(),
+         br_cond(0x70, 0x70)),
+    ], entry=0x10)
+    if stats.get("TB count", 0) < 1:
+        raise AssertionError(f"missing translated TB:\n{output}")
+    if stats.get("TB flush count") != 0:
+        raise AssertionError(
+            f"firmware IVA handoff discarded the TB cache:\n{output}")
+
+
 def test_sync_i_without_pending_fc_i_keeps_tb_cache(qemu):
     stats, output = run_program_jit(qemu, [
         (0x10, 0x00, sync_i(), nop_i(), nop_i()),
@@ -6446,7 +6464,7 @@ def test_sync_i_without_pending_fc_i_keeps_tb_cache(qemu):
             f"sync.i without fc.i caused TB flush:\n{output}")
 
 
-def test_fc_i_sync_i_coalesces_global_tb_flush(qemu):
+def test_fc_i_sync_i_keeps_unrelated_tb_cache(qemu):
     stats, output = run_program_jit(qemu, [
         (0x10, *movl_mlx(16, 0x200)),
         (0x20, *movl_mlx(17, 0x240)),
@@ -6456,9 +6474,9 @@ def test_fc_i_sync_i_coalesces_global_tb_flush(qemu):
         (0x60, 0x10, nop_m(), nop_i(),
          br_cond(0x60, 0x60)),
     ], entry=0x10)
-    if stats.get("TB flush count") != 1:
+    if stats.get("TB flush count") != 0:
         raise AssertionError(
-            "fc.i window was not completed by one global TB flush:\n" +
+            "fc.i/sync.i discarded the unrelated TB cache:\n" +
             output)
 
 
@@ -6684,12 +6702,13 @@ CASE_NAMES = (
     'fc_i_high_ram_invalidates_translated_target',
     'fc_i_invalidates_translated_cache_line',
     'fc_i_invalidates_translated_target',
-    'fc_i_sync_i_coalesces_global_tb_flush',
+    'fc_i_sync_i_keeps_unrelated_tb_cache',
     'fc_i_unimplemented_physical_address_faults',
     'fetchadd4_alt_dtlb_sets_read_write_isr',
     'firmware_identity_ends_after_iva_handoff',
     'firmware_identity_does_not_override_user_mapping',
     'firmware_identity_under_translation',
+    'firmware_iva_handoff_keeps_tb_cache',
     'firmware_runtime_identity_after_iva_handoff',
     'high_ram_above_4g_physical_and_translated_access',
     'ifetch_page_not_present_after_branch_restarts_slot0',

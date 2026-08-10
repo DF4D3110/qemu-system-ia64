@@ -2070,16 +2070,11 @@ static void ia64_gen_note_successful_bundle(uint64_t bundle_ip,
     }
 }
 
-static void ia64_gen_prepare_exit_to(DisasContext *ctx, uint64_t ip)
+static void ia64_gen_exit_to(DisasContext *ctx, uint64_t ip)
 {
     ia64_gen_save_fault_slot_from_ri();
     ia64_gen_clear_ri();
     tcg_gen_movi_i64(cpu_ip, ip);
-}
-
-static void ia64_gen_exit_to(DisasContext *ctx, uint64_t ip)
-{
-    ia64_gen_prepare_exit_to(ctx, ip);
     tcg_gen_exit_tb(NULL, 0);
 }
 
@@ -2128,28 +2123,17 @@ void ia64_gen_lookup_current_completed(DisasContext *ctx,
     tcg_gen_lookup_and_goto_ptr();
 }
 
-static void ia64_gen_prepare_exit_to_slot(DisasContext *ctx, uint64_t ip,
-                                          uint8_t slot)
+static void ia64_gen_exit_to_slot(DisasContext *ctx, uint64_t ip, uint8_t slot)
 {
     if (slot >= 3) {
-        ia64_gen_prepare_exit_to(ctx, ip + 16);
+        ia64_gen_exit_to(ctx, ip + 16);
         return;
     }
 
     ia64_gen_set_fault_slot(slot);
     ia64_gen_set_ri(slot);
     tcg_gen_movi_i64(cpu_ip, ip);
-}
-
-void ia64_gen_prepare_exit_to_slot_completed(
-    DisasContext *ctx, uint64_t ip, uint8_t slot, uint64_t completed_ip,
-    bool record_iipa, bool track_psr_suppression)
-{
-    ia64_gen_note_successful_bundle(completed_ip, record_iipa,
-                                    track_psr_suppression);
-    ia64_gen_store_instruction_group_start(
-        ctx->restart.next_instruction_group_start);
-    ia64_gen_prepare_exit_to_slot(ctx, ip, slot);
+    tcg_gen_exit_tb(NULL, 0);
 }
 
 void ia64_gen_exit_to_slot_completed(DisasContext *ctx, uint64_t ip,
@@ -2158,9 +2142,11 @@ void ia64_gen_exit_to_slot_completed(DisasContext *ctx, uint64_t ip,
                                      bool record_iipa,
                                      bool track_psr_suppression)
 {
-    ia64_gen_prepare_exit_to_slot_completed(
-        ctx, ip, slot, completed_ip, record_iipa, track_psr_suppression);
-    tcg_gen_exit_tb(NULL, 0);
+    ia64_gen_note_successful_bundle(completed_ip, record_iipa,
+                                    track_psr_suppression);
+    ia64_gen_store_instruction_group_start(
+        ctx->restart.next_instruction_group_start);
+    ia64_gen_exit_to_slot(ctx, ip, slot);
 }
 
 void ia64_gen_goto_completed(DisasContext *ctx, uint64_t ip,
@@ -3622,22 +3608,6 @@ static void ia64_tr_init_disas_context(DisasContextBase *db, CPUState *cs)
 
 static void ia64_tr_tb_start(DisasContextBase *db, CPUState *cs)
 {
-    if (db->tb->flags & IA64_TB_FLAG_ICACHE_SYNC) {
-        TCGv_i32 flush = tcg_temp_new_i32();
-        TCGLabel *deferred = gen_new_label();
-
-        /*
-         * The guest IP/RI already identify the instruction after sync.i.
-         * Complete its deferred host-side action before executing that
-         * instruction, then return to the CPU loop to process the queued
-         * global flush.
-         */
-        gen_helper_sync_i(flush, tcg_env);
-        tcg_gen_brcondi_i32(TCG_COND_EQ, flush, 2, deferred);
-        gen_helper_sync_i_exit(tcg_env);
-        gen_set_label(deferred);
-        tcg_gen_exit_tb(NULL, 0);
-    }
 }
 
 static void ia64_tr_insn_start(DisasContextBase *db, CPUState *cs)

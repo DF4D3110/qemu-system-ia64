@@ -72,11 +72,6 @@ typedef struct IA64MMUState {
     /* Transient bookkeeping for architected purge operations. */
     uint16_t pending_purge_data_count;
     uint16_t pending_purge_inst_count;
-
-    /* Coalesce instruction-cache line flushes until the next sync.i. */
-    bool icache_flush_pending;
-    /* A sync.i completed while TCG was executing an atomic serial step. */
-    bool icache_sync_deferred;
 } IA64MMUState;
 
 typedef struct IA64InterruptState {
