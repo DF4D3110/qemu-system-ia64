@@ -9,6 +9,7 @@ some of the basics if you are adding new files and targets to the build.
 
    build-system
    build-environment
+   ia64-builds
    kconfig
    docs
    qapi-code-gen

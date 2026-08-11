@@ -2895,16 +2895,38 @@ void ia64_gen_validate_ar_access(const Ia64Instruction *insn,
 {
     const DisasContext *ctx = insn->ctx;
     uint32_t ar_num = insn->operands.common.source1;
+    bool cpl0 = ctx && ctx->reg.cpl_known && ctx->reg.cpl == 0;
 
     /*
-     * Reading ar.itc faults only when PSR.si is set at a nonzero CPL.  CPL
-     * is part of the TB key and remains known until an instruction that can
-     * change it, so the check is impossible in the common kernel/firmware
-     * case.  Keep the dynamic helper for every other state.
+     * Only AR.BSPSTORE/AR.RNAT depend on RSC.mode on reads; AR.ITC can also
+     * fault with PSR.si at a nonzero CPL.  Writes additionally validate the
+     * reserved fields of RSC/FPSR/PFS and the privilege of KR0-KR7/ITC.
+     * Every other application-register access is unconditional, so avoid a
+     * helper call for it.  CPL is part of the TB key and remains known until
+     * an instruction that can change it.
      */
-    if (!write && ar_num == IA64_AR_ITC && ctx &&
-        ctx->reg.cpl_known && ctx->reg.cpl == 0) {
-        return;
+    if (!write) {
+        if (ar_num != IA64_AR_BSPSTORE && ar_num != IA64_AR_RNAT &&
+            (ar_num != IA64_AR_ITC || cpl0)) {
+            return;
+        }
+    } else {
+        switch (ar_num) {
+        case IA64_AR_RSC: /* reserved fields */
+        case IA64_AR_BSPSTORE: /* RSC.mode */
+        case IA64_AR_RNAT: /* RSC.mode */
+        case IA64_AR_FPSR: /* reserved fields */
+        case IA64_AR_PFS: /* reserved fields */
+            break;
+        case IA64_AR_KR0 ... IA64_AR_KR7: /* privileged */
+        case IA64_AR_ITC: /* privileged */
+            if (cpl0) {
+                return;
+            }
+            break;
+        default:
+            return;
+        }
     }
 
     gen_helper_validate_ar_access(tcg_env, value,

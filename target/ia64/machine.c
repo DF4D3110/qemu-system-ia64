@@ -217,6 +217,22 @@ static int ia64_cpu_post_load(void *opaque, int version_id)
         return -EINVAL;
     }
 
+    /* Every insertion path assigns a legal, nonzero page size first. */
+    for (i = 0; i < IA64_TLB_MAX; i++) {
+        if ((env->mmu.tlb_data[i].valid &&
+             env->mmu.tlb_data[i].ps == 0) ||
+            (env->mmu.tlb_inst[i].valid &&
+             env->mmu.tlb_inst[i].ps == 0)) {
+            return -EINVAL;
+        }
+    }
+    for (i = 0; i < IA64_DTLB1_MAX; i++) {
+        if (env->mmu.tlb_data_l1[i].valid &&
+            env->mmu.tlb_data_l1[i].ps == 0) {
+            return -EINVAL;
+        }
+    }
+
     memset(env->mmu.tlb_data_micro, 0,
            sizeof(env->mmu.tlb_data_micro));
     memset(env->mmu.tlb_inst_micro, 0,

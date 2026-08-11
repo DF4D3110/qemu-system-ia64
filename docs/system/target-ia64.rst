@@ -6,17 +6,22 @@ IA-64 System emulator
 QEMU's experimental IA-64 system target provides virtual PC machines for Itanium guest bring-up.
 It uses TCG and a project-owned EFI firmware; KVM and IA-64 user-mode emulation are not provided.
 
-Machine profile
----------------
+Machine profiles
+----------------
 
-``itanium2-vpc`` is the standards-oriented profile and defaults to a Montecito-class CPU.
-The existing ``ia64-vpc`` name is an alias for this profile.
+The canonical machine names are ``itanium2-vpc`` and ``itanium-vpc``.
+``itanium2-vpc`` is the standards-oriented profile and defaults to a
+Montecito-class CPU.  The existing ``ia64-vpc`` name is only a compatibility
+alias for ``itanium2-vpc``.
 ``itanium-vpc`` defaults to a Merced-class CPU and enables the isolated firmware behavior needed by early loaders, including their memory layout and SAL conventions.
-The selected machine controls the firmware ABI only: either profile accepts any supported CPU model through ``-cpu``.
+Machine and CPU selection are independent.  A ``-cpu`` override does not
+change the selected profile's firmware compatibility behavior.
 
-Both profiles default to 2 GiB of RAM and otherwise provide the same virtual hardware: an ATI-compatible PCI display, an e1000 network adapter, LSI53C895A SCSI storage, ICH9 AHCI, OHCI/UHCI USB, and PS/2 input.
-One to four CPUs are supported.
-Use ``-accel tcg,thread=single`` for one CPU and select MTTCG with ``-accel tcg,thread=multi`` for two to four CPUs.
+Both profiles default to 2 GiB of RAM and provide an ATI-compatible PCI
+display, e1000 networking, LSI53C895A SCSI storage, OHCI/UHCI USB, and PS/2
+input.  ``itanium2-vpc`` also enables ICH9 AHCI by default.
+One to 64 CPUs are supported.  Use ``-accel tcg,thread=single`` for one CPU and
+``-accel tcg,thread=multi`` for two to 64 CPUs.
 The machines also provide local SAPIC and I/O SAPIC interrupt controllers, ACPI tables, RTC, watchdog, NVRAM, serial I/O, and the firmware debug port.
 
 The primary CPU generation names are ``merced``, ``madison``, and ``montecito``.
@@ -37,7 +42,7 @@ The default build includes all of those groups.
 A typical optical-media boot is::
 
   build/qemu-system-ia64 \
-      -machine ia64-vpc,nvram=/path/to/guest.nvram \
+      -machine itanium2-vpc,nvram=/path/to/guest.nvram \
       -bios build/roms/ia64-firmware/ia64-firmware.bin \
       -drive file=/path/to/media.iso,media=cdrom,format=raw,readonly=on \
       -display gtk

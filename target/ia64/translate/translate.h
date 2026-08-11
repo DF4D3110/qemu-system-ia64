@@ -15,19 +15,23 @@
 
 #define IA64_DISAS_EXIT DISAS_TARGET_0
 
-#define IA64_TB_FLAG_DT           (1u << 0)
-#define IA64_TB_FLAG_IT           (1u << 1)
-#define IA64_TB_FLAG_RI_SHIFT     2
-#define IA64_TB_FLAG_RI_MASK      (3u << IA64_TB_FLAG_RI_SHIFT)
-#define IA64_TB_FLAG_PSR_SUPPRESS (1u << 4)
-#define IA64_TB_FLAG_PSR_IC       (1u << 5)
-#define IA64_TB_FLAG_BE           (1u << 6)
+/*
+ * Keep low PSR bits in place and map CPL, IT, and RI with one PSR >> 30.
+ * These flags are internal TB keys and are never migration state.
+ */
+#define IA64_TB_FLAG_BE           (1u << 1)
+#define IA64_TB_FLAG_CPL_SHIFT    2
+#define IA64_TB_FLAG_CPL_MASK     (3u << IA64_TB_FLAG_CPL_SHIFT)
+#define IA64_TB_FLAG_PSR_SUPPRESS (1u << 5)
+#define IA64_TB_FLAG_IT           (1u << 6)
 #define IA64_TB_FLAG_GROUP_START  (1u << 7)
+#define IA64_TB_FLAG_RI_SHIFT     11
+#define IA64_TB_FLAG_RI_MASK      (3u << IA64_TB_FLAG_RI_SHIFT)
+#define IA64_TB_FLAG_PSR_IC       (1u << 13)
+#define IA64_TB_FLAG_DT           (1u << 17)
 #define IA64_TB_FLAG_IA32_PSR_DB  (1u << 29)
 #define IA64_TB_FLAG_IA32_PSR_AC  (1u << 30)
 #define IA64_TB_FLAG_PSR_IS       (1u << 31)
-#define IA64_TB_FLAG_CPL_SHIFT    9
-#define IA64_TB_FLAG_CPL_MASK     (3u << IA64_TB_FLAG_CPL_SHIFT)
 
 typedef struct IA64TranslationMemoryState {
     int mmu_idx;

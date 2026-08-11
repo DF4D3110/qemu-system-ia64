@@ -75,15 +75,12 @@ static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
     }
 
     uint32_t flags =
-        ((psr >> 17) & IA64_TB_FLAG_DT) |
-        ((psr >> 35) & IA64_TB_FLAG_IT) |
-        ((psr >> (IA64_PSR_RI_SHIFT - IA64_TB_FLAG_RI_SHIFT)) &
-         IA64_TB_FLAG_RI_MASK) |
-        ((psr >> 8) & IA64_TB_FLAG_PSR_IC) |
-        ((psr << 5) & IA64_TB_FLAG_BE) |
-        ((uint32_t)cpu->env.instruction_group_start << 7) |
+        ((uint32_t)psr &
+         (IA64_TB_FLAG_BE | IA64_TB_FLAG_PSR_IC | IA64_TB_FLAG_DT)) |
         ((psr >> (IA64_PSR_CPL_SHIFT - IA64_TB_FLAG_CPL_SHIFT)) &
-         IA64_TB_FLAG_CPL_MASK);
+         (IA64_TB_FLAG_CPL_MASK | IA64_TB_FLAG_IT |
+          IA64_TB_FLAG_RI_MASK)) |
+        ((uint32_t)cpu->env.instruction_group_start << 7);
 
     flags |= (psr & IA64_PSR_FAULT_SUPPRESS_MASK) != 0 ?
              IA64_TB_FLAG_PSR_SUPPRESS : 0;
@@ -164,7 +161,14 @@ const IA64TlbEntry *ia64_tlb_find_slow(CPUIA64State *env, uint64_t va,
     for (i = 0; i < tlb_count; i++) {
         IA64TlbEntry *entry = &tlb[i];
 
-        if (ia64_tlb_match(entry, va, rid)) {
+        /*
+         * Main TLB entries are validated when inserted or loaded, so a
+         * valid entry always has a nonzero page size.  Check the more
+         * selective RID before valid: active operating-system TLBs are
+         * dense, while a substantial fraction belongs to another RID.
+         */
+        if (entry->rid == rid && entry->valid &&
+            ((va ^ entry->va) & entry->page_mask) == 0) {
             micro[ia64_micro_tlb_index(va, rid)] = (IA64MicroTlbEntry) {
                 .va = entry->va,
                 .page_mask = entry->page_mask,

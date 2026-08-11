@@ -62,10 +62,46 @@ static inline uint64_t ia64_rotr_pr(uint64_t value, uint32_t shift)
            IA64_PR_ROTATING_MASK;
 }
 
+static inline QEMU_ALWAYS_INLINE uint64_t
+ia64_pack_pr_bit(const uint64_t *pr, uint32_t bit)
+{
+    return (pr[bit] & 1) << bit;
+}
+
+static inline uint64_t ia64_pack_pr8(const uint64_t *pr)
+{
+    return ia64_pack_pr_bit(pr, 0) |
+           ia64_pack_pr_bit(pr, 1) |
+           ia64_pack_pr_bit(pr, 2) |
+           ia64_pack_pr_bit(pr, 3) |
+           ia64_pack_pr_bit(pr, 4) |
+           ia64_pack_pr_bit(pr, 5) |
+           ia64_pack_pr_bit(pr, 6) |
+           ia64_pack_pr_bit(pr, 7);
+}
+
+static inline QEMU_ALWAYS_INLINE void
+ia64_unpack_pr_bit(uint64_t *pr, uint64_t value, uint32_t bit)
+{
+    pr[bit] = (value >> bit) & 1;
+}
+
+static inline void ia64_unpack_pr8(uint64_t *pr, uint64_t value)
+{
+    ia64_unpack_pr_bit(pr, value, 0);
+    ia64_unpack_pr_bit(pr, value, 1);
+    ia64_unpack_pr_bit(pr, value, 2);
+    ia64_unpack_pr_bit(pr, value, 3);
+    ia64_unpack_pr_bit(pr, value, 4);
+    ia64_unpack_pr_bit(pr, value, 5);
+    ia64_unpack_pr_bit(pr, value, 6);
+    ia64_unpack_pr_bit(pr, value, 7);
+}
+
 uint64_t ia64_system_read_pr(const CPUIA64State *env)
 {
-    uint64_t value = 1;
-    uint64_t rotating = 0;
+    uint64_t value;
+    uint64_t rotating;
     uint32_t rrb = ia64_normalize_rrb_pr(env->cfm_rrb_pr);
 
     /*
@@ -74,13 +110,14 @@ uint64_t ia64_system_read_pr(const CPUIA64State *env)
      * equivalent to reducing every rotating predicate number modulo 48,
      * without doing the reduction in every iteration.
      */
-    for (uint32_t logical = 1; logical < IA64_PR_ROTATING_BASE; logical++) {
-        value |= (uint64_t)(env->pr[logical] & 1) << logical;
-    }
-    for (uint32_t logical = 0; logical < IA64_PR_ROTATING_COUNT; logical++) {
-        rotating |= (env->pr[IA64_PR_ROTATING_BASE + logical] & 1) <<
-                    logical;
-    }
+    value = ia64_pack_pr8(&env->pr[IA64_PR_TRUE]) | 1;
+    value |= ia64_pack_pr8(&env->pr[IA64_PR_TRUE + 8]) << 8;
+    rotating = ia64_pack_pr8(&env->pr[IA64_PR_ROTATING_BASE]);
+    rotating |= ia64_pack_pr8(&env->pr[IA64_PR_ROTATING_BASE + 8]) << 8;
+    rotating |= ia64_pack_pr8(&env->pr[IA64_PR_ROTATING_BASE + 16]) << 16;
+    rotating |= ia64_pack_pr8(&env->pr[IA64_PR_ROTATING_BASE + 24]) << 24;
+    rotating |= ia64_pack_pr8(&env->pr[IA64_PR_ROTATING_BASE + 32]) << 32;
+    rotating |= ia64_pack_pr8(&env->pr[IA64_PR_ROTATING_BASE + 40]) << 40;
 
     return value | (ia64_rotl_pr(rotating, rrb) << IA64_PR_ROTATING_BASE);
 }
@@ -220,22 +257,43 @@ void ia64_system_write_pr(CPUIA64State *env, uint64_t value, uint64_t mask)
     uint64_t rotating_value = value >> IA64_PR_ROTATING_BASE;
     uint32_t rrb = ia64_normalize_rrb_pr(env->cfm_rrb_pr);
 
-    while (nonrotating_mask) {
-        uint32_t logical = ctz64(nonrotating_mask);
+    if (nonrotating_mask == 0xfffe) {
+        /* Context restores commonly replace every static predicate. */
+        ia64_unpack_pr8(&env->pr[IA64_PR_TRUE], value);
+        ia64_unpack_pr8(&env->pr[IA64_PR_TRUE + 8], value >> 8);
+    } else {
+        while (nonrotating_mask) {
+            uint32_t logical = ctz64(nonrotating_mask);
 
-        nonrotating_mask &= nonrotating_mask - 1;
-        env->pr[logical] = (value >> logical) & 1;
+            nonrotating_mask &= nonrotating_mask - 1;
+            env->pr[logical] = (value >> logical) & 1;
+        }
     }
 
     /* Convert the physical mask and value to env->pr[]'s logical view. */
     rotating_mask = ia64_rotr_pr(rotating_mask, rrb);
     rotating_value = ia64_rotr_pr(rotating_value, rrb);
-    while (rotating_mask) {
-        uint32_t logical = ctz64(rotating_mask);
+    if (rotating_mask == IA64_PR_ROTATING_MASK) {
+        /* mov pr.rot and firmware context restores use this dense mask. */
+        ia64_unpack_pr8(&env->pr[IA64_PR_ROTATING_BASE], rotating_value);
+        ia64_unpack_pr8(&env->pr[IA64_PR_ROTATING_BASE + 8],
+                        rotating_value >> 8);
+        ia64_unpack_pr8(&env->pr[IA64_PR_ROTATING_BASE + 16],
+                        rotating_value >> 16);
+        ia64_unpack_pr8(&env->pr[IA64_PR_ROTATING_BASE + 24],
+                        rotating_value >> 24);
+        ia64_unpack_pr8(&env->pr[IA64_PR_ROTATING_BASE + 32],
+                        rotating_value >> 32);
+        ia64_unpack_pr8(&env->pr[IA64_PR_ROTATING_BASE + 40],
+                        rotating_value >> 40);
+    } else {
+        while (rotating_mask) {
+            uint32_t logical = ctz64(rotating_mask);
 
-        rotating_mask &= rotating_mask - 1;
-        env->pr[IA64_PR_ROTATING_BASE + logical] =
-            (rotating_value >> logical) & 1;
+            rotating_mask &= rotating_mask - 1;
+            env->pr[IA64_PR_ROTATING_BASE + logical] =
+                (rotating_value >> logical) & 1;
+        }
     }
     env->pr[IA64_PR_TRUE] = 1;
 }
