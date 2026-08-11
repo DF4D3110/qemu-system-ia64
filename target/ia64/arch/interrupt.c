@@ -166,10 +166,31 @@ static uint64_t ia64_itc_ticks_for_ns(uint64_t elapsed_ns,
                                       uint32_t initial_fraction,
                                       uint32_t *final_fraction)
 {
-    uint64_t seconds = elapsed_ns / NANOSECONDS_PER_SECOND;
-    uint64_t nanoseconds = elapsed_ns % NANOSECONDS_PER_SECOND;
-    uint64_t fraction = nanoseconds * frequency_hz + initial_fraction;
-    uint64_t ticks = seconds * frequency_hz;
+    uint64_t seconds;
+    uint64_t nanoseconds;
+    uint64_t fraction;
+    uint64_t ticks;
+
+    /*
+     * ITC is synchronized frequently by guest reads.  For every interval
+     * shorter than one second the product is bounded by 1.6e18 on all
+     * supported models, so convert it directly and avoid first dividing the
+     * elapsed time into seconds and nanoseconds.
+     */
+    if (likely(elapsed_ns < NANOSECONDS_PER_SECOND)) {
+        fraction = elapsed_ns * frequency_hz + initial_fraction;
+        ticks = fraction / NANOSECONDS_PER_SECOND;
+        if (final_fraction != NULL) {
+            *final_fraction = fraction % NANOSECONDS_PER_SECOND;
+        }
+        return ticks;
+    }
+
+    seconds = elapsed_ns / NANOSECONDS_PER_SECOND;
+    nanoseconds = elapsed_ns % NANOSECONDS_PER_SECOND;
+
+    fraction = nanoseconds * frequency_hz + initial_fraction;
+    ticks = seconds * frequency_hz;
 
     ticks += fraction / NANOSECONDS_PER_SECOND;
     if (final_fraction != NULL) {

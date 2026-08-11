@@ -156,6 +156,7 @@ from .encoding import (
     pal_stacked_call_program,
     require_registers,
     rfi_to_gr,
+    run_program_jit,
     srlz_i,
     st8,
     sum_um,
@@ -287,6 +288,20 @@ test_pal_cache_flush_invalidates_translated_target = require_registers(
         "r20": 1,
         "r21": 2,
     }, entry=0x10)
+
+
+def test_pal_cache_flush_keeps_unrelated_tb_cache(qemu):
+    stats, output = run_program_jit(
+        qemu,
+        pal_call_program(PAL_CACHE_FLUSH,
+                         [(29, 4), (30, 3), (31, 0)]),
+        entry=0x10, terminal_ip=0x60)
+    if stats.get("TB count", 0) < 1:
+        raise AssertionError(f"missing translated TB:\n{output}")
+    if stats.get("TB flush count") != 0:
+        raise AssertionError(
+            "PAL_CACHE_FLUSH discarded the coherent TCG code cache:\n" +
+            output)
 
 
 
@@ -1858,6 +1873,7 @@ CASE_NAMES = (
     'pal_cache_flush_bad_type',
     'pal_cache_flush_coherent_icache',
     'pal_cache_flush_invalidates_translated_target',
+    'pal_cache_flush_keeps_unrelated_tb_cache',
     'pal_cache_info',
     'pal_cache_info_invalid',
     'pal_cache_info_l0_data',

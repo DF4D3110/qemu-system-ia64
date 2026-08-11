@@ -109,13 +109,33 @@ static uint64_t ia64_rse_current_pfs(const CPUIA64State *env)
  * layout and partition invariants.
  */
 
-static inline uint32_t ia64_rse_wrap_phys(int32_t idx)
+static G_GNUC_NO_INLINE uint32_t ia64_rse_wrap_phys_slow(int32_t idx)
 {
     idx %= (int32_t)IA64_STACKED_GR_COUNT;
     if (idx < 0) {
         idx += IA64_STACKED_GR_COUNT;
     }
     return idx;
+}
+
+static inline uint32_t ia64_rse_wrap_phys(int32_t idx)
+{
+    /*
+     * Architected RSE movements are at most one physical-register window
+     * in either direction.  Keep arbitrary implementation-state values
+     * well defined, but avoid signed division on the normal path.
+     */
+    if (likely(idx >= -(int32_t)IA64_STACKED_GR_COUNT &&
+               idx < 2 * (int32_t)IA64_STACKED_GR_COUNT)) {
+        if (idx < 0) {
+            idx += IA64_STACKED_GR_COUNT;
+        } else if (idx >= IA64_STACKED_GR_COUNT) {
+            idx -= IA64_STACKED_GR_COUNT;
+        }
+        return idx;
+    }
+
+    return ia64_rse_wrap_phys_slow(idx);
 }
 
 /* BSPSTORE{8:3}: the RNAT bit that collects the register spilled there. */
@@ -553,9 +573,30 @@ static void ia64_rse_rnat_move_bspstore(CPUIA64State *env, uint64_t bspstore)
  * over nregs registers: (addr{8:3} + nregs) / 63 (SDM Vol.2 table 6-2,
  * e.g. the br.call row's AR[BSP] update).
  */
+static G_GNUC_NO_INLINE uint32_t ia64_rse_nat_word_count_slow(uint32_t total)
+{
+    return total / 63;
+}
+
+static inline uint32_t ia64_rse_nat_word_count(uint32_t total)
+{
+    /*
+     * An architected frame has at most 96 stacked registers, so an RSE
+     * pointer movement crosses no more than two 63-register collections.
+     * Retain division for out-of-range internal state to preserve the
+     * helper's full uint32_t semantics.
+     */
+    if (likely(total < 3 * 63)) {
+        return (total >= 63) + (total >= 2 * 63);
+    }
+    return ia64_rse_nat_word_count_slow(total);
+}
+
 uint32_t ia64_rse_nat_words_grow(uint64_t addr, uint32_t nregs)
 {
-    return (ia64_rse_collect_bit(addr) + nregs) / 63;
+    uint32_t total = ia64_rse_collect_bit(addr) + nregs;
+
+    return ia64_rse_nat_word_count(total);
 }
 
 /*
@@ -565,7 +606,9 @@ uint32_t ia64_rse_nat_words_grow(uint64_t addr, uint32_t nregs)
  */
 static inline uint32_t ia64_rse_nat_words_shrink(uint64_t addr, uint32_t nregs)
 {
-    return (62 - ia64_rse_collect_bit(addr) + nregs) / 63;
+    uint32_t total = 62 - ia64_rse_collect_bit(addr) + nregs;
+
+    return ia64_rse_nat_word_count(total);
 }
 
 /*
@@ -666,8 +709,8 @@ static void ia64_copy_bit_range(uint64_t dst[2], uint32_t dst_bit,
     dst[1] = target >> 64;
 }
 
-static void ia64_clear_bit_range(uint64_t bits[2], uint32_t first,
-                                 uint32_t count)
+static inline QEMU_ALWAYS_INLINE void
+ia64_clear_bit_range(uint64_t bits[2], uint32_t first, uint32_t count)
 {
     uint32_t word = first / 64;
     uint32_t shift = first % 64;
@@ -878,8 +921,13 @@ static void ia64_rse_sync_frame_in(CPUIA64State *env)
                    second * sizeof(env->rse.rse_pgr[0]));
         }
         if (likely((env->rse.rse_pgr_nat[0] | env->rse.rse_pgr_nat[1]) == 0)) {
-            ia64_clear_bit_range(env->nat, IA64_STACKED_GR_BASE,
-                                 env->cfm_sof);
+            /*
+             * With no physical stacked-register NaTs, every bit in the
+             * virtual stacked view is known clear, including registers
+             * outside the current frame.  Preserve only static GR NaTs.
+             */
+            env->nat[0] &= UINT32_MAX;
+            env->nat[1] = 0;
         } else {
             ia64_copy_bit_range(env->nat, IA64_STACKED_GR_BASE,
                                 env->rse.rse_pgr_nat, env->rse.rse_bol, first);
@@ -1188,7 +1236,12 @@ static void ia64_rse_complete_frame_loads(CPUIA64State *env, uintptr_t ra)
 /* br.call/cover: the current frame joins the dirty partition. */
 static void ia64_rse_preserve_frame(CPUIA64State *env, uint32_t nregs)
 {
-    uint32_t nats = ia64_rse_nat_words_grow(env->ar_bsp, nregs);
+    uint32_t nats;
+
+    if (nregs == 0) {
+        return;
+    }
+    nats = ia64_rse_nat_words_grow(env->ar_bsp, nregs);
 
     env->rse.rse_bol = ia64_rse_wrap_phys(env->rse.rse_bol + nregs);
     env->ar_bsp += (uint64_t)(nregs + nats) * 8;
@@ -1721,10 +1774,14 @@ void ia64_rse_br_call(CPUIA64State *env, uint32_t b_reg,
         /*
          * The output frame moves toward lower logical registers.  Copy its
          * NaT bits from a snapshot so the overlapping ranges cannot affect
-         * one another.
+         * one another.  When the entire stacked NaT view is clear the
+         * destination is already the required all-zero value.
          */
-        ia64_copy_bit_range(env->nat, IA64_STACKED_GR_BASE,
-                            env->nat, IA64_STACKED_GR_BASE + sol, outputs);
+        if (unlikely((env->nat[0] >> IA64_STACKED_GR_BASE) | env->nat[1])) {
+            ia64_copy_bit_range(env->nat, IA64_STACKED_GR_BASE,
+                                env->nat, IA64_STACKED_GR_BASE + sol,
+                                outputs);
+        }
     }
     env->cfm_sof = outputs;
     env->cfm_sol = 0;

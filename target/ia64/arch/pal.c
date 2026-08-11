@@ -12,7 +12,6 @@
 #include "exec-access.h"
 #include "exec/cpu-common.h"
 #include "exec/cputlb.h"
-#include "exec/tb-flush.h"
 #include "trace.h"
 
 /*
@@ -372,6 +371,7 @@ static bool pal_cache_flush(CPUIA64State *env)
 {
     uint64_t cache_type = env->gr[IA64_PAL_GR_ARG1];
     uint64_t operation = env->gr[IA64_PAL_GR_ARG2];
+    bool serialize_execution = false;
 
     if (cache_type < 1 || cache_type > 4 ||
         (operation & ~PAL_CACHE_FLUSH_OPERATION_MASK) != 0) {
@@ -379,24 +379,20 @@ static bool pal_cache_flush(CPUIA64State *env)
     } else {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
         /*
-         * TCG has no data-cache lines or dirty writeback state.  Instruction
-         * and unified-cache operations still invalidate translated code so
-         * subsequent execution observes stores made by the guest; with no
-         * physical cache walk to interrupt, the operation completes in one
-         * call with a zero progress indicator.
+         * TCG has no data-cache lines or dirty writeback state.  Its
+         * instruction view is already coherent: CPU stores and address-space
+         * writes invalidate translated code by physical RAM range, while
+         * fc.i performs the same precise invalidation explicitly.  Thus all
+         * effects requested here are complete without discarding unrelated
+         * translated code.
          */
-        if (cache_type == 1 || cache_type == 3 || cache_type == 4) {
-            queue_tb_flush(env_cpu(env));
-            env->gr[IA64_PAL_GR_RESULT1] = 0;
-            env->gr[IA64_PAL_GR_RESULT2] = 0;
-            env->gr[IA64_PAL_GR_RESULT3] = 0;
-            return true;
-        }
+        serialize_execution = cache_type == 1 || cache_type == 3 ||
+                              cache_type == 4;
     }
     env->gr[IA64_PAL_GR_RESULT1] = 0;
     env->gr[IA64_PAL_GR_RESULT2] = 0;
     env->gr[IA64_PAL_GR_RESULT3] = 0;
-    return false;
+    return serialize_execution;
 }
 
 static void pal_cache_init(CPUIA64State *env)
@@ -1724,6 +1720,7 @@ uint32_t ia64_pal_dispatch(CPUIA64State *env, uintptr_t ra)
         break;
     case PAL_CACHE_FLUSH:
         if (pal_cache_flush(env)) {
+            /* Preserve the instruction-cache serialization boundary. */
             flags |= IA64_PAL_DISPATCH_EXIT_TB;
         }
         break;

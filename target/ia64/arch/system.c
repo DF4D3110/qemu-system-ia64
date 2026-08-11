@@ -20,37 +20,86 @@
 
 
 static void ia64_swap_banked_gr(CPUIA64State *env);
+
+enum {
+    IA64_PR_ROTATING_COUNT = IA64_PR_COUNT - IA64_PR_ROTATING_BASE,
+};
+
+#define IA64_PR_ROTATING_MASK ((1ULL << IA64_PR_ROTATING_COUNT) - 1)
+
+static G_GNUC_NO_INLINE uint32_t ia64_normalize_rrb_pr_slow(uint32_t rrb)
+{
+    return rrb % IA64_PR_ROTATING_COUNT;
+}
+
+static inline uint32_t ia64_normalize_rrb_pr(uint32_t rrb)
+{
+    if (unlikely(rrb >= IA64_PR_ROTATING_COUNT)) {
+        return ia64_normalize_rrb_pr_slow(rrb);
+    }
+    return rrb;
+}
+
+static inline uint64_t ia64_rotl_pr(uint64_t value, uint32_t shift)
+{
+    value &= IA64_PR_ROTATING_MASK;
+    if (shift == 0) {
+        return value;
+    }
+    return ((value << shift) |
+            (value >> (IA64_PR_ROTATING_COUNT - shift))) &
+           IA64_PR_ROTATING_MASK;
+}
+
+static inline uint64_t ia64_rotr_pr(uint64_t value, uint32_t shift)
+{
+    value &= IA64_PR_ROTATING_MASK;
+    if (shift == 0) {
+        return value;
+    }
+    return ((value >> shift) |
+            (value << (IA64_PR_ROTATING_COUNT - shift))) &
+           IA64_PR_ROTATING_MASK;
+}
+
 uint64_t ia64_system_read_pr(const CPUIA64State *env)
 {
     uint64_t value = 1;
+    uint64_t rotating = 0;
+    uint32_t rrb = ia64_normalize_rrb_pr(env->cfm_rrb_pr);
 
     /*
      * mov r=pr operates as if CFM.rrb.pr were zero.  env->pr[] is the
-     * current logical view, so place every rotating predicate at its raw
-     * physical bit position in the packed result.
+     * current logical view.  Packing that view and rotating it once is
+     * equivalent to reducing every rotating predicate number modulo 48,
+     * without doing the reduction in every iteration.
      */
-    for (uint32_t logical = 1; logical < IA64_PR_COUNT; logical++) {
-        uint32_t physical = logical;
-
-        if (logical >= IA64_PR_ROTATING_BASE) {
-            physical = IA64_PR_ROTATING_BASE +
-                ((logical - IA64_PR_ROTATING_BASE + env->cfm_rrb_pr) %
-                 (IA64_PR_COUNT - IA64_PR_ROTATING_BASE));
-        }
-        value |= (uint64_t)(env->pr[logical] & 1) << physical;
+    for (uint32_t logical = 1; logical < IA64_PR_ROTATING_BASE; logical++) {
+        value |= (uint64_t)(env->pr[logical] & 1) << logical;
+    }
+    for (uint32_t logical = 0; logical < IA64_PR_ROTATING_COUNT; logical++) {
+        rotating |= (env->pr[IA64_PR_ROTATING_BASE + logical] & 1) <<
+                    logical;
     }
 
-    return value;
+    return value | (ia64_rotl_pr(rotating, rrb) << IA64_PR_ROTATING_BASE);
 }
 
-void ia64_set_cfm_rrb_pr(CPUIA64State *env, uint32_t new_rrb)
+static G_GNUC_NO_INLINE void
+ia64_set_cfm_rrb_pr_slow(CPUIA64State *env, uint32_t new_rrb,
+                         uint32_t old_rrb)
 {
     enum { ROTATING_COUNT = IA64_PR_COUNT - IA64_PR_ROTATING_BASE };
     uint64_t old_pr[ROTATING_COUNT];
-    uint32_t old_rrb = env->cfm_rrb_pr % ROTATING_COUNT;
     uint32_t shift;
+    uint32_t first;
 
-    new_rrb %= ROTATING_COUNT;
+    if (old_rrb >= ROTATING_COUNT) {
+        old_rrb %= ROTATING_COUNT;
+    }
+    if (new_rrb >= ROTATING_COUNT) {
+        new_rrb %= ROTATING_COUNT;
+    }
     if (new_rrb == old_rrb) {
         env->cfm_rrb_pr = new_rrb;
         return;
@@ -63,13 +112,27 @@ void ia64_set_cfm_rrb_pr(CPUIA64State *env, uint32_t new_rrb)
      * rotating floating-point registers.
      */
     memcpy(old_pr, &env->pr[IA64_PR_ROTATING_BASE], sizeof(old_pr));
-    shift = (new_rrb + ROTATING_COUNT - old_rrb) % ROTATING_COUNT;
-    for (uint32_t logical = 0; logical < ROTATING_COUNT; logical++) {
-        env->pr[IA64_PR_ROTATING_BASE + logical] =
-            old_pr[(logical + shift) % ROTATING_COUNT];
-    }
+    shift = new_rrb >= old_rrb ? new_rrb - old_rrb :
+                                new_rrb + ROTATING_COUNT - old_rrb;
+    first = ROTATING_COUNT - shift;
+    memcpy(&env->pr[IA64_PR_ROTATING_BASE], &old_pr[shift],
+           first * sizeof(old_pr[0]));
+    memcpy(&env->pr[IA64_PR_ROTATING_BASE + first], old_pr,
+           shift * sizeof(old_pr[0]));
     env->cfm_rrb_pr = new_rrb;
     env->pr[IA64_PR_TRUE] = 1;
+}
+
+void ia64_set_cfm_rrb_pr(CPUIA64State *env, uint32_t new_rrb)
+{
+    enum { ROTATING_COUNT = IA64_PR_COUNT - IA64_PR_ROTATING_BASE };
+    uint32_t old_rrb = env->cfm_rrb_pr;
+
+    /* br.call and most returns keep the common zero rotation unchanged. */
+    if (likely(new_rrb == old_rrb && new_rrb < ROTATING_COUNT)) {
+        return;
+    }
+    ia64_set_cfm_rrb_pr_slow(env, new_rrb, old_rrb);
 }
 
 
@@ -152,20 +215,27 @@ void ia64_system_epc(CPUIA64State *env, uint64_t fault_ip, uint64_t raw,
 
 void ia64_system_write_pr(CPUIA64State *env, uint64_t value, uint64_t mask)
 {
-    mask &= ~1ULL;
-    while (mask) {
-        uint32_t physical = ctz64(mask);
-        uint32_t logical = physical;
+    uint64_t nonrotating_mask = mask & 0xfffe;
+    uint64_t rotating_mask = mask >> IA64_PR_ROTATING_BASE;
+    uint64_t rotating_value = value >> IA64_PR_ROTATING_BASE;
+    uint32_t rrb = ia64_normalize_rrb_pr(env->cfm_rrb_pr);
 
-        mask &= mask - 1;
-        if (physical >= IA64_PR_ROTATING_BASE) {
-            logical = IA64_PR_ROTATING_BASE +
-                ((physical - IA64_PR_ROTATING_BASE +
-                  (IA64_PR_COUNT - IA64_PR_ROTATING_BASE) -
-                  env->cfm_rrb_pr) %
-                 (IA64_PR_COUNT - IA64_PR_ROTATING_BASE));
-        }
-        env->pr[logical] = (value >> physical) & 1;
+    while (nonrotating_mask) {
+        uint32_t logical = ctz64(nonrotating_mask);
+
+        nonrotating_mask &= nonrotating_mask - 1;
+        env->pr[logical] = (value >> logical) & 1;
+    }
+
+    /* Convert the physical mask and value to env->pr[]'s logical view. */
+    rotating_mask = ia64_rotr_pr(rotating_mask, rrb);
+    rotating_value = ia64_rotr_pr(rotating_value, rrb);
+    while (rotating_mask) {
+        uint32_t logical = ctz64(rotating_mask);
+
+        rotating_mask &= rotating_mask - 1;
+        env->pr[IA64_PR_ROTATING_BASE + logical] =
+            (rotating_value >> logical) & 1;
     }
     env->pr[IA64_PR_TRUE] = 1;
 }

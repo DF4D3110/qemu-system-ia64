@@ -1966,12 +1966,18 @@ void ia64_gen_set_ri_tracked(DisasContext *ctx, uint8_t slot)
         return;
     }
 
-    if (!ctx->restart.current_ri_known || ctx->restart.current_ri != 0) {
+    if (ctx->restart.current_ri_known) {
+        /* Only the two known RI bits differ; toggle them in one operation. */
+        tcg_gen_xori_i64(
+            cpu_psr, cpu_psr,
+            (uint64_t)(ctx->restart.current_ri ^ slot) <<
+                IA64_PSR_RI_SHIFT);
+    } else {
         ia64_gen_clear_ri();
-    }
-    if (slot != 0) {
-        tcg_gen_ori_i64(cpu_psr, cpu_psr,
-                        (uint64_t)slot << IA64_PSR_RI_SHIFT);
+        if (slot != 0) {
+            tcg_gen_ori_i64(cpu_psr, cpu_psr,
+                            (uint64_t)slot << IA64_PSR_RI_SHIFT);
+        }
     }
     ctx->restart.current_ri = slot;
     ctx->restart.current_ri_known = true;
@@ -2002,10 +2008,10 @@ void ia64_gen_advance_restart_point(DisasContext *ctx, uint64_t bundle_ip,
                                     uint8_t slot, bool mlx_long)
 {
     if (slot == 2 || (slot == 1 && mlx_long)) {
-        ia64_gen_force_ri_tracked(ctx, 0);
+        ia64_gen_set_ri_tracked(ctx, 0);
         tcg_gen_movi_i64(cpu_ip, bundle_ip + 16);
     } else {
-        ia64_gen_force_ri_tracked(ctx, slot + 1);
+        ia64_gen_set_ri_tracked(ctx, slot + 1);
     }
 }
 
@@ -2350,6 +2356,8 @@ bool ia64_gen_self_counted_loop(DisasContext *ctx, uint64_t target,
                                 bool track_psr_suppression)
 {
     TCGLabel *exit_to_tb;
+    uint8_t fallthrough_ri;
+    bool fallthrough_ri_known;
 
     if (ctx->branch.counted_self_label == NULL ||
         target != ctx->branch.counted_self_ip ||
@@ -2371,12 +2379,17 @@ bool ia64_gen_self_counted_loop(DisasContext *ctx, uint64_t target,
      * iteration can OR slot 1 onto stale slot 2 and expose reserved RI=3 to
      * a fault or interruption.
      */
+    fallthrough_ri = ctx->restart.current_ri;
+    fallthrough_ri_known = ctx->restart.current_ri_known;
     ia64_gen_force_ri_tracked(ctx, 0);
     tcg_gen_br(ctx->branch.counted_self_label);
 
     gen_set_label(exit_to_tb);
     ia64_gen_goto_completed(ctx, target, completed_ip, record_iipa,
                             track_psr_suppression);
+    /* The not-taken branch bypasses both generated exit paths above. */
+    ctx->restart.current_ri = fallthrough_ri;
+    ctx->restart.current_ri_known = fallthrough_ri_known;
     return true;
 }
 
@@ -2880,9 +2893,22 @@ void ia64_gen_write_user_mask(TCGv_i64 value)
 void ia64_gen_validate_ar_access(const Ia64Instruction *insn,
                                  TCGv_i64 value, bool write)
 {
+    const DisasContext *ctx = insn->ctx;
+    uint32_t ar_num = insn->operands.common.source1;
+
+    /*
+     * Reading ar.itc faults only when PSR.si is set at a nonzero CPL.  CPL
+     * is part of the TB key and remains known until an instruction that can
+     * change it, so the check is impossible in the common kernel/firmware
+     * case.  Keep the dynamic helper for every other state.
+     */
+    if (!write && ar_num == IA64_AR_ITC && ctx &&
+        ctx->reg.cpl_known && ctx->reg.cpl == 0) {
+        return;
+    }
+
     gen_helper_validate_ar_access(tcg_env, value,
-                                  tcg_constant_i32(
-                                      insn->operands.common.source1),
+                                  tcg_constant_i32(ar_num),
                                   tcg_constant_i32(write),
                                   tcg_constant_i64(insn->address),
                                   tcg_constant_i64(insn->raw),
@@ -3720,15 +3746,14 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
             db->is_jmp = DISAS_NORETURN;
             return;
         }
+        if (!known_nullified && ia64_insn_may_modify_psr_ri(&insn)) {
+            ctx->restart.current_ri_known = false;
+        }
         ia64_gen_advance_restart_point(ctx, bundle_ip, slot, skip_x_slot);
         ia64_update_nat_known(ctx, &insn);
         ia64_update_cached_register_state(ctx, &insn);
         ctx->restart.instruction_group_start =
             ctx->restart.next_instruction_group_start;
-        if (!ia64_current_insn_cannot_execute(ctx, &insn) &&
-            ia64_insn_may_modify_psr_ri(&insn)) {
-            ctx->restart.current_ri_known = false;
-        }
         if (track_iipa_for_insn && !psr_ic_modified) {
             record_iipa = false;
         }

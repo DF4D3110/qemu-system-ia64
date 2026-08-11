@@ -28,6 +28,7 @@ from .encoding import (
     IA64_EXCP_DISABLED_ISA_TRANSITION,
     IA64_EXCP_ILLEGAL,
     IA64_EXCP_NONE,
+    IA64_EXCP_PRIVILEGED_REG,
     IA64_EXCP_RESERVED_TEMPLATE,
     IA64_EXCP_UNALIGNED,
     IA64_GENERAL_VECTOR,
@@ -267,6 +268,39 @@ def test_ar_itc_advances_in_guest_loop(qemu):
             "ar_itc_advances_in_guest_loop failed: "
             f"r16={state.gr[16]!r} r17={state.gr[17]!r}\n"
             f"{result.register_output}")
+
+test_ar_itc_cpl3_si_clear_read_allowed = require_registers(
+    "ar_itc_cpl3_si_clear_read_allowed", [
+        (0x10, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_CPL3)),
+        (0x20, 0x00, nop_m(), adds(31, 0x50, 0), nop_i()),
+        *rfi_to_gr(0x30, 19, 31),
+        (0x50, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x60, 0x02, mov_m_ar_gr(8, 44), nop_i(), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+    ], {
+        "ip": 0x70,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_ar_itc_cpl3_si_set_privileged_register_fault = require_registers(
+    "ar_itc_cpl3_si_set_privileged_register_fault", [
+        (0x10, *movl_mlx(
+            19, IA64_PSR_IC | IA64_PSR_SI | IA64_PSR_CPL3)),
+        (0x20, 0x00, nop_m(), adds(31, 0x50, 0), nop_i()),
+        *rfi_to_gr(0x30, 19, 31),
+        (0x50, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x60, 0x02, mov_m_ar_gr(8, 44), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR, 0x00, mov_m_cr_gr(8, 17), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_GENERAL_VECTOR + 0x10,
+                 IA64_GENERAL_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_GENERAL_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "fault_code": IA64_EXCP_PRIVILEGED_REG,
+        "fault_ip": 0x60,
+        "r8": 0x20,
+    }, entry=0x10)
 
 def test_cloop_zero_st1_timer_interrupts_batched_loop(qemu):
     result = run_program(qemu, [
@@ -1823,6 +1857,27 @@ test_counted_self_loop_fault_has_slot1_ri = require_registers(
         (0xb0, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
         (0xc0, 0x19, nop_m(), st8_postinc(3, 0, 8),
          br_cloop(0xc0, 0xc0)),
+        (IA64_ALT_DTLB_VECTOR, 0x02, mov_m_cr_gr(31, 16),
+         extr_u(31, 31, 41, 2), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_ALT_DTLB_VECTOR + 0x10,
+                 IA64_ALT_DTLB_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_ALT_DTLB_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r31": 1,
+    }, entry=0x10)
+
+test_counted_self_loop_fallthrough_fault_has_slot1_ri = require_registers(
+    "counted_self_loop_fallthrough_fault_has_slot1_ri", [
+        *dtr_setup_bundles(0x10, HIGH_TR_BASE, 0x400000),
+        (0x70, *movl_mlx(3, HIGH_TR_BASE + 0x10000)),
+        (0x80, *movl_mlx(8, 0)),
+        (0x90, 0x02, nop_m(), mov_lc_gr(8), nop_i()),
+        (0xa0, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_DT)),
+        (0xb0, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), br_cloop(0xc0, 0xc0)),
+        (0xd0, 0x08, nop_m(), ld8(4, 3), nop_i()),
         (IA64_ALT_DTLB_VECTOR, 0x02, mov_m_cr_gr(31, 16),
          extr_u(31, 31, 41, 2), nop_i()),
         (IA64_ALT_DTLB_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
@@ -4673,6 +4728,8 @@ GROUP = 'interrupt'
 CASE_NAMES = (
 
     'ar_itc_advances_in_guest_loop',
+    'ar_itc_cpl3_si_clear_read_allowed',
+    'ar_itc_cpl3_si_set_privileged_register_fault',
     'async_timer_interrupt_enters_ivt',
     'async_timer_interrupt_never_resumes_mlx_slot2',
     'async_timer_interrupt_preserves_bank1_grs',
@@ -4683,6 +4740,7 @@ CASE_NAMES = (
     'br_ia_unimplemented_target_preserves_64bit_iip',
     'break_preserves_ifa_and_records_iim_isr',
     'cloop_zero_st1_timer_interrupts_batched_loop',
+    'counted_self_loop_fallthrough_fault_has_slot1_ri',
     'counted_self_loop_fault_has_slot1_ri',
     'cover_saves_interrupted_cfm_to_ifs',
     'exception_break',
