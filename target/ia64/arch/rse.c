@@ -730,6 +730,44 @@ ia64_clear_bit_range(uint64_t bits[2], uint32_t first, uint32_t count)
     }
 }
 
+/*
+ * Copy a directly mapped, NaT-free frame into the physical file.  Keep this
+ * path separate from the general mapper below: the latter needs snapshots,
+ * rotation state, tracing arguments, and a stack protector even when none of
+ * those facilities is used.  Normal compiler-generated call frames satisfy
+ * these conditions overwhelmingly often.
+ */
+static G_GNUC_NO_INLINE void
+ia64_rse_sync_frame_out_direct(CPUIA64State *env, uint64_t dirty0,
+                               uint64_t dirty1, uint32_t sof, uint32_t bol)
+{
+    env->rse.rse_gr_dirty[0] = 0;
+    env->rse.rse_gr_dirty[1] = 0;
+
+    /* Ignore implementation-state dirt outside the architected frame. */
+    if (sof < 64) {
+        dirty0 &= sof == 0 ? 0 : (1ULL << sof) - 1;
+        dirty1 = 0;
+    } else {
+        dirty1 &= (1ULL << (sof - 64)) - 1;
+    }
+
+    while (dirty0 != 0) {
+        uint32_t bit = ctz64(dirty0);
+
+        dirty0 &= dirty0 - 1;
+        env->rse.rse_pgr[bol + bit] =
+            env->gr[IA64_STACKED_GR_BASE + bit];
+    }
+    while (dirty1 != 0) {
+        uint32_t bit = ctz64(dirty1);
+
+        dirty1 &= dirty1 - 1;
+        env->rse.rse_pgr[bol + 64 + bit] =
+            env->gr[IA64_STACKED_GR_BASE + 64 + bit];
+    }
+}
+
 /* Copy dirty registers from the virtual view into the physical file. */
 static G_GNUC_NO_INLINE void
 ia64_rse_sync_frame_out_slow(CPUIA64State *env, uint64_t dirty0,
@@ -847,6 +885,25 @@ ia64_rse_sync_frame_out(CPUIA64State *env)
     uint64_t dirty1 = env->rse.rse_gr_dirty[1];
 
     if (unlikely(dirty0 | dirty1)) {
+        uint32_t sof = env->cfm_sof;
+        uint32_t bol = env->rse.rse_bol;
+
+        /*
+         * With no stacked NaTs, no active GR rotation, and no physical-file
+         * wrap, virtual register v maps exactly to physical register bol+v.
+         * This is the same first branch as the general helper, selected here
+         * so its large uncommon frame is never entered on the usual path.
+         * Malformed SOR state deliberately falls back to the defensive
+         * normalizer in ia64_rse_rotating_gr_count().
+         */
+        if (likely(((env->nat[0] >> IA64_STACKED_GR_BASE) |
+                    env->nat[1] | env->rse.rse_pgr_nat[0] |
+                    env->rse.rse_pgr_nat[1]) == 0 &&
+                   (env->cfm_sor == 0 || env->cfm_rrb_gr == 0) &&
+                   bol + sof <= IA64_STACKED_GR_COUNT)) {
+            ia64_rse_sync_frame_out_direct(env, dirty0, dirty1, sof, bol);
+            return;
+        }
         ia64_rse_sync_frame_out_slow(env, dirty0, dirty1);
     }
 }
@@ -903,8 +960,34 @@ static void ia64_rse_sync_frame_in_range(CPUIA64State *env, uint32_t first,
     }
 }
 
+/*
+ * Load a directly mapped frame when the physical file contains no NaTs.
+ * Keeping this path out of the general mapper avoids its rotation, 128-bit
+ * NaT-copy, and large register-save frame on every ordinary br.ret/rfi.
+ */
+static G_GNUC_NO_INLINE void
+ia64_rse_sync_frame_in_direct(CPUIA64State *env, uint32_t sof, uint32_t bol)
+{
+    uint32_t first = MIN(sof, IA64_STACKED_GR_COUNT - bol);
+    uint32_t second = sof - first;
+
+    memcpy(&env->gr[IA64_STACKED_GR_BASE], &env->rse.rse_pgr[bol],
+           first * sizeof(env->rse.rse_pgr[0]));
+    if (second != 0) {
+        memcpy(&env->gr[IA64_STACKED_GR_BASE + first], env->rse.rse_pgr,
+               second * sizeof(env->rse.rse_pgr[0]));
+    }
+
+    /* All virtual stacked NaTs are known clear, including outside SOF. */
+    env->nat[0] &= UINT32_MAX;
+    env->nat[1] = 0;
+    env->rse.rse_gr_dirty[0] = 0;
+    env->rse.rse_gr_dirty[1] = 0;
+}
+
 /* Load the virtual view of the current frame from the physical file. */
-static void ia64_rse_sync_frame_in(CPUIA64State *env)
+static G_GNUC_NO_INLINE void
+ia64_rse_sync_frame_in_slow(CPUIA64State *env)
 {
     uint32_t i;
 
@@ -950,6 +1033,19 @@ static void ia64_rse_sync_frame_in(CPUIA64State *env)
     }
     env->rse.rse_gr_dirty[0] = 0;
     env->rse.rse_gr_dirty[1] = 0;
+}
+
+static inline QEMU_ALWAYS_INLINE void
+ia64_rse_sync_frame_in(CPUIA64State *env)
+{
+    if (likely((env->cfm_sor == 0 || env->cfm_rrb_gr == 0) &&
+               (env->rse.rse_pgr_nat[0] |
+                env->rse.rse_pgr_nat[1]) == 0)) {
+        ia64_rse_sync_frame_in_direct(env, env->cfm_sof,
+                                      env->rse.rse_bol);
+        return;
+    }
+    ia64_rse_sync_frame_in_slow(env);
 }
 
 /*
@@ -1144,11 +1240,9 @@ static uint64_t ia64_rse_fill_collection(CPUIA64State *env, uint64_t addr,
  * incomplete) the virtual view is updated alongside the physical file
  * so that a fault on a later load leaves a consistent frame.
  */
-static int ia64_rse_load_one(CPUIA64State *env, uintptr_t ra)
+static int ia64_rse_load_one(CPUIA64State *env, uint64_t bspload,
+                             uintptr_t ra)
 {
-    int64_t live = (int64_t)env->rse.rse_clean + env->rse.rse_clean_nat +
-                   env->rse.rse_dirty + env->rse.rse_dirty_nat;
-    uint64_t bspload = env->ar_bsp - (live + 1) * 8;
     uint32_t ncb = ia64_rse_collect_bit(bspload);
 
     if (ncb == 63) {
@@ -1215,13 +1309,19 @@ static int ia64_rse_load_one(CPUIA64State *env, uintptr_t ra)
  */
 static void ia64_rse_complete_frame_loads(CPUIA64State *env, uintptr_t ra)
 {
+    int64_t live;
+    uint64_t bspload;
+
     if (env->rse.rse_dirty >= 0 && env->rse.rse_dirty_nat >= 0) {
         return;
     }
 
+    live = (int64_t)env->rse.rse_clean + env->rse.rse_clean_nat +
+           env->rse.rse_dirty + env->rse.rse_dirty_nat;
+    bspload = env->ar_bsp - (live + 1) * 8;
     env->rse.rse_cfle = true;
     while (env->rse.rse_dirty < 0 || env->rse.rse_dirty_nat < 0) {
-        if (ia64_rse_load_one(env, ra)) {
+        if (ia64_rse_load_one(env, bspload, ra)) {
             env->rse.rse_clean--;
             env->rse.rse_dirty++;
         } else {
@@ -1229,6 +1329,8 @@ static void ia64_rse_complete_frame_loads(CPUIA64State *env, uintptr_t ra)
             env->rse.rse_dirty_nat++;
         }
         ia64_rse_rnat_move_bspstore(env, env->ar_bspstore - 8);
+        /* load_one added exactly one word to the live partitions. */
+        bspload -= 8;
     }
     env->rse.rse_cfle = false;
 }
@@ -1406,6 +1508,30 @@ static void ia64_rse_invalidate_non_current(CPUIA64State *env)
 }
 
 /*
+ * Calls, returns, and allocs invalidate only stacked-register ALAT entries.
+ * Compiled code normally has no live ALAT entry, so mirror the callee's
+ * empty-table check here and avoid a function call on that common path.
+ */
+static inline void ia64_rse_invalidate_stacked_alat(CPUIA64State *env)
+{
+    if (unlikely(env->alat_state.alat_active_count != 0)) {
+        ia64_invalidate_stacked_alat(env);
+    }
+}
+
+/* Reset the three rotation bases without calling setters that are no-ops. */
+static inline void ia64_rse_reset_rotations(CPUIA64State *env)
+{
+    env->cfm_rrb_gr = 0;
+    if (unlikely(env->cfm_rrb_fr != 0)) {
+        ia64_set_cfm_rrb_fr(env, 0);
+    }
+    if (unlikely(env->cfm_rrb_pr != 0)) {
+        ia64_set_cfm_rrb_pr(env, 0);
+    }
+}
+
+/*
  * Common CFM/BOF update for br.ret and rfi.  Writes the restored frame
  * marker, moves BOF down by "preserved", adjusts the partitions, and
  * performs any mandatory loads.  The caller must have committed PSR
@@ -1418,6 +1544,10 @@ static void ia64_rse_return_to_frame(CPUIA64State *env, uint64_t pfm,
     uint32_t old_sof = env->cfm_sof;
     uint32_t new_sof = pfm & IA64_CFM_SOF_MASK;
     uint32_t new_sol = (pfm & IA64_CFM_SOL_MASK) >> IA64_CFM_SOL_SHIFT;
+    uint32_t new_rrb_fr = (pfm & IA64_CFM_RRB_FR_MASK) >>
+                          IA64_CFM_RRB_FR_SHIFT;
+    uint32_t new_rrb_pr = (pfm & IA64_CFM_RRB_PR_MASK) >>
+                          IA64_CFM_RRB_PR_SHIFT;
     int32_t growth = (int32_t)new_sof - (int32_t)preserved -
                      (int32_t)old_sof;
 
@@ -1427,16 +1557,20 @@ static void ia64_rse_return_to_frame(CPUIA64State *env, uint64_t pfm,
     env->cfm_sol = new_sol;
     env->cfm_sor = (pfm & IA64_CFM_SOR_MASK) >> IA64_CFM_SOR_SHIFT;
     env->cfm_rrb_gr = (pfm & IA64_CFM_RRB_GR_MASK) >> IA64_CFM_RRB_GR_SHIFT;
-    ia64_set_cfm_rrb_fr(env, (pfm & IA64_CFM_RRB_FR_MASK) >>
-                             IA64_CFM_RRB_FR_SHIFT);
-    ia64_set_cfm_rrb_pr(
-        env, (pfm & IA64_CFM_RRB_PR_MASK) >> IA64_CFM_RRB_PR_SHIFT);
+    if (unlikely(new_rrb_fr != env->cfm_rrb_fr ||
+                 new_rrb_fr >= IA64_ROTATING_FR_COUNT)) {
+        ia64_set_cfm_rrb_fr(env, new_rrb_fr);
+    }
+    if (unlikely(new_rrb_pr != env->cfm_rrb_pr ||
+                 new_rrb_pr >= IA64_PR_COUNT - IA64_PR_ROTATING_BASE)) {
+        ia64_set_cfm_rrb_pr(env, new_rrb_pr);
+    }
     env->rse.rse_bol = ia64_rse_wrap_phys((int32_t)env->rse.rse_bol -
                                       (int32_t)preserved);
 
     ia64_rse_restore_frame(env, preserved, growth, old_sof);
     ia64_rse_sync_frame_in(env);
-    ia64_invalidate_stacked_alat(env);
+    ia64_rse_invalidate_stacked_alat(env);
     ia64_rse_complete_frame_loads(env, 0);
     ia64_rse_check(env, "return");
 }
@@ -1786,13 +1920,11 @@ void ia64_rse_br_call(CPUIA64State *env, uint32_t b_reg,
     env->cfm_sof = outputs;
     env->cfm_sol = 0;
     env->cfm_sor = 0;
-    env->cfm_rrb_gr = 0;
-    ia64_set_cfm_rrb_fr(env, 0);
-    ia64_set_cfm_rrb_pr(env, 0);
+    ia64_rse_reset_rotations(env);
     if (!move_outputs) {
         ia64_rse_sync_frame_in(env);
     }
-    ia64_invalidate_stacked_alat(env);
+    ia64_rse_invalidate_stacked_alat(env);
 
     env->ar_pfs = pfs;
     env->br[b_reg] = next_ip;
@@ -1835,9 +1967,7 @@ void ia64_rse_br_ia(CPUIA64State *env, uint32_t b_reg,
     env->cfm_sof = 0;
     env->cfm_sol = 0;
     env->cfm_sor = 0;
-    env->cfm_rrb_gr = 0;
-    ia64_set_cfm_rrb_fr(env, 0);
-    ia64_set_cfm_rrb_pr(env, 0);
+    ia64_rse_reset_rotations(env);
     ia64_rse_invalidate_non_current(env);
     ia64_alat_invala(env);
     ia64_ia32_enter(env);
@@ -1936,7 +2066,7 @@ void ia64_rse_alloc(CPUIA64State *env, uint32_t r1, uint32_t pfm,
     if (new_sof > old_sof) {
         ia64_rse_sync_frame_in_range(env, old_sof, new_sof - old_sof);
     }
-    ia64_invalidate_stacked_alat(env);
+    ia64_rse_invalidate_stacked_alat(env);
 
     if (r1 != 0) {
         env->gr[r1] = env->ar_pfs;
@@ -1957,10 +2087,8 @@ void ia64_rse_cover(CPUIA64State *env)
     env->cfm_sof = 0;
     env->cfm_sol = 0;
     env->cfm_sor = 0;
-    env->cfm_rrb_gr = 0;
-    ia64_set_cfm_rrb_fr(env, 0);
-    ia64_set_cfm_rrb_pr(env, 0);
-    ia64_invalidate_stacked_alat(env);
+    ia64_rse_reset_rotations(env);
+    ia64_rse_invalidate_stacked_alat(env);
     ia64_rse_check(env, "cover");
     IA64_TRACE_RSE_STATE(env, "cover");
 }
@@ -2002,25 +2130,26 @@ void ia64_rse_load(CPUIA64State *env, uint64_t fault_ip, uint64_t raw,
     words_to_load = words - (env->rse.rse_clean + env->rse.rse_clean_nat +
                              env->rse.rse_dirty + env->rse.rse_dirty_nat);
     if (words_to_load >= 0) {
+        int64_t live;
+        uint64_t bspload;
+
         env->rse.rse_dirty_nat += env->rse.rse_clean_nat;
         env->rse.rse_dirty += env->rse.rse_clean;
         env->rse.rse_clean = 0;
         env->rse.rse_clean_nat = 0;
         env->ar_bspstore = env->ar_bsp -
             (int64_t)(env->rse.rse_dirty + env->rse.rse_dirty_nat) * 8;
+        live = (int64_t)env->rse.rse_clean + env->rse.rse_clean_nat +
+               env->rse.rse_dirty + env->rse.rse_dirty_nat;
+        bspload = env->ar_bsp - (live + 1) * 8;
         while (words_to_load > 0) {
-            int64_t live = (int64_t)env->rse.rse_clean +
-                           env->rse.rse_clean_nat + env->rse.rse_dirty +
-                           env->rse.rse_dirty_nat;
-            uint64_t bspload = env->ar_bsp - (live + 1) * 8;
-
             if (env->rse.rse_dirty == IA64_STACKED_GR_COUNT &&
                 ia64_rse_collect_bit(bspload) != 63) {
                 /* More registers than fit in the physical file. */
                 ia64_raise_exception(env, IA64_EXCP_ILLEGAL, fault_ip,
                                        raw, slot);
             }
-            if (ia64_rse_load_one(env, ra)) {
+            if (ia64_rse_load_one(env, bspload, ra)) {
                 env->rse.rse_dirty++;
                 env->rse.rse_clean--;
             } else {
@@ -2029,6 +2158,8 @@ void ia64_rse_load(CPUIA64State *env, uint64_t fault_ip, uint64_t raw,
             }
             env->ar_bspstore = env->ar_bsp -
                 (int64_t)(env->rse.rse_dirty + env->rse.rse_dirty_nat) * 8;
+            /* load_one added exactly one word to the live partitions. */
+            bspload -= 8;
             words_to_load--;
         }
     } else {

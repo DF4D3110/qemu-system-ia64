@@ -61,6 +61,8 @@ typedef struct IA64MMUState {
     uint16_t tlb_data_count;
     uint16_t tlb_inst_count;
     uint8_t tlb_data_l1_count;
+    /* One plus the most recently touched DTLB1 slot; zero means unknown. */
+    uint8_t tlb_data_l1_last;
     uint16_t tlb_data_replace;
     uint16_t tlb_inst_replace;
     uint32_t tlb_data_generation;

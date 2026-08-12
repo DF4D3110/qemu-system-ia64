@@ -29,11 +29,23 @@ void helper_merced_dtlb1_touch(CPUIA64State *env, uint64_t va, uint32_t size)
             ia64_merced_dtlb1_lookup_page(va) &&
         env->mmu.tlb_data_l1_clock != UINT64_MAX) {
         uint32_t rid = ia64_region_rid(env, va);
-        int cached = ia64_merced_dtlb1_lookup(env, va, rid);
+        uint8_t last = env->mmu.tlb_data_l1_last;
+        int cached;
 
+        /*
+         * Repeatedly touching the current MRU entry cannot change LRU order.
+         * Revalidate the derived hint against the live entry so purges,
+         * replacements, RR changes, and hash collisions remain harmless.
+         */
+        if (last != 0 && last <= IA64_DTLB1_MAX &&
+            ia64_tlb_match(&env->mmu.tlb_data_l1[last - 1U], va, rid)) {
+            return;
+        }
+        cached = ia64_merced_dtlb1_lookup(env, va, rid);
         if (cached >= 0) {
             env->mmu.tlb_data_l1_age[cached] =
                 ++env->mmu.tlb_data_l1_clock;
+            env->mmu.tlb_data_l1_last = cached + 1U;
             return;
         }
     }

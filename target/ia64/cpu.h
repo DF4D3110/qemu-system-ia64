@@ -71,12 +71,12 @@
 /*
  * Direct-mapped lookup for modeled TR/TC entries.  IA-64's minimum page is
  * 4 KiB; hashing at that granularity lets separate softmmu pages covered by
- * one large architected translation retain independent hints.  Four buckets
+ * one large architected translation retain independent hints.  Eight buckets
  * per maximum modeled TR/TC entry keep collision misses low without adding
  * another comparison to the hit path.
  */
 #define IA64_MICRO_TLB_PAGE_SHIFT 12
-#define IA64_MICRO_TLB_SIZE 512
+#define IA64_MICRO_TLB_SIZE 1024
 #define IA64_SUPPRESSED_TLB_MAX 4
 
 #define IA64_REGION_BITS 3

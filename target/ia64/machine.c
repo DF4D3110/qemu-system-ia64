@@ -240,6 +240,7 @@ static int ia64_cpu_post_load(void *opaque, int version_id)
     memset(&env->mmu.code_tlb_ed, 0, sizeof(env->mmu.code_tlb_ed));
     memset(env->mmu.tlb_data_l1_lookup, 0,
            sizeof(env->mmu.tlb_data_l1_lookup));
+    env->mmu.tlb_data_l1_last = 0;
     for (i = 0; i < IA64_TLB_MAX; i++) {
         env->mmu.tlb_data[i].micro_generation = 0;
         env->mmu.tlb_inst[i].micro_generation = 0;

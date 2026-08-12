@@ -306,6 +306,7 @@ static void ia64_merced_dtlb1_stamp(CPUIA64State *env, uint8_t slot)
     }
     env->mmu.tlb_data_l1_age[slot] =
         ++env->mmu.tlb_data_l1_clock;
+    env->mmu.tlb_data_l1_last = slot + 1U;
 }
 
 static void ia64_merced_dtlb1_invalidate_slot(CPUIA64State *env,
