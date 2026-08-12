@@ -2,7 +2,7 @@ name: Build QEMU System IA64 for Windows ARM64
 
 on:
   push:
-    branches: [ main, develop ] 
+    branches: [ main, develop ]
   pull_request:
     branches: [ main, develop ]
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
 jobs:
   build-windows-arm64:
     name: Build Windows ARM64
-    runs-on: windows-latest
+    runs-on: windows-11-arm64  # 原生 ARM64 Runner
     defaults:
       run:
         shell: msys2 {0}
@@ -75,19 +75,27 @@ jobs:
 
     - name: Verify environment
       run: |
-        clang --version
+        which clang || echo "clang not found, using gcc as fallback"
+        gcc --version || echo "gcc not found"
         python3 --version
 
     - name: Configure QEMU for Windows ARM64
       run: |
-        ./configure --target-list=ia64-softmmu \
-                    --enable-gtk \
-                    --enable-sdl \
-                    --disable-docs \
-                    --cross-prefix= \
-                    --extra-cflags="-target aarch64-w64-mingw32 -mcpu=neoverse-n1" \
-                    --extra-ldflags="-target aarch64-w64-mingw32" \
-                    --disable-werror
+        # 检查 clang 是否可用，否则使用 gcc
+        if command -v clang &> /dev/null; then
+          CC=clang CXX=clang++ \
+          ./configure --target-list=ia64-softmmu \
+                      --enable-gtk \
+                      --enable-sdl \
+                      --disable-docs \
+                      --disable-werror
+        else
+          ./configure --target-list=ia64-softmmu \
+                      --enable-gtk \
+                      --enable-sdl \
+                      --disable-docs \
+                      --disable-werror
+        fi
 
     - name: Build qemu-system-ia64.exe (skip firmware)
       run: |
