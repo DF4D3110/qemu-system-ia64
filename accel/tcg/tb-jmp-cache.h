@@ -12,7 +12,18 @@
 #include "qemu/rcu.h"
 #include "exec/cpu-common.h"
 
-#define TB_JMP_CACHE_BITS 12
+/*
+ * System emulation uses a larger cache to reduce inter-page conflicts.  Its
+ * hash still assigns only 64 entries to one guest page, so targeted page
+ * invalidation costs the same as with the historical 4K-entry cache.  Keep
+ * user-mode at the historical size; it uses a different hash and does not
+ * benefit from the system-mode page grouping.
+ */
+#ifdef CONFIG_SOFTMMU
+# define TB_JMP_CACHE_BITS 15
+#else
+# define TB_JMP_CACHE_BITS 12
+#endif
 #define TB_JMP_CACHE_SIZE (1 << TB_JMP_CACHE_BITS)
 
 /*

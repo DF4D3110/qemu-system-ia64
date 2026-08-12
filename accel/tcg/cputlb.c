@@ -327,6 +327,7 @@ void tlb_init(CPUState *cpu)
 
     /* All tlbs are initialized flushed. */
     cpu->neg.tlb.c.dirty = 0;
+    cpu->neg.tlb.c.jmp_cache_dirty = 0;
 
     for (i = 0; i < NB_MMU_MODES; i++) {
         tlb_mmu_init(&cpu->neg.tlb.d[i], cpu_tlb_fast(cpu, i), now);
@@ -366,11 +367,11 @@ static void flush_all_helper(CPUState *src, run_on_cpu_func fn,
     }
 }
 
-static void tlb_flush_by_mmuidx_async_work(CPUState *cpu, run_on_cpu_data data)
+static void tlb_flush_by_mmuidx_work(CPUState *cpu, MMUIdxMap asked,
+                                     bool flush_jmp_cache)
 {
-    MMUIdxMap asked = data.host_int;
-    MMUIdxMap all_dirty, work, to_clean;
-    int64_t now = get_clock_realtime();
+    MMUIdxMap all_dirty, jmp_dirty, work, to_clean, jmp_to_clean;
+    int64_t now;
 
     assert_cpu_is_self(cpu);
 
@@ -380,17 +381,36 @@ static void tlb_flush_by_mmuidx_async_work(CPUState *cpu, run_on_cpu_data data)
 
     all_dirty = cpu->neg.tlb.c.dirty;
     to_clean = asked & all_dirty;
+    /*
+     * softmmu entries and jump-cache hints have separate dirty maps.  A
+     * data-only flush empties the former while deliberately retaining the
+     * latter for a later instruction-side invalidation.
+     */
     all_dirty &= ~to_clean;
     cpu->neg.tlb.c.dirty = all_dirty;
 
-    for (work = to_clean; work != 0; work &= work - 1) {
-        int mmu_idx = ctz32(work);
-        tlb_flush_one_mmuidx_locked(cpu, mmu_idx, now);
+    jmp_dirty = cpu->neg.tlb.c.jmp_cache_dirty;
+    jmp_to_clean = asked & jmp_dirty;
+    if (flush_jmp_cache && jmp_to_clean) {
+        /* Only the requested modes also have their softmmu entries removed. */
+        cpu->neg.tlb.c.jmp_cache_dirty = jmp_dirty & ~jmp_to_clean;
+    }
+
+    if (to_clean) {
+        /* Avoid a clock read for a fully elided softmmu flush. */
+        now = get_clock_realtime();
+        for (work = to_clean; work != 0; work &= work - 1) {
+            int mmu_idx = ctz32(work);
+
+            tlb_flush_one_mmuidx_locked(cpu, mmu_idx, now);
+        }
     }
 
     qemu_spin_unlock(&cpu->neg.tlb.c.lock);
 
-    tcg_flush_jmp_cache(cpu);
+    if (flush_jmp_cache && jmp_to_clean) {
+        tcg_flush_jmp_cache(cpu);
+    }
 
     if (to_clean == ALL_MMUIDX_BITS) {
         qatomic_set(&cpu->neg.tlb.c.full_flush_count,
@@ -406,13 +426,28 @@ static void tlb_flush_by_mmuidx_async_work(CPUState *cpu, run_on_cpu_data data)
     }
 }
 
+static void tlb_flush_by_mmuidx_async_work(CPUState *cpu,
+                                           run_on_cpu_data data)
+{
+    tlb_flush_by_mmuidx_work(cpu, data.host_int, true);
+}
+
 void tlb_flush_by_mmuidx(CPUState *cpu, MMUIdxMap idxmap)
 {
     tlb_debug("mmu_idx: 0x%" PRIx16 "\n", idxmap);
 
     assert_cpu_is_self(cpu);
 
-    tlb_flush_by_mmuidx_async_work(cpu, RUN_ON_CPU_HOST_INT(idxmap));
+    tlb_flush_by_mmuidx_work(cpu, idxmap, true);
+}
+
+void tlb_flush_by_mmuidx_no_jmp_cache(CPUState *cpu, MMUIdxMap idxmap)
+{
+    tlb_debug("mmu_idx: 0x%" PRIx16 "\n", idxmap);
+
+    assert_cpu_is_self(cpu);
+
+    tlb_flush_by_mmuidx_work(cpu, idxmap, false);
 }
 
 void tlb_flush(CPUState *cpu)
@@ -531,19 +566,25 @@ static void tlb_flush_page_by_mmuidx_async_0(CPUState *cpu,
                                              vaddr addr,
                                              MMUIdxMap idxmap)
 {
-    int mmu_idx;
+    MMUIdxMap active, jmp_active, work;
 
     assert_cpu_is_self(cpu);
 
     tlb_debug("page addr: %016" VADDR_PRIx " mmu_map:0x%x\n", addr, idxmap);
 
     qemu_spin_lock(&cpu->neg.tlb.c.lock);
-    for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
-        if ((idxmap >> mmu_idx) & 1) {
-            tlb_flush_page_locked(cpu, mmu_idx, addr);
-        }
+    active = idxmap & cpu->neg.tlb.c.dirty;
+    jmp_active = idxmap & cpu->neg.tlb.c.jmp_cache_dirty;
+    for (work = active; work != 0; work &= work - 1) {
+        int mmu_idx = ctz32(work);
+
+        tlb_flush_page_locked(cpu, mmu_idx, addr);
     }
     qemu_spin_unlock(&cpu->neg.tlb.c.lock);
+
+    if (!jmp_active) {
+        return;
+    }
 
     /*
      * Discard jump cache entries for any tb which might potentially
@@ -730,7 +771,11 @@ static void tlb_flush_range_by_mmuidx_async_0(CPUState *cpu,
                                               TLBFlushRangeData d)
 {
     int64_t full_flush_now = -1;
-    int mmu_idx;
+    MMUIdxMap active, jmp_active, work;
+    vaddr n = d.len / TARGET_PAGE_SIZE +
+              (d.len % TARGET_PAGE_SIZE != 0) + 1;
+    bool full_jmp_flush =
+        n >= TB_JMP_CACHE_SIZE / TB_JMP_PAGE_SIZE;
 
     assert_cpu_is_self(cpu);
 
@@ -738,17 +783,19 @@ static void tlb_flush_range_by_mmuidx_async_0(CPUState *cpu,
               d.addr, d.bits, d.len, d.idxmap);
 
     qemu_spin_lock(&cpu->neg.tlb.c.lock);
-    for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
-        if (((d.idxmap & cpu->neg.tlb.c.dirty) >> mmu_idx) & 1) {
-            /*
-             * A range can force a full flush in several MMU modes.  Reuse
-             * one timestamp for their resize decisions: the modes are all
-             * flushed while holding the same lock and no guest execution
-             * can occur between them.
-             */
-            tlb_flush_range_locked(cpu, mmu_idx, d.addr, d.len, d.bits,
-                                   &full_flush_now);
-        }
+    active = d.idxmap & cpu->neg.tlb.c.dirty;
+    jmp_active = d.idxmap & cpu->neg.tlb.c.jmp_cache_dirty;
+    for (work = active; work != 0; work &= work - 1) {
+        int mmu_idx = ctz32(work);
+
+        /*
+         * A range can force a full flush in several MMU modes.  Reuse one
+         * timestamp for their resize decisions: the modes are all flushed
+         * while holding the same lock and no guest execution can occur
+         * between them.
+         */
+        tlb_flush_range_locked(cpu, mmu_idx, d.addr, d.len, d.bits,
+                               &full_flush_now);
     }
     qemu_spin_unlock(&cpu->neg.tlb.c.lock);
 
@@ -758,15 +805,16 @@ static void tlb_flush_range_by_mmuidx_async_0(CPUState *cpu,
      * the unified softmmu entry, but cannot make an already translated TB
      * stale.  Preserve the jump-cache hint in that case.
      */
-    if (!d.flush_jmp_cache) {
+    if (!d.flush_jmp_cache || !jmp_active) {
         return;
     }
 
     /*
-     * If the length is larger than the jump cache size, then it will take
-     * longer to clear each entry individually than it will to clear it all.
+     * Clearing one guest page writes TB_JMP_PAGE_SIZE entries.  Once the
+     * range (including its preceding page) covers as many cache groups as a
+     * full clear, clearing the whole cache performs no more stores.
      */
-    if (d.len >= (TARGET_PAGE_SIZE * TB_JMP_CACHE_SIZE)) {
+    if (full_jmp_flush) {
         tcg_flush_jmp_cache(cpu);
         return;
     }
@@ -776,7 +824,7 @@ static void tlb_flush_range_by_mmuidx_async_0(CPUState *cpu,
      * overlap the flushed pages, which includes the previous.
      */
     d.addr -= TARGET_PAGE_SIZE;
-    for (vaddr i = 0, n = d.len / TARGET_PAGE_SIZE + 1; i < n; i++) {
+    for (vaddr i = 0; i < n; i++) {
         tb_jmp_cache_clear_page(cpu, d.addr);
         d.addr += TARGET_PAGE_SIZE;
     }
@@ -1164,6 +1212,9 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
 
     /* Note that the tlb is no longer clean.  */
     tlb->c.dirty |= 1 << mmu_idx;
+    if (prot & PAGE_EXEC) {
+        tlb->c.jmp_cache_dirty |= 1 << mmu_idx;
+    }
 
     /* Make sure there's no cached translation for the new page.  */
     tlb_flush_vtlb_page_locked(cpu, mmu_idx, addr_page);
@@ -1346,32 +1397,46 @@ static void io_failed(CPUState *cpu, CPUTLBEntryFull *full, vaddr addr,
     }
 }
 
-/* Return true if ADDR is present in the victim tlb, and has been copied
-   back to the main tlb.  */
+/*
+ * Swap a victim entry back into the direct-mapped TLB.  Keep this out of the
+ * lookup helper so that the overwhelmingly common victim miss does not need
+ * stack space for two complete entries (or the associated stack protector).
+ */
+static G_GNUC_NO_INLINE void
+victim_tlb_swap(CPUState *cpu, size_t mmu_idx, size_t index, size_t vidx)
+{
+    CPUTLBDesc *desc = &cpu->neg.tlb.d[mmu_idx];
+    CPUTLBEntry *vtlb = &desc->vtable[vidx];
+    CPUTLBEntry *tlb = &cpu_tlb_fast(cpu, mmu_idx)->table[index];
+    CPUTLBEntry tmptlb;
+    CPUTLBEntryFull *f1, *f2, tmpf;
+
+    qemu_spin_lock(&cpu->neg.tlb.c.lock);
+    copy_tlb_helper_locked(&tmptlb, tlb);
+    copy_tlb_helper_locked(tlb, vtlb);
+    copy_tlb_helper_locked(vtlb, &tmptlb);
+    f1 = &desc->fulltlb[index];
+    f2 = &desc->vfulltlb[vidx];
+    tmpf = *f1;
+    *f1 = *f2;
+    *f2 = tmpf;
+    qemu_spin_unlock(&cpu->neg.tlb.c.lock);
+}
+
+/* Return true if PAGE is present in the victim TLB and promoted. */
 static bool victim_tlb_hit(CPUState *cpu, size_t mmu_idx, size_t index,
                            MMUAccessType access_type, vaddr page)
 {
+    CPUTLBDesc *desc = &cpu->neg.tlb.d[mmu_idx];
     size_t vidx;
 
     assert_cpu_is_self(cpu);
     for (vidx = 0; vidx < CPU_VTLB_SIZE; ++vidx) {
-        CPUTLBEntry *vtlb = &cpu->neg.tlb.d[mmu_idx].vtable[vidx];
+        CPUTLBEntry *vtlb = &desc->vtable[vidx];
         uint64_t cmp = tlb_read_idx(vtlb, access_type);
 
         if (cmp == page) {
-            /* Found entry in victim tlb, swap tlb and iotlb.  */
-            CPUTLBEntry tmptlb, *tlb = &cpu_tlb_fast(cpu, mmu_idx)->table[index];
-
-            qemu_spin_lock(&cpu->neg.tlb.c.lock);
-            copy_tlb_helper_locked(&tmptlb, tlb);
-            copy_tlb_helper_locked(tlb, vtlb);
-            copy_tlb_helper_locked(vtlb, &tmptlb);
-            qemu_spin_unlock(&cpu->neg.tlb.c.lock);
-
-            CPUTLBEntryFull *f1 = &cpu->neg.tlb.d[mmu_idx].fulltlb[index];
-            CPUTLBEntryFull *f2 = &cpu->neg.tlb.d[mmu_idx].vfulltlb[vidx];
-            CPUTLBEntryFull tmpf;
-            tmpf = *f1; *f1 = *f2; *f2 = tmpf;
+            victim_tlb_swap(cpu, mmu_idx, index, vidx);
             return true;
         }
     }

@@ -313,6 +313,14 @@ typedef struct CPUTLBCommon {
      */
     MMUIdxMap dirty;
     /*
+     * MMU modes that may have supplied an instruction translation for the
+     * per-CPU TB jump cache.  Kept separate because an architecturally
+     * data-only flush may empty the unified softmmu table while retaining
+     * valid translated-code hints.
+     * Protected by tlb_c.lock.
+     */
+    MMUIdxMap jmp_cache_dirty;
+    /*
      * Statistics.  These are not lock protected, but are read and
      * written atomically.  This allows the monitor to print a snapshot
      * of the stats without interfering with the cpu.

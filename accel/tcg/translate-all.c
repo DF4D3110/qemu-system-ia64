@@ -257,6 +257,32 @@ static int setjmp_gen_code(CPUArchState *env, TranslationBlock *tb,
     return tcg_gen_code(tcg_ctx, tb, pc);
 }
 
+/*
+ * Look again after taking the first page lock.  A concurrent translator may
+ * have published this TB while we were waiting for the lock.  Restrict the
+ * early lookup to single-page TBs: matching a cross-page TB would require a
+ * second guest-code translation while page0 is locked, which may fault or
+ * require taking the page locks in a different order.
+ */
+static TranslationBlock *tb_lookup_single_page_locked(TranslationBlock *tb)
+{
+    uint32_t h;
+
+    h = tb_hash_func(tb_page_addr0(tb),
+                     tb->cflags & CF_PCREL ? 0 : tb->pc,
+                     tb->flags, tb->cs_base, tb->cflags);
+    return qht_lookup(&tb_ctx.htable, tb, h);
+}
+
+static void tb_rewind_unpublished(TranslationBlock *tb,
+                                  tcg_insn_unit *gen_code_buf)
+{
+    uintptr_t orig_aligned = (uintptr_t)gen_code_buf;
+
+    orig_aligned -= ROUND_UP(sizeof(*tb), qemu_icache_linesize);
+    qatomic_set(&tcg_ctx->code_gen_ptr, (void *)orig_aligned);
+}
+
 /* Called with mmap_lock held for user mode emulation.  */
 TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
 {
@@ -313,6 +339,12 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
     tb_set_page_addr1(tb, -1);
     if (phys_pc != -1) {
         tb_lock_page0(phys_pc);
+        existing_tb = tb_lookup_single_page_locked(tb);
+        if (unlikely(existing_tb)) {
+            tb_unlock_pages(tb);
+            tb_rewind_unpublished(tb, gen_code_buf);
+            return existing_tb;
+        }
     }
 
     tcg_ctx->gen_tb = tb;
@@ -530,10 +562,7 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
 
     /* if the TB already exists, discard what we just translated */
     if (unlikely(existing_tb != tb)) {
-        uintptr_t orig_aligned = (uintptr_t)gen_code_buf;
-
-        orig_aligned -= ROUND_UP(sizeof(*tb), qemu_icache_linesize);
-        qatomic_set(&tcg_ctx->code_gen_ptr, (void *)orig_aligned);
+        tb_rewind_unpublished(tb, gen_code_buf);
         tcg_tb_remove(tb);
         return existing_tb;
     }
