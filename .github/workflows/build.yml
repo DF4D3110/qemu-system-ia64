@@ -1,4 +1,4 @@
-name: Build QEMU System IA64
+name: Build QEMU System IA64 (qemu-system-ia64 only)
 
 on:
   push:
@@ -6,27 +6,19 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-windows:
+  build-windows-arm64:
+    name: 🚧 Windows clangarm64 ${{ matrix.mode }} build (qemu-system-ia64 only)
+    runs-on: windows-11-arm64
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # ARM64 原生动态构建（只编译主程序）
-          - os: windows-11-arm
-            sys: clangarm64
-            mode: dynamic
-          # ARM64 原生静态构建（只编译主程序）
-          - os: windows-11-arm
-            sys: clangarm64
-            mode: static
-    runs-on: ${{ matrix.os }}
+        mode: [dynamic, static]
     env:
       dynamic_flags: '--enable-gtk'
       static_flags: '--disable-gtk --disable-spice --disable-usb-redir --disable-smartcard --disable-gnutls --disable-libssh --disable-vnc-sasl --static'
       static_extra_cflags: '-DCURL_STATICLIB -DLIBSSH_STATIC -DLIBSLIRP_STATIC -DCAIRO_WIN32_STATIC_BUILD'
       clang_extra_cflags: '-Wno-missing-prototypes -Wno-sometimes-uninitialized -Wno-pragma-pack'
 
-    name: ${{ format('🚧 Windows {0} {1} build (qemu-system-ia64 only)', matrix.sys, matrix.mode) }}
     defaults:
       run:
         shell: msys2 {0}
@@ -42,7 +34,7 @@ jobs:
     - name: 'Setup MSYS2'
       uses: msys2/setup-msys2@v2
       with:
-        msystem: ${{ matrix.sys }}
+        msystem: clangarm64
         update: true
         install: >-
           git
@@ -51,8 +43,6 @@ jobs:
           diffutils
           flex
           base-devel
-          python
-          python-setuptools
           meson
         pacboy: >-
           toolchain:p
@@ -87,58 +77,115 @@ jobs:
           zstd:p
           libslirp:p
           python-distlib:p
-          nsis:${{ endsWith(matrix.os, 'arm') && 'c' || 'p' }}
+          nsis:c
 
     - name: 'Modify pkgconfig to avoid linker issues'
       if: ${{ matrix.mode == 'static' }}
       run: |
-        PKGCONFIG_FILE="/${{ matrix.sys }}/lib/pkgconfig/gpg-error.pc"
-        sed -i "s#/${{ matrix.sys }}/lib/libintl.dll.a#-llibintl#g" "$PKGCONFIG_FILE"
-        sed -i "s#/${{ matrix.sys }}/lib/libiconv.dll.a#-llibiconv#g" "$PKGCONFIG_FILE"
+        PKGCONFIG_FILE="/clangarm64/lib/pkgconfig/gpg-error.pc"
+        sed -i "s#/clangarm64/lib/libintl.dll.a#-llibintl#g" "$PKGCONFIG_FILE"
+        sed -i "s#/clangarm64/lib/libiconv.dll.a#-llibiconv#g" "$PKGCONFIG_FILE"
 
     - name: 'Verify environment'
       run: |
+        echo "=========================================="
+        echo "🔍 验证环境"
+        echo "=========================================="
+        echo ""
+        echo "📌 Python 版本:"
         python3 --version
+        echo ""
+        echo "📌 Meson 版本:"
         meson --version
+        echo ""
+        echo "📌 Ninja 版本:"
         ninja --version
+        echo ""
+        echo "📌 Clang 版本:"
+        clang --version | head -1
+        echo ""
+        echo "✅ 环境验证完成"
 
-    - name: ${{ format('🚧 Build qemu-system-ia64 ({0})', matrix.mode) }}
+    - name: 'Configure QEMU (${{ matrix.mode }} build)'
       env:
         mode_flags: ${{ matrix.mode == 'dynamic' && env.dynamic_flags || env.static_flags }}
         extra_cflags: ${{ (matrix.mode == 'static' || startsWith(matrix.sys, 'clang')) && format('--extra-cflags="{0} {1}"', matrix.mode == 'static' && env.static_extra_cflags || '', startsWith(matrix.sys, 'clang') && env.clang_extra_cflags || '') || '' }}
       run: |
+        echo "=========================================="
+        echo "⚙️ 配置 QEMU (${{ matrix.mode }} 构建)"
+        echo "=========================================="
+        echo ""
+        echo "📌 配置参数:"
+        echo "  - 目标: ia64-softmmu"
+        echo "  - 模式: ${{ matrix.mode }}"
+        echo "  - 图形: SDL"
+        echo "  - 文档: 已禁用"
+        echo ""
+
         ./configure --enable-sdl \
                     --enable-fdt=system \
                     --disable-docs \
                     --target-list=ia64-softmmu \
                     --prefix="$(cygpath -u '${{ github.workspace }}')/artifacts" \
                     ${{ format('{0} {1}', env.mode_flags, env.extra_cflags) }}
-        ninja -C build -j$(nproc) qemu-system-ia64
-        echo "version=v$(cat VERSION)-$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
-    - name: 'Prepare artifacts (static)'
-      if: ${{ matrix.mode == 'static' }}
+        echo ""
+        echo "✅ 配置完成"
+
+    - name: 'Build qemu-system-ia64 (${{ matrix.mode }} build)'
       run: |
+        echo "=========================================="
+        echo "🛠️ 编译 qemu-system-ia64 (${{ matrix.mode }} 构建)"
+        echo "=========================================="
+        echo ""
+        echo "📌 跳过: 固件 (ia64-firmware.bin)"
+        echo ""
+
+        CORES=$(nproc 2>/dev/null || echo 4)
+        echo "📌 并行任务数: $CORES"
+        echo ""
+
+        ninja -C build -j$CORES qemu-system-ia64
+
+        echo ""
+        echo "✅ 编译完成"
+        echo ""
+        echo "📌 编译产物:"
+        ls -la build/qemu-system-ia64* 2>/dev/null || echo "⚠️ 未找到产物"
+
+    - name: 'Prepare artifacts'
+      run: |
+        echo "=========================================="
+        echo "📦 准备产物"
+        echo "=========================================="
+        echo ""
+
         mkdir -p artifacts
         cp -v build/qemu-system-ia64* artifacts/ 2>/dev/null || true
 
-    - name: 'Prepare artifacts (dynamic)'
-      if: ${{ matrix.mode == 'dynamic' }}
+        echo ""
+        echo "📌 产物列表:"
+        ls -la artifacts/
+
+    - name: 'Get version'
+      id: version
       run: |
-        mkdir -p artifacts
-        cp -v build/qemu-system-ia64* artifacts/ 2>/dev/null || true
+        VERSION=$(cat VERSION 2>/dev/null | tr -d '\n' || echo "unknown")
+        SHORT_HASH=$(git rev-parse --short HEAD 2>/dev/null || echo "nogit")
+        echo "version=v${VERSION}-${SHORT_HASH}" >> $GITHUB_OUTPUT
+        echo "📌 版本: v${VERSION}-${SHORT_HASH}"
 
     - name: 'Upload artifact'
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ format('qemu-system-ia64-{0}-{1}-{2}', env.version, matrix.sys, matrix.mode) }}
+        name: qemu-system-ia64-${{ steps.version.outputs.version }}-clangarm64-${{ matrix.mode }}
         path: ${{ github.workspace }}/artifacts/
         compression-level: 9
 
-    - name: 'Upload logs'
+    - name: 'Upload logs on failure'
       if: ${{ failure() }}
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ format('qemu-system-ia64-{0}-{1}-{2}-logs', env.version, matrix.sys, matrix.mode) }}
+        name: qemu-system-ia64-${{ steps.version.outputs.version }}-clangarm64-${{ matrix.mode }}-logs
         path: ${{ github.workspace }}/build
         compression-level: 9
