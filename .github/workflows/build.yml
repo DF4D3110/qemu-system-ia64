@@ -9,7 +9,7 @@ on:
 
 jobs:
   build-windows-arm64:
-    name: Build Windows ARM64
+    name: 🚧 Windows ARM64 (dynamic build)
     runs-on: windows-11-arm64
     defaults:
       run:
@@ -17,15 +17,15 @@ jobs:
 
     steps:
     # ============ 1. 代码签出 ============
-    - name: 📂 Checkout repository
+    - name: '🧰 Checkout'
       uses: actions/checkout@v4
       with:
-        repository: syunnPC/qemu-system-ia64
+        repository: DF4D3110/qemu-system-ia64
         ref: main
         submodules: 'recursive'
 
     # ============ 2. 环境准备 ============
-    - name: 🔧 Setup MSYS2
+    - name: 'Setup MSYS2 (clangarm64)'
       uses: msys2/setup-msys2@v2
       with:
         msystem: clangarm64
@@ -76,7 +76,7 @@ jobs:
           python-distlib:p
 
     # ============ 3. 环境验证 ============
-    - name: 🔍 Verify environment
+    - name: '🔍 验证环境'
       run: |
         echo "=========================================="
         echo "🔍 环境验证"
@@ -86,8 +86,7 @@ jobs:
         uname -a
         echo ""
         echo "📌 编译器信息:"
-        clang --version 2>/dev/null || echo "⚠️  clang not found, using gcc"
-        gcc --version 2>/dev/null || echo "⚠️  gcc not found"
+        clang --version 2>/dev/null || echo "⚠️  clang not found"
         echo ""
         echo "📌 Python 信息:"
         python3 --version
@@ -95,18 +94,13 @@ jobs:
         echo "📌 Ninja 信息:"
         ninja --version 2>/dev/null || echo "⚠️  ninja not found"
         echo ""
-        echo "📌 pkg-config 信息:"
-        pkgconf --version 2>/dev/null || echo "⚠️  pkgconf not found"
-        echo ""
-        echo "=========================================="
         echo "✅ 环境验证完成"
-        echo "=========================================="
 
     # ============ 4. 配置 QEMU ============
-    - name: ⚙️ Configure QEMU
+    - name: '⚙️ 配置 QEMU'
       run: |
         echo "=========================================="
-        echo "⚙️ 开始配置 QEMU"
+        echo "⚙️ 配置 QEMU (目标: ia64-softmmu)"
         echo "=========================================="
         echo ""
         echo "📌 配置参数:"
@@ -114,102 +108,76 @@ jobs:
         echo "  - 图形: GTK + SDL"
         echo "  - 文档: 已禁用"
         echo ""
-        echo "📌 正在运行 ./configure ..."
-        echo ""
-        
+
         ./configure --target-list=ia64-softmmu \
                     --enable-gtk \
                     --enable-sdl \
                     --disable-docs \
                     --disable-werror 2>&1 | tee configure.log
-        
+
         if [ $? -eq 0 ]; then
           echo ""
           echo "✅ 配置成功"
         else
           echo ""
-          echo "❌ 配置失败，查看日志:"
+          echo "❌ 配置失败"
           cat configure.log
           exit 1
         fi
-        echo ""
-        echo "=========================================="
 
-    # ============ 5. 编译主程序 ============
-    - name: 🛠️ Build qemu-system-ia64.exe
+    # ============ 5. 编译主程序 (跳过固件) ============
+    - name: '🛠️ 编译 qemu-system-ia64.exe'
       run: |
         echo "=========================================="
-        echo "🛠️ 开始编译 qemu-system-ia64.exe"
+        echo "🛠️ 编译 qemu-system-ia64.exe"
         echo "=========================================="
         echo ""
         echo "📌 编译目标: qemu-system-ia64"
         echo "📌 跳过: 固件 (ia64-firmware.bin)"
         echo ""
 
-        # 获取 CPU 核心数
         CORES=$(nproc 2>/dev/null || echo 4)
         echo "📌 并行任务数: $CORES"
         echo ""
 
-        echo "📌 开始编译..."
-        echo ""
-
-        # 编译并显示进度
         ninja -C build -j$CORES qemu-system-ia64 2>&1 | tee build.log
-        
+
         if [ $? -eq 0 ]; then
           echo ""
           echo "✅ 编译成功"
         else
           echo ""
-          echo "❌ 编译失败，查看日志:"
+          echo "❌ 编译失败"
           tail -100 build.log
           exit 1
         fi
-        
+
         echo ""
         echo "📌 编译产物:"
         ls -la build/qemu-system-ia64* 2>/dev/null || echo "⚠️  未找到产物"
-        echo ""
-        echo "=========================================="
 
-    # ============ 6. 提取产物信息 ============
-    - name: 📦 Prepare artifact
-      id: artifact
+    # ============ 6. 准备版本信息 ============
+    - name: '📦 获取版本信息'
+      id: version
       run: |
-        echo "=========================================="
-        echo "📦 准备产物"
-        echo "=========================================="
-        echo ""
-        
-        # 获取版本信息
-        VERSION=$(cat VERSION 2>/dev/null | tr -d '\n')
-        SHORT_HASH=$(git rev-parse --short HEAD 2>/dev/null)
-        echo "📌 版本: $VERSION"
-        echo "📌 提交: $SHORT_HASH"
+        VERSION=$(cat VERSION 2>/dev/null | tr -d '\n' || echo "unknown")
+        SHORT_HASH=$(git rev-parse --short HEAD 2>/dev/null || echo "nogit")
         echo "version=v${VERSION}-${SHORT_HASH}" >> $GITHUB_OUTPUT
-        
-        echo ""
-        echo "📌 产物列表:"
-        find build -maxdepth 1 -name "qemu-system-ia64*" -exec ls -la {} \;
-        echo ""
-        echo "=========================================="
+        echo "📌 版本: v${VERSION}-${SHORT_HASH}"
 
     # ============ 7. 上传产物 ============
-    - name: ⬆️ Upload artifact
+    - name: '⬆️ 上传产物'
       uses: actions/upload-artifact@v4
       with:
-        name: qemu-system-ia64-windows-arm64-${{ steps.artifact.outputs.version }}
+        name: qemu-system-ia64-windows-arm64-${{ steps.version.outputs.version }}
         path: |
           build/qemu-system-ia64.exe
           build/qemu-system-ia64
-          configure.log
-          build.log
         if-no-files-found: error
         compression-level: 9
 
     # ============ 8. 失败时上传日志 ============
-    - name: 📋 Upload logs on failure
+    - name: '📋 上传日志 (如果失败)'
       if: ${{ failure() }}
       uses: actions/upload-artifact@v4
       with:
