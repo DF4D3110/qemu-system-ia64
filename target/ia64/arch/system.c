@@ -418,7 +418,9 @@ void ia64_system_write_ar(CPUIA64State *env, uint32_t ar_num, uint64_t value)
         env->ar_rsc = (value & ~IA64_RSC_PL) |
                       ((uint64_t)pl << IA64_RSC_PL_SHIFT);
         if ((old_rsc ^ env->ar_rsc) & IA64_RSC_PL) {
-            tlb_flush_by_mmuidx(env_cpu(env), 1u << MMU_IDX_RSE);
+            /* The RSE MMU index is never used for instruction fetches. */
+            tlb_flush_by_mmuidx_no_jmp_cache(env_cpu(env),
+                                             1u << MMU_IDX_RSE);
         }
         return;
     }

@@ -28,10 +28,13 @@
 
 #ifdef CONFIG_SOFTMMU
 
-/* Only the bottom TB_JMP_PAGE_BITS of the jump cache hash bits vary for
-   addresses on the same page.  The top bits are the same.  This allows
-   TLB invalidation to quickly clear a subset of the hash table.  */
-#define TB_JMP_PAGE_BITS (TB_JMP_CACHE_BITS / 2)
+/*
+ * Only the bottom TB_JMP_PAGE_BITS of the jump-cache hash vary within one
+ * guest page.  Keep this group fixed at 64 entries while the upper bits size
+ * the number of independently hashed pages.  This allows a larger cache
+ * without making targeted TLB invalidation more expensive.
+ */
+#define TB_JMP_PAGE_BITS 6
 #define TB_JMP_PAGE_SIZE (1 << TB_JMP_PAGE_BITS)
 #define TB_JMP_ADDR_MASK (TB_JMP_PAGE_SIZE - 1)
 #define TB_JMP_PAGE_MASK (TB_JMP_CACHE_SIZE - TB_JMP_PAGE_SIZE)

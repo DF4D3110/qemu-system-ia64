@@ -180,6 +180,17 @@ void tlb_flush_page_by_mmuidx_all_cpus_synced(CPUState *cpu, vaddr addr,
 void tlb_flush_by_mmuidx(CPUState *cpu, MMUIdxMap idxmap);
 
 /**
+ * tlb_flush_by_mmuidx_no_jmp_cache:
+ * @cpu: CPU whose TLB should be flushed
+ * @idxmap: bitmap of MMU indexes to flush
+ *
+ * Flush the same softmmu entries as tlb_flush_by_mmuidx(), but retain
+ * translated-block jump-cache hints.  A target may use this only when the
+ * architectural invalidation cannot change instruction translation.
+ */
+void tlb_flush_by_mmuidx_no_jmp_cache(CPUState *cpu, MMUIdxMap idxmap);
+
+/**
  * tlb_flush_by_mmuidx_all_cpus_synced:
  * @cpu: Originating CPU of the flush
  * @idxmap: bitmap of MMU indexes to flush
@@ -260,6 +271,10 @@ static inline void tlb_flush_page_by_mmuidx(CPUState *cpu,
 }
 
 static inline void tlb_flush_by_mmuidx(CPUState *cpu, MMUIdxMap idxmap)
+{
+}
+static inline void tlb_flush_by_mmuidx_no_jmp_cache(CPUState *cpu,
+                                                    MMUIdxMap idxmap)
 {
 }
 static inline void tlb_flush_page_by_mmuidx_all_cpus_synced(CPUState *cpu,
