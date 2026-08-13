@@ -10,20 +10,22 @@ on:
 jobs:
   build-windows-arm64:
     name: Build Windows ARM64
-    runs-on: windows-11-arm64  # 原生 ARM64 Runner
+    runs-on: windows-11-arm64
     defaults:
       run:
         shell: msys2 {0}
 
     steps:
-    - name: Checkout repository
+    # ============ 1. 代码签出 ============
+    - name: 📂 Checkout repository
       uses: actions/checkout@v4
       with:
         repository: syunnPC/qemu-system-ia64
         ref: main
         submodules: 'recursive'
 
-    - name: Setup MSYS2
+    # ============ 2. 环境准备 ============
+    - name: 🔧 Setup MSYS2
       uses: msys2/setup-msys2@v2
       with:
         msystem: clangarm64
@@ -73,39 +75,147 @@ jobs:
           libslirp:p
           python-distlib:p
 
-    - name: Verify environment
+    # ============ 3. 环境验证 ============
+    - name: 🔍 Verify environment
       run: |
-        which clang || echo "clang not found, using gcc as fallback"
-        gcc --version || echo "gcc not found"
+        echo "=========================================="
+        echo "🔍 环境验证"
+        echo "=========================================="
+        echo ""
+        echo "📌 系统信息:"
+        uname -a
+        echo ""
+        echo "📌 编译器信息:"
+        clang --version 2>/dev/null || echo "⚠️  clang not found, using gcc"
+        gcc --version 2>/dev/null || echo "⚠️  gcc not found"
+        echo ""
+        echo "📌 Python 信息:"
         python3 --version
+        echo ""
+        echo "📌 Ninja 信息:"
+        ninja --version 2>/dev/null || echo "⚠️  ninja not found"
+        echo ""
+        echo "📌 pkg-config 信息:"
+        pkgconf --version 2>/dev/null || echo "⚠️  pkgconf not found"
+        echo ""
+        echo "=========================================="
+        echo "✅ 环境验证完成"
+        echo "=========================================="
 
-    - name: Configure QEMU for Windows ARM64
+    # ============ 4. 配置 QEMU ============
+    - name: ⚙️ Configure QEMU
       run: |
-        # 检查 clang 是否可用，否则使用 gcc
-        if command -v clang &> /dev/null; then
-          CC=clang CXX=clang++ \
-          ./configure --target-list=ia64-softmmu \
-                      --enable-gtk \
-                      --enable-sdl \
-                      --disable-docs \
-                      --disable-werror
+        echo "=========================================="
+        echo "⚙️ 开始配置 QEMU"
+        echo "=========================================="
+        echo ""
+        echo "📌 配置参数:"
+        echo "  - 目标: ia64-softmmu"
+        echo "  - 图形: GTK + SDL"
+        echo "  - 文档: 已禁用"
+        echo ""
+        echo "📌 正在运行 ./configure ..."
+        echo ""
+        
+        ./configure --target-list=ia64-softmmu \
+                    --enable-gtk \
+                    --enable-sdl \
+                    --disable-docs \
+                    --disable-werror 2>&1 | tee configure.log
+        
+        if [ $? -eq 0 ]; then
+          echo ""
+          echo "✅ 配置成功"
         else
-          ./configure --target-list=ia64-softmmu \
-                      --enable-gtk \
-                      --enable-sdl \
-                      --disable-docs \
-                      --disable-werror
+          echo ""
+          echo "❌ 配置失败，查看日志:"
+          cat configure.log
+          exit 1
         fi
+        echo ""
+        echo "=========================================="
 
-    - name: Build qemu-system-ia64.exe (skip firmware)
+    # ============ 5. 编译主程序 ============
+    - name: 🛠️ Build qemu-system-ia64.exe
       run: |
-        ninja -C build qemu-system-ia64
+        echo "=========================================="
+        echo "🛠️ 开始编译 qemu-system-ia64.exe"
+        echo "=========================================="
+        echo ""
+        echo "📌 编译目标: qemu-system-ia64"
+        echo "📌 跳过: 固件 (ia64-firmware.bin)"
+        echo ""
 
-    - name: Upload qemu-system-ia64.exe
+        # 获取 CPU 核心数
+        CORES=$(nproc 2>/dev/null || echo 4)
+        echo "📌 并行任务数: $CORES"
+        echo ""
+
+        echo "📌 开始编译..."
+        echo ""
+
+        # 编译并显示进度
+        ninja -C build -j$CORES qemu-system-ia64 2>&1 | tee build.log
+        
+        if [ $? -eq 0 ]; then
+          echo ""
+          echo "✅ 编译成功"
+        else
+          echo ""
+          echo "❌ 编译失败，查看日志:"
+          tail -100 build.log
+          exit 1
+        fi
+        
+        echo ""
+        echo "📌 编译产物:"
+        ls -la build/qemu-system-ia64* 2>/dev/null || echo "⚠️  未找到产物"
+        echo ""
+        echo "=========================================="
+
+    # ============ 6. 提取产物信息 ============
+    - name: 📦 Prepare artifact
+      id: artifact
+      run: |
+        echo "=========================================="
+        echo "📦 准备产物"
+        echo "=========================================="
+        echo ""
+        
+        # 获取版本信息
+        VERSION=$(cat VERSION 2>/dev/null | tr -d '\n')
+        SHORT_HASH=$(git rev-parse --short HEAD 2>/dev/null)
+        echo "📌 版本: $VERSION"
+        echo "📌 提交: $SHORT_HASH"
+        echo "version=v${VERSION}-${SHORT_HASH}" >> $GITHUB_OUTPUT
+        
+        echo ""
+        echo "📌 产物列表:"
+        find build -maxdepth 1 -name "qemu-system-ia64*" -exec ls -la {} \;
+        echo ""
+        echo "=========================================="
+
+    # ============ 7. 上传产物 ============
+    - name: ⬆️ Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: qemu-system-ia64-windows-arm64
+        name: qemu-system-ia64-windows-arm64-${{ steps.artifact.outputs.version }}
         path: |
           build/qemu-system-ia64.exe
           build/qemu-system-ia64
+          configure.log
+          build.log
         if-no-files-found: error
+        compression-level: 9
+
+    # ============ 8. 失败时上传日志 ============
+    - name: 📋 Upload logs on failure
+      if: ${{ failure() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-logs
+        path: |
+          build/
+          configure.log
+          build.log
+        compression-level: 9
